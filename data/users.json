@@ -1,0 +1,227 @@
+[
+  {
+    "id": 1,
+    "email": "admin@example.com",
+    "password": "changeme123",
+    "name": "Admin",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {},
+    "createdAt": "2025-12-12T09:49:36.232177"
+  },
+  {
+    "id": 2,
+    "email": "ianmabruk7@gmail.com",
+    "password": "12345",
+    "name": "ian",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T09:53:37.203874"
+  },
+  {
+    "id": 3,
+    "email": "ian@gmail.com",
+    "password": "123",
+    "name": "det",
+    "role": "cashier",
+    "plan": "basic",
+    "price": 900,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T09:55:40.643401"
+  },
+  {
+    "id": 4,
+    "email": "dfgh@gmail.com",
+    "password": "12455",
+    "name": "trfghj",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T10:11:44.983753",
+    "packageType": "ultra"
+  },
+  {
+    "id": 5,
+    "email": "aberidan@yahoo.com",
+    "password": "1234",
+    "name": "ian mabruk",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T10:50:24.906827",
+    "packageType": "ultra"
+  },
+  {
+    "id": 6,
+    "email": "ianmabruk@gmail.com",
+    "password": "12345",
+    "name": "ian mabruk",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T10:54:45.710450",
+    "packageType": "ultra"
+  },
+  {
+    "id": 7,
+    "email": "duo@gmail.com",
+    "password": "1234",
+    "name": "ian mabruk",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T11:03:10.183142",
+    "packageType": "ultra"
+  },
+  {
+    "id": 8,
+    "email": "one@gmail.com",
+    "password": "222222",
+    "name": "ian",
+    "role": "cashier",
+    "plan": "basic",
+    "price": 900,
+    "active": true,
+    "permissions": {
+      "viewSales": true,
+      "viewInventory": true,
+      "viewExpenses": false,
+      "manageProducts": false
+    },
+    "createdAt": "2025-12-12T11:04:19.230687"
+  },
+  {
+    "id": 9,
+    "email": "t@gmail.com",
+    "password": "1234",
+    "name": "ian ",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T11:16:01.986244",
+    "packageType": "ultra"
+  },
+  {
+    "id": 10,
+    "email": "g@gmail.com",
+    "password": "12345",
+    "name": "ian",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T11:29:53.594476",
+    "packageType": "ultra"
+  },
+  {
+    "id": 11,
+    "email": "d@gmail.com",
+    "password": "12345",
+    "name": "ian",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T11:35:27.027622",
+    "packageType": "ultra"
+  },
+  {
+    "id": 12,
+    "email": "ianmabruk3@gmail.com",
+    "password": "1234",
+    "name": "ian",
+    "role": "admin",
+    "plan": "ultra",
+    "price": 1600,
+    "active": true,
+    "permissions": {
+      "manageProducts": false,
+      "viewExpenses": false,
+      "viewInventory": true,
+      "viewSales": true
+    },
+    "createdAt": "2025-12-12T13:55:57.021312",
+    "packageType": "ultra"
+  },
+  {
+    "id": 13,
+    "email": "pazurifish@gmail.com",
+    "password": "123",
+    "name": "ian",
+    "role": "cashier",
+    "plan": null,
+    "price": null,
+    "active": false,
+    "locked": false,
+    "permissions": {
+      "viewSales": true,
+      "viewInventory": true,
+      "viewExpenses": false,
+      "manageProducts": false
+    },
+    "createdAt": "2025-12-12T23:06:45.295953"
+  }
+]

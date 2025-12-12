@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1,
+    "userId": 1,
+    "userEmail": "asdf@gmail.com",
+    "userName": "sdfg",
+    "subject": "Payment Reminder - Subscription Upgrade",
+    "message": "Dear sdfg,\n\nThis is a friendly reminder about your pending subscription payment.\n\nPlease complete your payment to continue enjoying our services.\n\nThank you!",
+    "status": "sent",
+    "sentAt": "2025-12-11T11:38:42.519554"
+  },
+  {
+    "id": 2,
+    "userId": 9,
+    "userEmail": "ianmabruk3@gmail.com",
+    "userName": "ian mabruk",
+    "subject": "Payment Reminder - Subscription Upgrade",
+    "message": "Dear ian mabruk,\n\nThis is a friendly reminder about your pending subscription payment.\n\nPlease complete your payment to continue enjoying our services.\n\nThank you!",
+    "status": "sent",
+    "sentAt": "2025-12-11T11:38:50.347979"
+  }
+]

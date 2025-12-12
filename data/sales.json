@@ -1,0 +1,87 @@
+[
+  {
+    "id": 1,
+    "items": [
+      {
+        "productId": 2,
+        "quantity": 1,
+        "price": 450
+      },
+      {
+        "productId": 1,
+        "quantity": 8,
+        "price": 500
+      }
+    ],
+    "total": 4450,
+    "cogs": 3077,
+    "profit": 1373,
+    "paymentMethod": "cash",
+    "cashierId": 3,
+    "createdAt": "2025-12-12T09:55:53.954780"
+  },
+  {
+    "id": 2,
+    "items": [
+      {
+        "productId": 2,
+        "quantity": 10,
+        "price": 450
+      }
+    ],
+    "total": 4500,
+    "cogs": 6770,
+    "profit": -2270,
+    "paymentMethod": "cash",
+    "cashierId": 3,
+    "createdAt": "2025-12-12T09:56:07.079400"
+  },
+  {
+    "id": 3,
+    "items": [
+      {
+        "productId": 1,
+        "quantity": 3,
+        "price": 500
+      }
+    ],
+    "total": 1500,
+    "cogs": 900,
+    "profit": 600,
+    "paymentMethod": "cash",
+    "cashierId": 3,
+    "createdAt": "2025-12-12T10:08:46.056660"
+  },
+  {
+    "id": 4,
+    "items": [
+      {
+        "productId": 1,
+        "quantity": 4,
+        "price": 400
+      }
+    ],
+    "total": 1600,
+    "cogs": 1520,
+    "profit": 80,
+    "paymentMethod": "cash",
+    "cashierId": 9,
+    "createdAt": "2025-12-12T11:20:16.583251"
+  },
+  {
+    "id": 5,
+    "items": [
+      {
+        "productId": 1,
+        "quantity": 6,
+        "price": 400
+      }
+    ],
+    "total": 2400,
+    "cogs": 2280,
+    "profit": 120,
+    "paymentMethod": "cash",
+    "cashierId": 9,
+    "createdAt": "2025-12-12T11:20:26.868161"
+  }
+]
