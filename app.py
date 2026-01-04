@@ -5,9 +5,7 @@ import json
 import os
 from datetime import datetime, timedelta
 from functools import wraps
-import threading
 import time
-from main_admin_endpoints import create_main_admin_routes
 
 app = Flask(__name__)
 
@@ -16,64 +14,42 @@ CORS(app, origins="*")
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
 app.config['JSON_SORT_KEYS'] = False
 
-# Data directory setup
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# File lock for safe concurrent access
-file_locks = {}
-data_files = [
-    'users.json', 'products.json', 'sales.json', 'expenses.json', 
-    'settings.json', 'credit_requests.json', 'reminders.json',
-    'service_fees.json', 'discounts.json', 'batches.json',
-    'production.json', 'price_history.json', 'time_entries.json',
-    'categories.json', 'payments.json', 'emails.json'
-]
-
-# Initialize file locks and data files
-for filename in data_files:
-    file_locks[filename] = threading.Lock()
-    file_path = os.path.join(DATA_DIR, filename)
-    if not os.path.exists(file_path):
-        with open(file_path, 'w') as f:
-            json.dump([], f, indent=2)
-
-# Add activities.json to track user activities
-if 'activities.json' not in data_files:
-    data_files.append('activities.json')
-    file_locks['activities.json'] = threading.Lock()
-    activities_path = os.path.join(DATA_DIR, 'activities.json')
-    if not os.path.exists(activities_path):
-        with open(activities_path, 'w') as f:
-            json.dump([], f, indent=2)
+# Data storage - Use in-memory for serverless deployment
+DATA_STORE = {
+    'users': [],
+    'products': [],
+    'sales': [],
+    'expenses': [],
+    'settings': [{
+        'businessName': 'My Business',
+        'currency': 'KES',
+        'taxRate': 16,
+        'receiptFooter': 'Thank you for your business!'
+    }],
+    'credit_requests': [],
+    'reminders': [],
+    'service_fees': [],
+    'discounts': [],
+    'batches': [],
+    'production': [],
+    'price_history': [],
+    'time_entries': [],
+    'categories': [],
+    'payments': [],
+    'emails': [],
+    'activities': []
+}
 
 def safe_load_json(filename):
-    """Safely load JSON data with proper error handling"""
-    path = os.path.join(DATA_DIR, filename)
-    try:
-        with file_locks[filename]:
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    return json.load(f)
-            return []
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"Error loading {filename}: {e}")
-        return []
+    """Load data from in-memory store"""
+    key = filename.replace('.json', '')
+    return DATA_STORE.get(key, [])
 
 def safe_save_json(filename, data):
-    """Safely save JSON data with proper error handling"""
-    path = os.path.join(DATA_DIR, filename)
-    try:
-        with file_locks[filename]:
-            # Write to temporary file first, then rename (atomic operation)
-            temp_path = path + '.tmp'
-            with open(temp_path, 'w') as f:
-                json.dump(data, f, indent=2, default=str)
-            os.rename(temp_path, path)
-            return True
-    except (IOError, OSError) as e:
-        print(f"Error saving {filename}: {e}")
-        return False
+    """Save data to in-memory store"""
+    key = filename.replace('.json', '')
+    DATA_STORE[key] = data
+    return True
 
 def token_required(f):
     """Enhanced token validation decorator with comprehensive error handling"""
@@ -1498,19 +1474,21 @@ def main_admin_get_payments():
         print(f"Main admin get payments error: {e}")
         return jsonify({'error': f'Operation failed: {str(e)}'}), 500
 
-@app.route('/api/main-admin/users/<int:user_id>/lock', methods=['POST'])
+@app.route('/api/main-admin/users/<int:user_id>/plan', methods=['POST'])
 @token_required
-def main_admin_lock_user(user_id):
-    """Lock/unlock user by main admin"""
+def main_admin_change_plan(user_id):
+    """Change user plan by main admin"""
     try:
         if request.user.get('type') not in ['main_admin', 'owner']:
             return jsonify({'error': 'Main admin access required'}), 403
         
         data = request.get_json()
-        if not data or 'locked' not in data:
-            return jsonify({'error': 'Locked status is required'}), 400
+        if not data or 'plan' not in data:
+            return jsonify({'error': 'Plan is required'}), 400
         
-        locked = bool(data['locked'])
+        plan = data['plan']
+        if plan not in ['trial', 'basic', 'ultra']:
+            return jsonify({'error': 'Invalid plan'}), 400
         
         users = safe_load_json('users.json')
         user = next((u for u in users if u['id'] == user_id), None)
@@ -1518,20 +1496,53 @@ def main_admin_lock_user(user_id):
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
-        user['locked'] = locked
-        user['active'] = not locked
+        user['plan'] = plan
+        user['price'] = 2400 if plan == 'ultra' else (1000 if plan == 'basic' else 0)
         
         if not safe_save_json('users.json', users):
-            return jsonify({'error': 'Failed to update user status'}), 500
+            return jsonify({'error': 'Failed to update user plan'}), 500
         
         return jsonify({
-            'message': f'User {"locked" if locked else "unlocked"} successfully',
+            'message': f'User plan changed to {plan} successfully',
             'user': {k: v for k, v in user.items() if k != 'password'}
         })
         
     except Exception as e:
-        print(f"Owner lock user error: {e}")
+        print(f"Change plan error: {e}")
         return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+
+@app.route('/api/main-admin/system/clear-data', methods=['POST'])
+@token_required
+def main_admin_clear_data():
+    """Clear system data (main admin only)"""
+    try:
+        if request.user.get('type') not in ['main_admin', 'owner']:
+            return jsonify({'error': 'Main admin access required'}), 403
+        
+        data = request.get_json()
+        clear_type = data.get('type', 'all')
+        
+        if clear_type == 'sales' or clear_type == 'all':
+            if not safe_save_json('sales.json', []):
+                return jsonify({'error': 'Failed to clear sales'}), 500
+        
+        if clear_type == 'expenses' or clear_type == 'all':
+            if not safe_save_json('expenses.json', []):
+                return jsonify({'error': 'Failed to clear expenses'}), 500
+        
+        if clear_type == 'products' or clear_type == 'all':
+            if not safe_save_json('products.json', []):
+                return jsonify({'error': 'Failed to clear products'}), 500
+        
+        if clear_type == 'users' or clear_type == 'all':
+            if not safe_save_json('users.json', []):
+                return jsonify({'error': 'Failed to clear users'}), 500
+        
+        return jsonify({'message': f'{clear_type.capitalize()} data cleared successfully'})
+        
+    except Exception as e:
+        print(f"Clear data error: {e}")
+        return jsonify({'error': f'Failed to clear data: {str(e)}'}), 500
 
 @app.route('/api/main-admin/system/reset', methods=['POST'])
 @token_required
@@ -1836,16 +1847,12 @@ def internal_error(error):
 # MAIN APPLICATION ENTRY POINT
 # ============================================================================
 
-# Create main admin routes
-# create_main_admin_routes(app, safe_load_json, safe_save_json, token_required)
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5002))
     debug_mode = os.environ.get('FLASK_ENV') == 'development'
     
     print(f"Starting POS Backend API v2.0 on port {port}")
     print(f"Debug mode: {debug_mode}")
-    print(f"Data directory: {DATA_DIR}")
     print("Available endpoints:")
     print("  - Authentication: /api/auth/*")
     print("  - Users: /api/users")
