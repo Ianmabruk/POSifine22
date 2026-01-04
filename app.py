@@ -15,7 +15,7 @@ products = []
 sales = []
 expenses = []
 activities = []
-settings = [{'screenLockPassword': 'admin123', 'businessName': 'My Business'}]
+settings = [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
 
 def token_required(f):
     @wraps(f)
@@ -53,11 +53,15 @@ def signup():
     if any(u['email'] == email for u in users):
         return jsonify({'error': 'User exists'}), 400
     
-    # Basic package restriction - only allow signup, redirect to cashier
-    if plan == 'basic':
-        role = 'cashier'
+    # Determine role based on plan and existing users
+    if len(users) == 0:  # First user is always admin
+        role = 'admin'
+    elif plan == 'ultra':
+        role = 'admin'  # Ultra package gets admin access
+    elif plan == 'basic':
+        role = 'cashier'  # Basic package only gets cashier access
     else:
-        role = 'admin' if len(users) == 0 or plan in ['ultra'] else 'cashier'
+        role = 'cashier'  # Default to cashier
     
     user = {
         'id': len(users) + 1,
@@ -293,9 +297,13 @@ def handle_users():
     if request.method == 'GET':
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
     
-    # Only ultra package admins can create users
+    # Get current user
     current_user = next((u for u in users if u['id'] == request.user.get('id')), None)
-    if not current_user or current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
+    if not current_user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    # Allow ultra package users (admin role) to create cashier users
+    if current_user.get('plan') != 'ultra' or current_user.get('role') != 'admin':
         return jsonify({'error': 'Ultra package admin access required'}), 403
     
     data = request.get_json()
