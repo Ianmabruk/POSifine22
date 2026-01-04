@@ -1768,9 +1768,25 @@ def clear_data():
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
+    """Health check endpoint with database test"""
+    try:
+        # Test database connection
+        from database import get_db_connection
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+            cur.execute('SELECT 1')
+            cur.close()
+            conn.close()
+            db_status = 'connected'
+        else:
+            db_status = 'disconnected'
+    except Exception as e:
+        db_status = f'error: {str(e)}'
+    
     return jsonify({
         'status': 'healthy',
+        'database': db_status,
         'timestamp': datetime.now().isoformat(),
         'version': '2.0.0'
     })
