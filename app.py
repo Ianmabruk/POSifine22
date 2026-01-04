@@ -131,10 +131,35 @@ def handle_products():
         'id': len(products) + 1,
         'name': data.get('name', ''),
         'price': float(data.get('price', 0)),
-        'quantity': int(data.get('quantity', 0))
+        'quantity': int(data.get('quantity', 0)),
+        'image': data.get('image', ''),
+        'category': data.get('category', 'general'),
+        'createdAt': datetime.now().isoformat()
     }
     products.append(product)
     return jsonify(product)
+
+@app.route('/api/products/<int:product_id>', methods=['PUT', 'DELETE'])
+@token_required
+def handle_product(product_id):
+    product = next((p for p in products if p['id'] == product_id), None)
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        product.update({
+            'name': data.get('name', product['name']),
+            'price': float(data.get('price', product['price'])),
+            'quantity': int(data.get('quantity', product['quantity'])),
+            'image': data.get('image', product.get('image', '')),
+            'category': data.get('category', product.get('category', 'general'))
+        })
+        return jsonify(product)
+    
+    if request.method == 'DELETE':
+        products.remove(product)
+        return '', 204
 
 @app.route('/api/sales', methods=['GET', 'POST'])
 @token_required
@@ -239,6 +264,44 @@ def handle_settings():
         settings.append(data)
     
     return jsonify(settings[0])
+
+@app.route('/api/upload-image', methods=['POST'])
+@token_required
+def upload_image():
+    data = request.get_json()
+    image_data = data.get('image', '')
+    
+    # For demo purposes, just return the base64 data
+    # In production, you'd upload to cloud storage
+    return jsonify({
+        'url': image_data,
+        'success': True
+    })
+
+@app.route('/api/users', methods=['GET', 'POST'])
+@token_required
+def handle_users():
+    if request.method == 'GET':
+        return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
+    
+    # Only admins can create users
+    if request.user.get('role') != 'admin':
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    data = request.get_json()
+    user = {
+        'id': len(users) + 1,
+        'email': data.get('email', '').lower(),
+        'password': data.get('password', 'changeme123'),
+        'name': data.get('name', ''),
+        'role': 'cashier',
+        'plan': 'basic',
+        'active': True,
+        'locked': False,
+        'pin': data.get('pin', '')
+    }
+    users.append(user)
+    return jsonify({k: v for k, v in user.items() if k != 'password'})
 
 if __name__ == '__main__':
     app.run(debug=True)
