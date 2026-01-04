@@ -14,6 +14,8 @@ users = []
 products = []
 sales = []
 expenses = []
+activities = []
+settings = [{'screenLockPassword': 'admin123', 'businessName': 'My Business'}]
 
 def token_required(f):
     @wraps(f)
@@ -62,6 +64,17 @@ def signup():
     }
     users.append(user)
     
+    # Log activity
+    activities.append({
+        'id': len(activities) + 1,
+        'type': 'signup',
+        'userId': user['id'],
+        'email': email,
+        'name': name,
+        'plan': user['plan'],
+        'timestamp': datetime.now().isoformat()
+    })
+    
     token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role']}, 
                       app.config['SECRET_KEY'], algorithm='HS256')
     
@@ -79,6 +92,17 @@ def login():
     user = next((u for u in users if u['email'] == email and u['password'] == password), None)
     if not user:
         return jsonify({'error': 'Invalid credentials'}), 401
+    
+    # Log activity
+    activities.append({
+        'id': len(activities) + 1,
+        'type': 'login',
+        'userId': user['id'],
+        'email': user['email'],
+        'name': user['name'],
+        'plan': user.get('plan', 'trial'),
+        'timestamp': datetime.now().isoformat()
+    })
     
     token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role']}, 
                       app.config['SECRET_KEY'], algorithm='HS256')
@@ -170,6 +194,51 @@ def main_admin_login():
         })
     
     return jsonify({'error': 'Access denied'}), 401
+
+@app.route('/api/main-admin/users')
+@token_required
+def main_admin_users():
+    if request.user.get('type') != 'main_admin':
+        return jsonify({'error': 'Access denied'}), 403
+    return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
+
+@app.route('/api/main-admin/activities')
+@token_required
+def main_admin_activities():
+    if request.user.get('type') != 'main_admin':
+        return jsonify({'error': 'Access denied'}), 403
+    return jsonify(activities)
+
+@app.route('/api/main-admin/stats')
+@token_required
+def main_admin_stats():
+    if request.user.get('type') != 'main_admin':
+        return jsonify({'error': 'Access denied'}), 403
+    
+    total_users = len(users)
+    active_users = len([u for u in users if u.get('active', True)])
+    total_sales = sum(s.get('total', 0) for s in sales)
+    
+    return jsonify({
+        'totalUsers': total_users,
+        'activeUsers': active_users,
+        'totalSales': total_sales,
+        'totalTransactions': len(sales)
+    })
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+@token_required
+def handle_settings():
+    if request.method == 'GET':
+        return jsonify(settings[0] if settings else {})
+    
+    data = request.get_json()
+    if settings:
+        settings[0].update(data)
+    else:
+        settings.append(data)
+    
+    return jsonify(settings[0])
 
 if __name__ == '__main__':
     app.run(debug=True)
