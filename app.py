@@ -11,12 +11,7 @@ from main_admin_endpoints import create_main_admin_routes
 
 app = Flask(__name__)
 
-# Enhanced CORS configuration for both localhost and Railway deployment
-CORS(app, 
-     resources={r"/api/*": {"origins": ["*"]}},
-     methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-     supports_credentials=True)
+CORS(app, origins="*")
 
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
 app.config['JSON_SORT_KEYS'] = False
