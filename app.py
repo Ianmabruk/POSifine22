@@ -9,7 +9,7 @@ app = Flask(__name__)
 CORS(app)
 app.config['SECRET_KEY'] = 'simple-secret-key'
 
-# Global storage
+# Global storage - shared across all users
 users = []
 products = []
 sales = []
@@ -45,6 +45,7 @@ def signup():
     email = data.get('email', '').lower()
     password = data.get('password', '')
     name = data.get('name', '')
+    plan = data.get('plan', 'trial')
     
     if not email or not password or not name:
         return jsonify({'error': 'Missing fields'}), 400
@@ -52,13 +53,19 @@ def signup():
     if any(u['email'] == email for u in users):
         return jsonify({'error': 'User exists'}), 400
     
+    # Basic package restriction - only allow signup, redirect to cashier
+    if plan == 'basic':
+        role = 'cashier'
+    else:
+        role = 'admin' if len(users) == 0 or plan in ['ultra'] else 'cashier'
+    
     user = {
         'id': len(users) + 1,
         'email': email,
         'password': password,
         'name': name,
-        'role': 'admin' if len(users) == 0 else 'cashier',
-        'plan': data.get('plan', 'trial'),
+        'role': role,
+        'plan': plan,
         'active': True,
         'locked': False
     }
@@ -124,6 +131,7 @@ def me():
 @token_required
 def handle_products():
     if request.method == 'GET':
+        # Return ALL products for everyone - shared data
         return jsonify(products)
     
     data = request.get_json()
@@ -134,7 +142,8 @@ def handle_products():
         'quantity': int(data.get('quantity', 0)),
         'image': data.get('image', ''),
         'category': data.get('category', 'general'),
-        'createdAt': datetime.now().isoformat()
+        'createdAt': datetime.now().isoformat(),
+        'createdBy': request.user.get('id')  # Track who created it
     }
     products.append(product)
     return jsonify(product)
@@ -284,9 +293,10 @@ def handle_users():
     if request.method == 'GET':
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
     
-    # Only admins can create users
-    if request.user.get('role') != 'admin':
-        return jsonify({'error': 'Admin access required'}), 403
+    # Only ultra package admins can create users
+    current_user = next((u for u in users if u['id'] == request.user.get('id')), None)
+    if not current_user or current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
+        return jsonify({'error': 'Ultra package admin access required'}), 403
     
     data = request.get_json()
     user = {
@@ -295,12 +305,26 @@ def handle_users():
         'password': data.get('password', 'changeme123'),
         'name': data.get('name', ''),
         'role': 'cashier',
-        'plan': 'basic',
+        'plan': 'ultra',  # Inherit ultra plan from admin
         'active': True,
         'locked': False,
-        'pin': data.get('pin', '')
+        'pin': data.get('pin', ''),
+        'createdBy': request.user.get('id')  # Track who created this user
     }
     users.append(user)
+    
+    # Log activity
+    activities.append({
+        'id': len(activities) + 1,
+        'type': 'user_created',
+        'userId': user['id'],
+        'email': user['email'],
+        'name': user['name'],
+        'plan': user['plan'],
+        'createdBy': request.user.get('id'),
+        'timestamp': datetime.now().isoformat()
+    })
+    
     return jsonify({k: v for k, v in user.items() if k != 'password'})
 
 if __name__ == '__main__':
