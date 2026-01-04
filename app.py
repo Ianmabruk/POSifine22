@@ -26,6 +26,22 @@ def token_required(f):
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
             request.user = data
+            
+            # For main admin, skip user lookup
+            if data.get('type') == 'main_admin':
+                return f(*args, **kwargs)
+            
+            # Find user in database to get current info
+            user = next((u for u in users if u['id'] == data.get('id')), None)
+            if user:
+                # Update request.user with current user data
+                request.user.update({
+                    'role': user['role'],
+                    'plan': user['plan'],
+                    'active': user.get('active', True),
+                    'locked': user.get('locked', False)
+                })
+            
         except:
             return jsonify({'error': 'Invalid token'}), 401
         return f(*args, **kwargs)
@@ -161,18 +177,19 @@ def handle_product(product_id):
     
     if request.method == 'PUT':
         data = request.get_json()
-        product.update({
-            'name': data.get('name', product['name']),
-            'price': float(data.get('price', product['price'])),
-            'quantity': int(data.get('quantity', product['quantity'])),
-            'image': data.get('image', product.get('image', '')),
-            'category': data.get('category', product.get('category', 'general'))
-        })
+        # Update product fields
+        product['name'] = data.get('name', product['name'])
+        product['price'] = float(data.get('price', product['price']))
+        product['quantity'] = int(data.get('quantity', product['quantity']))
+        product['image'] = data.get('image', product.get('image', ''))
+        product['category'] = data.get('category', product.get('category', 'general'))
+        product['updatedAt'] = datetime.now().isoformat()
+        
         return jsonify(product)
     
     if request.method == 'DELETE':
         products.remove(product)
-        return '', 204
+        return jsonify({'message': 'Product deleted successfully'}), 200
 
 @app.route('/api/sales', methods=['GET', 'POST'])
 @token_required
