@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta
 from functools import wraps
 import time
+from database import init_database, db_select, db_insert, db_update, db_delete
 
 app = Flask(__name__)
 
@@ -14,42 +15,8 @@ CORS(app, origins="*")
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
 app.config['JSON_SORT_KEYS'] = False
 
-# Data storage - Use in-memory for serverless deployment
-DATA_STORE = {
-    'users': [],
-    'products': [],
-    'sales': [],
-    'expenses': [],
-    'settings': [{
-        'businessName': 'My Business',
-        'currency': 'KES',
-        'taxRate': 16,
-        'receiptFooter': 'Thank you for your business!'
-    }],
-    'credit_requests': [],
-    'reminders': [],
-    'service_fees': [],
-    'discounts': [],
-    'batches': [],
-    'production': [],
-    'price_history': [],
-    'time_entries': [],
-    'categories': [],
-    'payments': [],
-    'emails': [],
-    'activities': []
-}
-
-def safe_load_json(filename):
-    """Load data from in-memory store"""
-    key = filename.replace('.json', '')
-    return DATA_STORE.get(key, [])
-
-def safe_save_json(filename, data):
-    """Save data to in-memory store"""
-    key = filename.replace('.json', '')
-    DATA_STORE[key] = data
-    return True
+# Initialize database
+init_database()
 
 def token_required(f):
     """Enhanced token validation decorator with comprehensive error handling"""
@@ -80,11 +47,11 @@ def token_required(f):
                 return f(*args, **kwargs)
             
             # Ensure user exists and is active
-            users = safe_load_json('users.json')
-            user = next((u for u in users if u['id'] == data.get('id')), None)
-            
-            if not user:
+            users = db_select('users', 'id = %s', [data.get('id')])
+            if not users:
                 return jsonify({'error': 'User not found'}), 401
+            
+            user = users[0]
             
             if not user.get('active', False):
                 return jsonify({'error': 'Account is not active'}), 403
@@ -132,18 +99,17 @@ def signup():
         if len(password) < 4:
             return jsonify({'error': 'Password must be at least 4 characters'}), 400
         
-        users = safe_load_json('users.json')
-        
         # Check if user already exists
-        if any(u['email'] == email for u in users):
+        existing_users = db_select('users', 'email = %s', [email])
+        if existing_users:
             return jsonify({'error': 'User already exists'}), 400
         
-        # First user becomes admin, others become cashiers
-        is_first_user = len(users) == 0
-        plan = data.get('plan', 'trial')  # Default to trial instead of basic
+        # Check if this is the first user
+        all_users = db_select('users')
+        is_first_user = len(all_users) == 0
+        plan = data.get('plan', 'trial')
         
-        user = {
-            'id': len(users) + 1,
+        user_data = {
             'email': email,
             'password': password,
             'name': name,
@@ -152,36 +118,30 @@ def signup():
             'price': 2400 if plan == 'ultra' else (1000 if plan == 'basic' else 0),
             'active': True,
             'locked': False,
-            'pin': None,
-            'permissions': {
+            'permissions': json.dumps({
                 'viewSales': True,
                 'viewInventory': True,
                 'viewExpenses': plan == 'ultra',
                 'manageProducts': plan == 'ultra'
-            } if plan == 'basic' else {},
-            'createdAt': datetime.now().isoformat(),
-            'trialExpiry': (datetime.now() + timedelta(days=30)).isoformat() if plan == 'trial' else None
+            } if plan == 'basic' else {}),
+            'trial_expiry': (datetime.now() + timedelta(days=30)) if plan == 'trial' else None
         }
         
-        users.append(user)
-        if not safe_save_json('users.json', users):
+        user = db_insert('users', user_data)
+        if not user:
             return jsonify({'error': 'Failed to save user data'}), 500
         
-        # Log signup activity for main admin
-        activities = safe_load_json('activities.json')
-        activity = {
-            'id': len(activities) + 1,
+        # Log signup activity
+        activity_data = {
             'type': 'signup',
-            'userId': user['id'],
+            'user_id': user['id'],
             'email': email,
             'name': name,
             'plan': plan,
-            'userAgent': request.headers.get('User-Agent', 'Unknown'),
-            'ipAddress': request.remote_addr,
-            'timestamp': datetime.now().isoformat()
+            'user_agent': request.headers.get('User-Agent', 'Unknown'),
+            'ip_address': request.remote_addr
         }
-        activities.append(activity)
-        safe_save_json('activities.json', activities)
+        db_insert('activities', activity_data)
         
         # Generate token
         token_data = {
@@ -190,6 +150,9 @@ def signup():
             'role': user['role']
         }
         token = jwt.encode(token_data, app.config['SECRET_KEY'], algorithm='HS256')
+        
+        # Convert permissions back to dict for response
+        user['permissions'] = json.loads(user.get('permissions', '{}'))
         
         return jsonify({
             'token': token,
@@ -217,11 +180,11 @@ def login():
         if not password:
             return jsonify({'error': 'Password is required'}), 400
         
-        users = safe_load_json('users.json')
-        user = next((u for u in users if u['email'] == email and u['password'] == password), None)
-        
-        if not user:
+        users = db_select('users', 'email = %s AND password = %s', [email, password])
+        if not users:
             return jsonify({'error': 'Invalid credentials'}), 401
+        
+        user = users[0]
         
         # Check account status
         if user.get('locked', False):
@@ -230,21 +193,17 @@ def login():
         if not user.get('active', False):
             return jsonify({'error': 'Account is not active'}), 403
         
-        # Log login activity for main admin
-        activities = safe_load_json('activities.json')
-        activity = {
-            'id': len(activities) + 1,
+        # Log login activity
+        activity_data = {
             'type': 'login',
-            'userId': user['id'],
+            'user_id': user['id'],
             'email': user['email'],
             'name': user['name'],
             'plan': user.get('plan', 'trial'),
-            'userAgent': request.headers.get('User-Agent', 'Unknown'),
-            'ipAddress': request.remote_addr,
-            'timestamp': datetime.now().isoformat()
+            'user_agent': request.headers.get('User-Agent', 'Unknown'),
+            'ip_address': request.remote_addr
         }
-        activities.append(activity)
-        safe_save_json('activities.json', activities)
+        db_insert('activities', activity_data)
         
         # Generate token with user information
         token_data = {
@@ -253,6 +212,9 @@ def login():
             'role': user['role']
         }
         token = jwt.encode(token_data, app.config['SECRET_KEY'], algorithm='HS256')
+        
+        # Convert permissions back to dict for response
+        user['permissions'] = json.loads(user.get('permissions', '{}'))
         
         return jsonify({
             'token': token,
@@ -323,10 +285,12 @@ def pin_login():
 def get_current_user():
     """Get current user information"""
     try:
-        users = safe_load_json('users.json')
-        user = next((u for u in users if u['id'] == request.user.get('id')), None)
+        users = db_select('users', 'id = %s', [request.user.get('id')])
         
-        if user:
+        if users:
+            user = users[0]
+            # Convert permissions back to dict for response
+            user['permissions'] = json.loads(user.get('permissions', '{}'))
             return jsonify({k: v for k, v in user.items() if k != 'password'})
         else:
             return jsonify({'error': 'User not found'}), 404
