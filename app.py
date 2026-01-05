@@ -197,10 +197,16 @@ def handle_products():
     # If it's a composite product, validate recipe ingredients exist
     if product['recipe']:
         for ingredient in product['recipe']:
-            ingredient_product = next((p for p in products if p['id'] == ingredient.get('productId')), None)
+            # If ingredient specifies a productId, validate it exists. Skip custom/name-only ingredients.
+            pid = ingredient.get('productId')
+            if pid is None:
+                continue
+            ingredient_product = next((p for p in products if p['id'] == pid), None)
             if not ingredient_product:
-                return jsonify({'error': f'Ingredient product not found: {ingredient.get("productId")}'}), 400
+                return jsonify({'error': f'Ingredient product not found: {pid}'}), 400
     
+    # Log product creation for diagnostics
+    print(f"[PRODUCT CREATE] by user={request.user} payload={product}")
     products.append(product)
     save_json('products.json', products)
     return jsonify(product)
@@ -221,10 +227,14 @@ def handle_product(product_id):
         product['image'] = data.get('image', product.get('image', ''))
         product['category'] = data.get('category', product.get('category', 'general'))
         product['updatedAt'] = datetime.now().isoformat()
+        # Log product update for diagnostics
+        print(f"[PRODUCT UPDATE] by user={request.user} product_id={product_id} updates={data}")
         save_json('products.json', products)
         return jsonify(product)
     
     if request.method == 'DELETE':
+        # Log product deletion for diagnostics
+        print(f"[PRODUCT DELETE] by user={request.user} product_id={product_id}")
         products.remove(product)
         save_json('products.json', products)
         return jsonify({'message': 'Product deleted successfully'}), 200
@@ -240,8 +250,13 @@ def product_max_producible(product_id):
     max_units = float('inf')
     limiting = None
     for ingredient in product['recipe']:
-        raw = next((p for p in products if p['id'] == ingredient.get('productId')), None)
+        # Skip ingredients that are custom/name-only (no productId)
+        pid = ingredient.get('productId')
+        if pid is None:
+            continue
+        raw = next((p for p in products if p['id'] == pid), None)
         if not raw:
+            # If a referenced raw product is missing, treat as zero producible
             return jsonify({'maxUnits': 0, 'limitingIngredient': None})
         available = raw.get('quantity', 0)
         needed = ingredient.get('quantity', 0)
@@ -251,6 +266,35 @@ def product_max_producible(product_id):
             limiting = raw.get('name')
 
     return jsonify({'maxUnits': int(max_units) if max_units != float('inf') else 0, 'limitingIngredient': limiting})
+
+
+@app.route('/api/diagnostic', methods=['GET', 'POST', 'OPTIONS'])
+def diagnostic():
+    # Lightweight diagnostic endpoint to check CORS and request payloads
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
+    data = None
+    try:
+        data = request.get_json(silent=True)
+    except Exception:
+        data = None
+
+    origin = request.headers.get('Origin')
+    resp = jsonify({
+        'ok': True,
+        'origin': origin,
+        'received': data,
+        'headers': {k: v for k, v in request.headers.items()}
+    })
+    # Echo CORS header for quick verification
+    allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', '*')
+    if allowed.strip() == '*':
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+    else:
+        if origin and origin in [o.strip() for o in allowed.split(',') if o.strip()]:
+            resp.headers['Access-Control-Allow-Origin'] = origin
+    return resp
 
 @app.route('/api/sales', methods=['GET', 'POST'])
 @token_required
@@ -273,9 +317,13 @@ def handle_sales():
         # Composite product: check ingredients
         if product.get('isComposite') and product.get('recipe'):
             for ingredient in product['recipe']:
-                ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
+                # Only validate tracked ingredients that reference a productId; skip custom/name-only entries
+                pid = ingredient.get('productId')
+                if pid is None:
+                    continue
+                ingredient_product = next((p for p in products if p['id'] == pid), None)
                 if not ingredient_product:
-                    insufficient.append({'productId': item.get('productId'), 'reason': f"Missing ingredient {ingredient.get('productId')}"})
+                    insufficient.append({'productId': item.get('productId'), 'reason': f"Missing ingredient {pid}"})
                     continue
                 required_qty = ingredient.get('quantity', 0) * qty_needed
                 if ingredient_product.get('quantity', 0) < required_qty:
@@ -305,7 +353,10 @@ def handle_sales():
 
         if product.get('isComposite') and product.get('recipe'):
             for ingredient in product['recipe']:
-                ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
+                pid = ingredient.get('productId')
+                if pid is None:
+                    continue
+                ingredient_product = next((p for p in products if p['id'] == pid), None)
                 if not ingredient_product:
                     continue
                 required_qty = ingredient.get('quantity', 0) * qty
@@ -645,4 +696,6 @@ def reject_credit_request(request_id):
     return jsonify({'message': 'Credit request rejected'})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5002))
+    host = os.environ.get('HOST', '0.0.0.0')
+    app.run(debug=True, host=host, port=port)
