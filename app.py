@@ -4,19 +4,53 @@ import jwt
 import os
 from datetime import datetime
 from functools import wraps
+import json
+from pathlib import Path
 
 app = Flask(__name__)
 CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['*'])
 app.config['SECRET_KEY'] = 'simple-secret-key'
 
-# Global storage - shared across all users
-users = []
-products = []
-sales = []
-expenses = []
-activities = []
-reminders = []
-settings = [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
+# Data persistence helpers (simple JSON files in backend/data)
+DATA_DIR = Path(__file__).parent / 'data'
+def load_json(filename):
+    path = DATA_DIR / filename
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_json(filename, data):
+    path = DATA_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+# Ensure responses have correct CORS headers. Use BACKEND_ALLOWED_ORIGINS env var (comma-separated)
+@app.after_request
+def add_cors_headers(response):
+    allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', '*')
+    origin = request.headers.get('Origin')
+    if allowed.strip() == '*':
+        response.headers['Access-Control-Allow-Origin'] = '*'
+    else:
+        allowed_list = [o.strip() for o in allowed.split(',') if o.strip()]
+        if origin and origin in allowed_list:
+            response.headers['Access-Control-Allow-Origin'] = origin
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    return response
+
+# Global storage - load from data files so state persists across restarts
+users = load_json('users.json')
+products = load_json('products.json')
+sales = load_json('sales.json')
+expenses = load_json('expenses.json')
+activities = load_json('activities.json')
+reminders = load_json('reminders.json')
+settings = load_json('settings.json') or [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
 
 def token_required(f):
     @wraps(f)
@@ -168,6 +202,7 @@ def handle_products():
                 return jsonify({'error': f'Ingredient product not found: {ingredient.get("productId")}'}), 400
     
     products.append(product)
+    save_json('products.json', products)
     return jsonify(product)
 
 @app.route('/api/products/<int:product_id>', methods=['PUT', 'DELETE'])
@@ -186,12 +221,36 @@ def handle_product(product_id):
         product['image'] = data.get('image', product.get('image', ''))
         product['category'] = data.get('category', product.get('category', 'general'))
         product['updatedAt'] = datetime.now().isoformat()
-        
+        save_json('products.json', products)
         return jsonify(product)
     
     if request.method == 'DELETE':
         products.remove(product)
+        save_json('products.json', products)
         return jsonify({'message': 'Product deleted successfully'}), 200
+
+
+@app.route('/api/products/<int:product_id>/max-producible', methods=['GET'])
+@token_required
+def product_max_producible(product_id):
+    product = next((p for p in products if p['id'] == product_id), None)
+    if not product or not product.get('recipe'):
+        return jsonify({'maxUnits': 0, 'limitingIngredient': None})
+
+    max_units = float('inf')
+    limiting = None
+    for ingredient in product['recipe']:
+        raw = next((p for p in products if p['id'] == ingredient.get('productId')), None)
+        if not raw:
+            return jsonify({'maxUnits': 0, 'limitingIngredient': None})
+        available = raw.get('quantity', 0)
+        needed = ingredient.get('quantity', 0)
+        possible = available / needed if needed > 0 else 0
+        if possible < max_units:
+            max_units = possible
+            limiting = raw.get('name')
+
+    return jsonify({'maxUnits': int(max_units) if max_units != float('inf') else 0, 'limitingIngredient': limiting})
 
 @app.route('/api/sales', methods=['GET', 'POST'])
 @token_required
@@ -200,31 +259,77 @@ def handle_sales():
         return jsonify(sales)
     
     data = request.get_json()
-    
-    # Process each item and handle composite products
+
+    # Validate availability first
+    insufficient = []
     for item in data.get('items', []):
         product = next((p for p in products if p['id'] == item['productId']), None)
-        if product:
-            # If it's a composite product, deduct ingredients from stock
-            if product.get('isComposite') and product.get('recipe'):
-                for ingredient in product['recipe']:
-                    ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
-                    if ingredient_product:
-                        required_qty = ingredient['quantity'] * item['quantity']
-                        ingredient_product['quantity'] = max(0, ingredient_product['quantity'] - required_qty)
-            else:
-                # Regular product - deduct from stock
-                product['quantity'] = max(0, product['quantity'] - item['quantity'])
-    
+        if not product:
+            insufficient.append({'productId': item.get('productId'), 'reason': 'Product not found'})
+            continue
+
+        qty_needed = item.get('quantity', 0)
+
+        # Composite product: check ingredients
+        if product.get('isComposite') and product.get('recipe'):
+            for ingredient in product['recipe']:
+                ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
+                if not ingredient_product:
+                    insufficient.append({'productId': item.get('productId'), 'reason': f"Missing ingredient {ingredient.get('productId')}"})
+                    continue
+                required_qty = ingredient.get('quantity', 0) * qty_needed
+                if ingredient_product.get('quantity', 0) < required_qty:
+                    insufficient.append({
+                        'productId': item.get('productId'),
+                        'reason': f"Insufficient ingredient {ingredient_product.get('name')}",
+                        'needed': required_qty,
+                        'available': ingredient_product.get('quantity', 0)
+                    })
+        else:
+            # Regular product check
+            if product.get('quantity', 0) < qty_needed:
+                insufficient.append({'productId': item.get('productId'), 'reason': 'Insufficient product quantity', 'needed': qty_needed, 'available': product.get('quantity', 0)})
+
+    if insufficient:
+        return jsonify({'error': 'Insufficient stock', 'details': insufficient}), 400
+
+    # All good — deduct quantities and record sale
+    total = float(data.get('total', 0))
+    total_cogs = 0
+
+    for item in data.get('items', []):
+        product = next((p for p in products if p['id'] == item['productId']), None)
+        qty = item.get('quantity', 0)
+        if not product:
+            continue
+
+        if product.get('isComposite') and product.get('recipe'):
+            for ingredient in product['recipe']:
+                ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
+                if not ingredient_product:
+                    continue
+                required_qty = ingredient.get('quantity', 0) * qty
+                ingredient_product['quantity'] = max(0, ingredient_product.get('quantity', 0) - required_qty)
+                total_cogs += ingredient_product.get('cost', 0) * required_qty
+        else:
+            product['quantity'] = max(0, product.get('quantity', 0) - qty)
+            total_cogs += product.get('cost', 0) * qty
+
     sale = {
         'id': len(sales) + 1,
         'items': data.get('items', []),
-        'total': float(data.get('total', 0)),
+        'total': total,
         'cashierId': request.user['id'],
         'cashierName': next((u['name'] for u in users if u['id'] == request.user['id']), 'Unknown'),
-        'createdAt': datetime.now().isoformat()
+        'createdAt': datetime.now().isoformat(),
+        'cogs': total_cogs
     }
     sales.append(sale)
+    # Persist changes
+    save_json('products.json', products)
+    save_json('sales.json', sales)
+    save_json('expenses.json', expenses)
+
     return jsonify(sale)
 
 @app.route('/api/expenses', methods=['GET', 'POST'])
@@ -420,6 +525,7 @@ def handle_reminders():
         'createdAt': datetime.now().isoformat()
     }
     reminders.append(reminder)
+    save_json('reminders.json', reminders)
     return jsonify(reminder)
 
 @app.route('/api/reminders/<int:reminder_id>', methods=['PUT', 'DELETE'])
@@ -438,10 +544,12 @@ def handle_reminder(reminder_id):
             'priority': data.get('priority', reminder['priority']),
             'completed': data.get('completed', reminder['completed'])
         })
+        save_json('reminders.json', reminders)
         return jsonify(reminder)
     
     if request.method == 'DELETE':
         reminders.remove(reminder)
+        save_json('reminders.json', reminders)
         return jsonify({'message': 'Reminder deleted'}), 200
 
 @app.route('/api/batches', methods=['GET', 'POST'])
