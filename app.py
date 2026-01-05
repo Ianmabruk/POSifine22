@@ -998,8 +998,8 @@ def handle_users():
         'email': data.get('email', '').lower(),
         'password': data.get('password', 'changeme123'),
         'name': data.get('name', ''),
-        'role': 'cashier',
-        'plan': 'ultra',
+        'role': data.get('role', 'cashier'),  # Allow role specification
+        'plan': current_user.get('plan', 'ultra'),  # Inherit plan from creator
         'active': True,
         'locked': False,
         'pin': data.get('pin', ''),
