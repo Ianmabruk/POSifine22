@@ -6,7 +6,7 @@ from datetime import datetime
 from functools import wraps
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['*'])
 app.config['SECRET_KEY'] = 'simple-secret-key'
 
 # Global storage - shared across all users
@@ -443,6 +443,77 @@ def handle_reminder(reminder_id):
     if request.method == 'DELETE':
         reminders.remove(reminder)
         return jsonify({'message': 'Reminder deleted'}), 200
+
+@app.route('/api/batches', methods=['GET', 'POST'])
+@token_required
+def handle_batches():
+    if request.method == 'GET':
+        return jsonify([])
+    return jsonify({'id': 1, 'message': 'Batch created'})
+
+@app.route('/api/production', methods=['GET', 'POST'])
+@token_required
+def handle_production():
+    if request.method == 'GET':
+        return jsonify([])
+    return jsonify({'id': 1, 'message': 'Production created'})
+
+@app.route('/api/categories/generate-code', methods=['POST'])
+@token_required
+def generate_category_code():
+    return jsonify({'code': 'CAT001'})
+
+@app.route('/api/price-history', methods=['GET', 'POST'])
+@token_required
+def handle_price_history():
+    if request.method == 'GET':
+        return jsonify([])
+    return jsonify({'id': 1, 'message': 'Price history created'})
+
+@app.route('/api/service-fees', methods=['GET', 'POST'])
+@token_required
+def handle_service_fees():
+    if request.method == 'GET':
+        return jsonify([])
+    return jsonify({'id': 1, 'message': 'Service fee created'})
+
+@app.route('/api/service-fees/<int:fee_id>', methods=['PUT', 'DELETE'])
+@token_required
+def handle_service_fee(fee_id):
+    if request.method == 'PUT':
+        return jsonify({'id': fee_id, 'message': 'Service fee updated'})
+    return jsonify({'message': 'Service fee deleted'})
+
+@app.route('/api/discounts', methods=['GET', 'POST'])
+@token_required
+def handle_discounts():
+    if request.method == 'GET':
+        return jsonify([])
+    return jsonify({'id': 1, 'message': 'Discount created'})
+
+@app.route('/api/discounts/<int:discount_id>', methods=['PUT', 'DELETE'])
+@token_required
+def handle_discount(discount_id):
+    if request.method == 'PUT':
+        return jsonify({'id': discount_id, 'message': 'Discount updated'})
+    return jsonify({'message': 'Discount deleted'})
+
+@app.route('/api/credit-requests', methods=['GET', 'POST'])
+@token_required
+def handle_credit_requests():
+    if request.method == 'GET':
+        return jsonify([])
+    return jsonify({'id': 1, 'message': 'Credit request created'})
+
+@app.route('/api/credit-requests/<int:request_id>/approve', methods=['POST'])
+@token_required
+def approve_credit_request(request_id):
+    return jsonify({'message': 'Credit request approved'})
+
+@app.route('/api/credit-requests/<int:request_id>/reject', methods=['POST'])
+@token_required
+def reject_credit_request(request_id):
+    return jsonify({'message': 'Credit request rejected'})
 
 if __name__ == '__main__':
     app.run(debug=True)
