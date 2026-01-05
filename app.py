@@ -6,10 +6,30 @@ from datetime import datetime
 from functools import wraps
 import json
 from pathlib import Path
+import tempfile
+import shutil
+try:
+    import database
+except Exception:
+    database = None
+
+# Try to enable WebSocket support via flask_sock when available
+try:
+    from flask_sock import Sock
+    has_sock = True
+except Exception:
+    Sock = None
+    has_sock = False
+
+import threading
+from queue import Queue, Empty
 
 app = Flask(__name__)
-CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['*'])
-app.config['SECRET_KEY'] = 'simple-secret-key'
+# Use BACKEND_ALLOWED_ORIGINS (comma-separated) to restrict CORS in production
+allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000')
+allowed_list = [o.strip() for o in allowed.split(',') if o.strip()]
+CORS(app, origins=allowed_list, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])
+app.config['SECRET_KEY'] = os.environ.get('APP_SECRET', 'simple-secret-key')
 
 # Data persistence helpers (simple JSON files in backend/data)
 DATA_DIR = Path(__file__).parent / 'data'
@@ -24,8 +44,17 @@ def load_json(filename):
 def save_json(filename, data):
     path = DATA_DIR / filename
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # Atomic write to avoid partial/corrupt files on failure
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        shutil.move(tmp, str(path))
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 
 # Ensure responses have correct CORS headers. Use BACKEND_ALLOWED_ORIGINS env var (comma-separated)
@@ -51,6 +80,228 @@ expenses = load_json('expenses.json')
 activities = load_json('activities.json')
 reminders = load_json('reminders.json')
 settings = load_json('settings.json') or [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
+companies = load_json('companies.json')
+
+# SSE subscribers: list of tuples (Queue, company_id)
+_subscribers = []
+_subs_lock = threading.Lock()
+
+# WebSocket clients per company: { company_id: set(ws, ...) }
+_ws_clients = {}
+_ws_lock = threading.Lock()
+
+def broadcast_products_update(event_type, payload, company_id=None):
+    """Broadcast a JSON payload to all SSE subscribers for a company."""
+    msg = {'type': event_type, 'payload': payload}
+    with _subs_lock:
+        for q, cid in list(_subscribers):
+            try:
+                if company_id is None or cid == company_id:
+                    q.put(msg)
+            except Exception:
+                pass
+    # Also push to any active WebSocket clients
+    try:
+        text = json.dumps(msg)
+        with _ws_lock:
+            if company_id is not None:
+                clients = list(_ws_clients.get(company_id, []))
+            else:
+                clients = [ws for s in _ws_clients.values() for ws in s]
+
+        for ws in clients:
+            try:
+                ws.send(text)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+@app.route('/api/stream/products')
+def stream_products():
+    """Server-Sent Events endpoint for product updates scoped to user's company.
+    Supports token via `Authorization: Bearer <token>` header or `?token=<token>` query param (for EventSource).
+    """
+    # Authentication: allow token in header or query param (EventSource cannot set headers)
+    token = request.headers.get('Authorization', '').replace('Bearer ', '') or request.args.get('token')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    try:
+        data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        user = next((u for u in users if u.get('id') == data.get('id')), None)
+        if user:
+            request.user = user
+        else:
+            request.user = data
+    except Exception:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    company_id = request.user.get('company_id')
+    q = Queue()
+    # send initial snapshot
+    try:
+        company_products = [p for p in products if p.get('company_id') == company_id]
+        q.put({'type': 'initial', 'payload': company_products})
+    except Exception:
+        q.put({'type': 'initial', 'payload': []})
+
+    with _subs_lock:
+        _subscribers.append((q, company_id))
+
+    def gen():
+        try:
+            while True:
+                try:
+                    msg = q.get(timeout=30)
+                except Empty:
+                    yield ': keep-alive\n\n'
+                    continue
+                yield f"data: {json.dumps(msg)}\n\n"
+        finally:
+            with _subs_lock:
+                try:
+                    _subscribers.remove((q, company_id))
+                except ValueError:
+                    pass
+
+    return app.response_class(gen(), mimetype='text/event-stream')
+
+
+# WebSocket endpoint (preferred) - requires flask-sock and a server that supports websockets
+if has_sock:
+    sock = Sock(app)
+
+    @sock.route('/api/ws/products')
+    def ws_products(ws):
+        # Accept token via query param or initial auth message
+        token = request.args.get('token')
+        user = None
+        if token:
+            try:
+                data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+                user = next((u for u in users if u.get('id') == data.get('id')), None) or data
+            except Exception:
+                user = None
+
+        # If no token in query, expect the client to send an auth message first
+        if not user:
+            try:
+                auth_msg = ws.receive(timeout=5)
+                if auth_msg:
+                    try:
+                        j = json.loads(auth_msg)
+                        t = j.get('token') or j.get('auth')
+                        if t:
+                            data = jwt.decode(t, app.config['SECRET_KEY'], algorithms=['HS256'])
+                            user = next((u for u in users if u.get('id') == data.get('id')), None) or data
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if not user:
+            try:
+                ws.send(json.dumps({'error': 'Unauthorized'}))
+            except Exception:
+                pass
+            return
+
+        company_id = user.get('company_id')
+
+        # Register client
+        with _ws_lock:
+            _ws_clients.setdefault(company_id, set()).add(ws)
+
+        # Send initial snapshot
+        try:
+            company_products = [p for p in products if p.get('company_id') == company_id]
+            ws.send(json.dumps({'type': 'initial', 'payload': company_products}))
+        except Exception:
+            try:
+                ws.send(json.dumps({'type': 'initial', 'payload': []}))
+            except Exception:
+                pass
+
+        # Keep connection alive and handle inbound messages if needed
+        try:
+            while True:
+                msg = ws.receive()
+                if msg is None:
+                    break
+                # Allow clients to request a refresh explicitly
+                try:
+                    data = json.loads(msg)
+                    if data.get('type') == 'refresh':
+                        company_products = [p for p in products if p.get('company_id') == company_id]
+                        ws.send(json.dumps({'type': 'products_snapshot', 'payload': company_products}))
+                except Exception:
+                    # ignore malformed messages
+                    pass
+        finally:
+            # Cleanup
+            with _ws_lock:
+                try:
+                    _ws_clients.get(company_id, set()).discard(ws)
+                except Exception:
+                    pass
+
+
+# Background listener to support Postgres LISTEN/NOTIFY for cross-process broadcasts
+def _start_db_notification_listener():
+    if not os.environ.get('DATABASE_URL'):
+        return
+    if not database:
+        return
+    try:
+        import select
+        conn = database.get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("LISTEN products_update;")
+        print('[DB LISTENER] Listening on products_update channel')
+
+        while True:
+            try:
+                if select.select([conn], [], [], 30) == ([], [], []):
+                    continue
+                conn.poll()
+                while conn.notifies:
+                    notify = conn.notifies.pop(0)
+                    try:
+                        payload = json.loads(notify.payload)
+                        cid = payload.get('company_id')
+                        # Fetch fresh company products and broadcast
+                        try:
+                            company_products = database.db_select('products', 'company_id = %s', (cid,))
+                            broadcast_products_update('products_snapshot', company_products, cid)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+            except Exception:
+                # Sleep briefly and attempt to reconnect
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                try:
+                    conn = database.get_db_connection()
+                    if not conn:
+                        return
+                    cur = conn.cursor()
+                    cur.execute("LISTEN products_update;")
+                except Exception:
+                    return
+    except Exception:
+        return
+
+
+# Start background DB listener thread if DB is enabled
+if os.environ.get('DATABASE_URL') and database:
+    t = threading.Thread(target=_start_db_notification_listener, daemon=True)
+    t.start()
 
 def token_required(f):
     @wraps(f)
@@ -60,13 +311,17 @@ def token_required(f):
             return jsonify({'error': 'Token missing'}), 401
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            request.user = data
-            
-            # For main admin, skip user lookup
+            # Attach full user record if available, include company_id
+            user = next((u for u in users if u.get('id') == data.get('id')), None)
+            if user:
+                request.user = user
+            else:
+                request.user = data
+            # Allow main_admin token type bypass
             if data.get('type') == 'main_admin':
                 return f(*args, **kwargs)
             
-        except:
+        except Exception:
             return jsonify({'error': 'Invalid token'}), 401
         return f(*args, **kwargs)
     return decorated
@@ -93,16 +348,28 @@ def signup():
     if any(u['email'] == email for u in users):
         return jsonify({'error': 'User exists'}), 400
     
-    # Determine role based on plan and existing users
-    if len(users) == 0:  # First user is always admin
+    # Create a new company for the first user or accept companyId when provided
+    if len(users) == 0:
         role = 'admin'
-    elif plan == 'ultra':
-        role = 'admin'  # Ultra package gets admin access
-    elif plan == 'basic':
-        role = 'cashier'  # Basic package only gets cashier access
+        # create company
+        company = {
+            'id': len(companies) + 1,
+            'name': data.get('companyName', f"{name}'s Company"),
+            'plan': plan,
+            'createdAt': datetime.now().isoformat()
+        }
+        companies.append(company)
+        company_id = company['id']
     else:
-        role = 'cashier'  # Default to cashier
-    
+        # If signing up under an existing company provide companyId
+        company_id = data.get('companyId') or data.get('company_id')
+        if company_id is None:
+            # default to first company for simplicity (invitations flow is out-of-scope)
+            company_id = companies[0]['id'] if companies else 1
+        # If user selected Ultra package, make them an admin for that company.
+        # This ensures Ultra signups get admin privileges and land on the Admin dashboard.
+        role = 'admin' if plan == 'ultra' else ('cashier' if plan == 'basic' else 'cashier')
+
     user = {
         'id': len(users) + 1,
         'email': email,
@@ -110,11 +377,12 @@ def signup():
         'name': name,
         'role': role,
         'plan': plan,
+        'company_id': company_id,
         'active': True,
         'locked': False
     }
     users.append(user)
-    
+
     # Log activity
     activities.append({
         'id': len(activities) + 1,
@@ -125,10 +393,14 @@ def signup():
         'plan': user['plan'],
         'timestamp': datetime.now().isoformat()
     })
-    
-    token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role']}, 
+
+    token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role'], 'company_id': user['company_id']}, 
                       app.config['SECRET_KEY'], algorithm='HS256')
-    
+
+    # persist users and companies
+    save_json('users.json', users)
+    save_json('companies.json', companies)
+
     return jsonify({
         'token': token,
         'user': {k: v for k, v in user.items() if k != 'password'}
@@ -155,7 +427,7 @@ def login():
         'timestamp': datetime.now().isoformat()
     })
     
-    token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role']}, 
+    token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role'], 'company_id': user.get('company_id')}, 
                       app.config['SECRET_KEY'], algorithm='HS256')
     
     return jsonify({
@@ -166,7 +438,7 @@ def login():
 @app.route('/api/auth/me')
 @token_required
 def me():
-    user = next((u for u in users if u['id'] == request.user['id']), None)
+    user = next((u for u in users if u['id'] == request.user.get('id')), None)
     if user:
         return jsonify({k: v for k, v in user.items() if k != 'password'})
     return jsonify({'error': 'User not found'}), 404
@@ -175,40 +447,123 @@ def me():
 @token_required
 def handle_products():
     if request.method == 'GET':
-        # Return ALL products for everyone - shared globally
-        return jsonify(products)
+        # Return products for the user's company only (single source of truth)
+        company_id = request.user.get('company_id')
+        if not company_id:
+            return jsonify({'error': 'Missing company context'}), 400
+        company_products = [p for p in products if p.get('company_id') == company_id]
+
+        # Compute producible units for composite products and expose as maxUnits
+        def compute_max_units(prod):
+            # Prefer inline recipe (file-backed). recipe is list of {productId, quantity}
+            recipe = prod.get('recipe') or []
+            if recipe:
+                max_units = float('inf')
+                for ingredient in recipe:
+                    pid = ingredient.get('productId')
+                    if pid is None:
+                        continue
+                    raw = next((r for r in company_products if r.get('id') == pid), None)
+                    if not raw:
+                        return 0
+                    available = raw.get('quantity', 0) or 0
+                    needed = ingredient.get('quantity', 0) or 0
+                    if needed <= 0:
+                        return 0
+                    possible = available // needed
+                    if possible < max_units:
+                        max_units = possible
+                return int(max_units) if max_units != float('inf') else 0
+
+            # Fallback: if DB is enabled, attempt to compute from composite_components
+            if os.environ.get('DATABASE_URL'):
+                try:
+                    conn = database.get_db_connection()
+                    if not conn:
+                        return 0
+                    cur = conn.cursor()
+                    cur.execute("SELECT component_product_id, quantity FROM composite_components WHERE composite_product_id = %s", (prod.get('id'),))
+                    rows = cur.fetchall()
+                    cur.close()
+                    conn.close()
+                    if not rows:
+                        return 0
+                    max_units = float('inf')
+                    for row in rows:
+                        comp_pid = row.get('component_product_id')
+                        per_unit = float(row.get('quantity') or 0)
+                        raw = next((r for r in company_products if r.get('id') == comp_pid), None)
+                        if not raw:
+                            return 0
+                        available = raw.get('quantity', 0) or 0
+                        if per_unit <= 0:
+                            return 0
+                        possible = available // per_unit
+                        if possible < max_units:
+                            max_units = possible
+                    return int(max_units) if max_units != float('inf') else 0
+                except Exception:
+                    return 0
+
+            return 0
+
+        for p in company_products:
+            if p.get('isComposite') or p.get('is_composite'):
+                p['maxUnits'] = compute_max_units(p)
+            else:
+                p['maxUnits'] = p.get('quantity', 0)
+
+        return jsonify(company_products)
     
     data = request.get_json()
+    # Only admins can create or update products
+    if request.user.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized: only admins can create products'}), 403
+
+    company_id = request.user.get('company_id')
     product = {
         'id': len(products) + 1,
+        'company_id': company_id,
         'name': data.get('name', ''),
         'price': float(data.get('price', 0)),
         'cost': float(data.get('cost', 0)),
-        'quantity': int(data.get('quantity', 0)),
+        # For composite products quantity is not tracked on the composite itself
+        'quantity': 0 if data.get('recipe') else int(data.get('quantity', 0)),
         'image': data.get('image', ''),
         'category': data.get('category', 'general'),
         'unit': data.get('unit', 'pcs'),
         'recipe': data.get('recipe', []),  # For composite products
-        'isComposite': bool(data.get('recipe', [])),
+        'isComposite': bool(data.get('recipe')),
+        'visible_to_cashier': bool(data.get('visible_to_cashier', True)),
         'createdAt': datetime.now().isoformat(),
         'createdBy': request.user.get('id')
     }
-    
-    # If it's a composite product, validate recipe ingredients exist
+
+    # Plan enforcement: Basic plan cannot create composite products
+    company = next((c for c in companies if c.get('id') == company_id), None)
+    if product['isComposite'] and company and company.get('plan') == 'basic':
+        return jsonify({'error': 'Basic plan cannot create composite products'}), 403
+
+    # Validate recipe ingredients exist and belong to same company
     if product['recipe']:
         for ingredient in product['recipe']:
-            # If ingredient specifies a productId, validate it exists. Skip custom/name-only ingredients.
             pid = ingredient.get('productId')
             if pid is None:
                 continue
-            ingredient_product = next((p for p in products if p['id'] == pid), None)
+            ingredient_product = next((p for p in products if p['id'] == pid and p.get('company_id') == company_id), None)
             if not ingredient_product:
-                return jsonify({'error': f'Ingredient product not found: {pid}'}), 400
-    
+                return jsonify({'error': f'Ingredient product not found or does not belong to company: {pid}'}), 400
+
     # Log product creation for diagnostics
-    print(f"[PRODUCT CREATE] by user={request.user} payload={product}")
+    print(f"[PRODUCT CREATE] company={company_id} by user={request.user.get('id')} payload={product}")
+
     products.append(product)
     save_json('products.json', products)
+    # Broadcast creation to SSE subscribers for this company
+    try:
+        broadcast_products_update('product_created', product, company_id)
+    except Exception:
+        pass
     return jsonify(product)
 
 @app.route('/api/products/<int:product_id>', methods=['PUT', 'DELETE'])
@@ -220,23 +575,40 @@ def handle_product(product_id):
     
     if request.method == 'PUT':
         data = request.get_json()
-        # Update product fields
+        # Only admins from same company can update
+        if request.user.get('role') != 'admin' or request.user.get('company_id') != product.get('company_id'):
+            return jsonify({'error': 'Unauthorized'}), 403
+
+        # Update allowed fields (do not allow quantity change for composite)
         product['name'] = data.get('name', product['name'])
         product['price'] = float(data.get('price', product['price']))
-        product['quantity'] = int(data.get('quantity', product['quantity']))
+        if not product.get('isComposite'):
+            product['quantity'] = int(data.get('quantity', product.get('quantity', 0)))
         product['image'] = data.get('image', product.get('image', ''))
         product['category'] = data.get('category', product.get('category', 'general'))
         product['updatedAt'] = datetime.now().isoformat()
         # Log product update for diagnostics
-        print(f"[PRODUCT UPDATE] by user={request.user} product_id={product_id} updates={data}")
+        print(f"[PRODUCT UPDATE] company={product.get('company_id')} by user={request.user.get('id')} product_id={product_id} updates={data}")
         save_json('products.json', products)
+        try:
+            broadcast_products_update('product_updated', product, product.get('company_id'))
+        except Exception:
+            pass
         return jsonify(product)
     
     if request.method == 'DELETE':
+        # Only admins from same company can delete
+        if request.user.get('role') != 'admin' or request.user.get('company_id') != product.get('company_id'):
+            return jsonify({'error': 'Unauthorized'}), 403
+
         # Log product deletion for diagnostics
-        print(f"[PRODUCT DELETE] by user={request.user} product_id={product_id}")
+        print(f"[PRODUCT DELETE] company={product.get('company_id')} by user={request.user.get('id')} product_id={product_id}")
         products.remove(product)
         save_json('products.json', products)
+        try:
+            broadcast_products_update('product_deleted', {'id': product_id}, product.get('company_id'))
+        except Exception:
+            pass
         return jsonify({'message': 'Product deleted successfully'}), 200
 
 
@@ -254,7 +626,7 @@ def product_max_producible(product_id):
         pid = ingredient.get('productId')
         if pid is None:
             continue
-        raw = next((p for p in products if p['id'] == pid), None)
+        raw = next((p for p in products if p['id'] == pid and p.get('company_id') == product.get('company_id')), None)
         if not raw:
             # If a referenced raw product is missing, treat as zero producible
             return jsonify({'maxUnits': 0, 'limitingIngredient': None})
@@ -288,40 +660,73 @@ def diagnostic():
         'headers': {k: v for k, v in request.headers.items()}
     })
     # Echo CORS header for quick verification
-    allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', '*')
+    # echo allowed origin for verification
+    allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', ','.join(allowed_list))
     if allowed.strip() == '*':
         resp.headers['Access-Control-Allow-Origin'] = '*'
     else:
         if origin and origin in [o.strip() for o in allowed.split(',') if o.strip()]:
             resp.headers['Access-Control-Allow-Origin'] = origin
+            resp.headers['Vary'] = 'Origin'
     return resp
 
 @app.route('/api/sales', methods=['GET', 'POST'])
 @token_required
 def handle_sales():
     if request.method == 'GET':
-        return jsonify(sales)
-    
+        # Return sales for user's company only
+        company_id = request.user.get('company_id')
+        user_sales = [s for s in sales if s.get('company_id') == company_id]
+        return jsonify(user_sales)
+
     data = request.get_json()
 
-    # Validate availability first
+    # Only cashiers or admins of the same company can create sales
+    if request.user.get('role') not in ('cashier', 'admin'):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    company_id = request.user.get('company_id')
+    items = data.get('items', [])
+    total = float(data.get('total', 0))
+
+    # If a real database is configured, prefer transactional DB-backed sale
+    if os.environ.get('DATABASE_URL'):
+        cashier_name = next((u['name'] for u in users if u.get('id') == request.user.get('id')), 'Unknown')
+        ok, result = database.composite_sale(company_id, request.user.get('id'), cashier_name, items, total)
+        if ok:
+            # fetch latest company products from DB and broadcast
+            try:
+                if database:
+                    company_products = database.db_select('products', 'company_id = %s', (company_id,))
+                    broadcast_products_update('products_snapshot', company_products, company_id)
+            except Exception:
+                pass
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+
+    # Validate availability first (operate on copies to ensure transactional behavior)
     insufficient = []
-    for item in data.get('items', []):
-        product = next((p for p in products if p['id'] == item['productId']), None)
+    products_copy = [dict(p) for p in products]
+
+    def find_prod(pid):
+        return next((p for p in products_copy if p['id'] == pid and p.get('company_id') == company_id), None)
+
+    for item in items:
+        product = find_prod(item['productId'])
         if not product:
             insufficient.append({'productId': item.get('productId'), 'reason': 'Product not found'})
             continue
 
         qty_needed = item.get('quantity', 0)
 
-        # Composite product: check ingredients
         if product.get('isComposite') and product.get('recipe'):
             for ingredient in product['recipe']:
-                # Only validate tracked ingredients that reference a productId; skip custom/name-only entries
                 pid = ingredient.get('productId')
                 if pid is None:
                     continue
-                ingredient_product = next((p for p in products if p['id'] == pid), None)
+                ingredient_product = find_prod(pid)
                 if not ingredient_product:
                     insufficient.append({'productId': item.get('productId'), 'reason': f"Missing ingredient {pid}"})
                     continue
@@ -334,19 +739,17 @@ def handle_sales():
                         'available': ingredient_product.get('quantity', 0)
                     })
         else:
-            # Regular product check
             if product.get('quantity', 0) < qty_needed:
                 insufficient.append({'productId': item.get('productId'), 'reason': 'Insufficient product quantity', 'needed': qty_needed, 'available': product.get('quantity', 0)})
 
     if insufficient:
         return jsonify({'error': 'Insufficient stock', 'details': insufficient}), 400
 
-    # All good — deduct quantities and record sale
+    # Apply deductions to the copy
     total = float(data.get('total', 0))
     total_cogs = 0
-
-    for item in data.get('items', []):
-        product = next((p for p in products if p['id'] == item['productId']), None)
+    for item in items:
+        product = find_prod(item['productId'])
         qty = item.get('quantity', 0)
         if not product:
             continue
@@ -356,7 +759,7 @@ def handle_sales():
                 pid = ingredient.get('productId')
                 if pid is None:
                     continue
-                ingredient_product = next((p for p in products if p['id'] == pid), None)
+                ingredient_product = find_prod(pid)
                 if not ingredient_product:
                     continue
                 required_qty = ingredient.get('quantity', 0) * qty
@@ -366,20 +769,36 @@ def handle_sales():
             product['quantity'] = max(0, product.get('quantity', 0) - qty)
             total_cogs += product.get('cost', 0) * qty
 
+    # Commit: replace products and append sale atomically
+    # Merge products_copy back into products for saving
+    for updated in products_copy:
+        for i, p in enumerate(products):
+            if p['id'] == updated['id'] and p.get('company_id') == company_id:
+                products[i] = updated
+
     sale = {
         'id': len(sales) + 1,
-        'items': data.get('items', []),
+        'company_id': company_id,
+        'items': items,
         'total': total,
-        'cashierId': request.user['id'],
-        'cashierName': next((u['name'] for u in users if u['id'] == request.user['id']), 'Unknown'),
+        'cashierId': request.user.get('id'),
+        'cashierName': next((u['name'] for u in users if u.get('id') == request.user.get('id')), 'Unknown'),
         'createdAt': datetime.now().isoformat(),
         'cogs': total_cogs
     }
     sales.append(sale)
-    # Persist changes
+
+    # Persist changes atomically
     save_json('products.json', products)
     save_json('sales.json', sales)
     save_json('expenses.json', expenses)
+
+    # Broadcast updated product snapshot to subscribers for this company
+    try:
+        company_products = [p for p in products if p.get('company_id') == company_id]
+        broadcast_products_update('products_snapshot', company_products, company_id)
+    except Exception:
+        pass
 
     return jsonify(sale)
 
@@ -540,9 +959,13 @@ def handle_users():
         'locked': False,
         'pin': data.get('pin', ''),
         'createdBy': current_user['id'],
+        # Ensure the created user is assigned to the creator's company
+        'company_id': current_user.get('company_id'),
         'createdAt': datetime.now().isoformat()
     }
     users.append(new_user)
+    # Persist users to disk so the new user is available for login
+    save_json('users.json', users)
     
     # Log activity
     activities.append({
@@ -556,7 +979,17 @@ def handle_users():
         'timestamp': datetime.now().isoformat()
     })
     
-    return jsonify({k: v for k, v in new_user.items() if k != 'password'})
+    # Optionally return a token for the newly created user so they can sign in immediately
+    try:
+        token = jwt.encode({'id': new_user['id'], 'email': new_user['email'], 'role': new_user['role'], 'company_id': new_user.get('company_id')}, 
+                          app.config['SECRET_KEY'], algorithm='HS256')
+    except Exception:
+        token = None
+
+    return jsonify({
+        'user': {k: v for k, v in new_user.items() if k != 'password'},
+        'token': token
+    })
 
 @app.route('/api/reminders', methods=['GET', 'POST'])
 @token_required
@@ -698,4 +1131,5 @@ def reject_credit_request(request_id):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5002))
     host = os.environ.get('HOST', '0.0.0.0')
-    app.run(debug=True, host=host, port=port)
+    # Run without the reloader for predictable single-process behavior during tests
+    app.run(debug=False, use_reloader=False, host=host, port=port)
