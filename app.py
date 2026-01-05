@@ -336,15 +336,24 @@ def handle_users():
     if request.method == 'GET':
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
     
-    # Check if user is admin with ultra plan
-    user_id = request.user.get('id')
-    current_user = next((u for u in users if u['id'] == user_id), None)
+    # Get user info from token
+    token_user_id = request.user.get('id')
+    token_user_role = request.user.get('role')
+    
+    # Find current user in database
+    current_user = next((u for u in users if u['id'] == token_user_id), None)
+    
+    # If user not found by ID, try by email (fallback)
+    if not current_user:
+        token_email = request.user.get('email')
+        current_user = next((u for u in users if u['email'] == token_email), None)
     
     if not current_user:
-        return jsonify({'error': 'Current user not found'}), 404
+        return jsonify({'error': f'Current user not found. Token ID: {token_user_id}'}), 404
     
+    # Check permissions
     if current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
-        return jsonify({'error': 'Ultra package admin access required'}), 403
+        return jsonify({'error': f'Ultra admin required. Current: role={current_user.get("role")}, plan={current_user.get("plan")}'}), 403
     
     data = request.get_json()
     user = {
@@ -357,21 +366,9 @@ def handle_users():
         'active': True,
         'locked': False,
         'pin': data.get('pin', ''),
-        'createdBy': user_id
+        'createdBy': current_user['id']
     }
     users.append(user)
-    
-    # Log activity
-    activities.append({
-        'id': len(activities) + 1,
-        'type': 'user_created',
-        'userId': user['id'],
-        'email': user['email'],
-        'name': user['name'],
-        'plan': user['plan'],
-        'createdBy': user_id,
-        'timestamp': datetime.now().isoformat()
-    })
     
     return jsonify({k: v for k, v in user.items() if k != 'password'})
 
