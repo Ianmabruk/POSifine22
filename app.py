@@ -32,17 +32,6 @@ def token_required(f):
             if data.get('type') == 'main_admin':
                 return f(*args, **kwargs)
             
-            # Find user in database to get current info
-            user = next((u for u in users if u['id'] == data.get('id')), None)
-            if user:
-                # Update request.user with current user data
-                request.user.update({
-                    'role': user['role'],
-                    'plan': user['plan'],
-                    'active': user.get('active', True),
-                    'locked': user.get('locked', False)
-                })
-            
         except:
             return jsonify({'error': 'Invalid token'}), 401
         return f(*args, **kwargs)
@@ -347,13 +336,14 @@ def handle_users():
     if request.method == 'GET':
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
     
-    # Get current user
-    current_user = next((u for u in users if u['id'] == request.user.get('id')), None)
-    if not current_user:
-        return jsonify({'error': 'User not found'}), 404
+    # Check if user is admin with ultra plan
+    user_id = request.user.get('id')
+    current_user = next((u for u in users if u['id'] == user_id), None)
     
-    # Allow ultra package users (admin role) to create cashier users
-    if current_user.get('plan') != 'ultra' or current_user.get('role') != 'admin':
+    if not current_user:
+        return jsonify({'error': 'Current user not found'}), 404
+    
+    if current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
         return jsonify({'error': 'Ultra package admin access required'}), 403
     
     data = request.get_json()
@@ -363,11 +353,11 @@ def handle_users():
         'password': data.get('password', 'changeme123'),
         'name': data.get('name', ''),
         'role': 'cashier',
-        'plan': 'ultra',  # Inherit ultra plan from admin
+        'plan': 'ultra',
         'active': True,
         'locked': False,
         'pin': data.get('pin', ''),
-        'createdBy': request.user.get('id')  # Track who created this user
+        'createdBy': user_id
     }
     users.append(user)
     
@@ -379,7 +369,7 @@ def handle_users():
         'email': user['email'],
         'name': user['name'],
         'plan': user['plan'],
-        'createdBy': request.user.get('id'),
+        'createdBy': user_id,
         'timestamp': datetime.now().isoformat()
     })
     
