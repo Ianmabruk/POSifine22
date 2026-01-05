@@ -33,28 +33,45 @@ app.config['SECRET_KEY'] = os.environ.get('APP_SECRET', 'simple-secret-key')
 
 # Data persistence helpers (simple JSON files in backend/data)
 DATA_DIR = Path(__file__).parent / 'data'
+
+# Ensure data directory exists
+DATA_DIR.mkdir(exist_ok=True)
+
 def load_json(filename):
     path = DATA_DIR / filename
     try:
+        if not path.exists():
+            return []
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        print(f"Error loading {filename}: {e}")
         return []
 
 def save_json(filename, data):
     path = DATA_DIR / filename
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write to avoid partial/corrupt files on failure
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        shutil.move(tmp, str(path))
-    except Exception:
+        # Atomic write to avoid partial/corrupt files on failure
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent))
         try:
-            os.remove(tmp)
-        except Exception:
-            pass
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            shutil.move(tmp, str(path))
+        except Exception as e:
+            print(f"Error saving {filename}: {e}")
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Error creating temp file for {filename}: {e}")
+        # Fallback to direct write
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e2:
+            print(f"Fallback save failed for {filename}: {e2}")
 
 
 # Ensure responses have correct CORS headers. Use BACKEND_ALLOWED_ORIGINS env var (comma-separated)
@@ -73,14 +90,42 @@ def add_cors_headers(response):
     return response
 
 # Global storage - load from data files so state persists across restarts
-users = load_json('users.json')
-products = load_json('products.json')
-sales = load_json('sales.json')
-expenses = load_json('expenses.json')
-activities = load_json('activities.json')
-reminders = load_json('reminders.json')
-settings = load_json('settings.json') or [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
-companies = load_json('companies.json')
+try:
+    users = load_json('users.json')
+    products = load_json('products.json')
+    sales = load_json('sales.json')
+    expenses = load_json('expenses.json')
+    activities = load_json('activities.json')
+    reminders = load_json('reminders.json')
+    settings = load_json('settings.json') or [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
+    companies = load_json('companies.json')
+    
+    # Ensure companies has at least one entry
+    if not companies:
+        companies = [{
+            'id': 1,
+            'name': 'Demo Company',
+            'plan': 'ultra',
+            'createdAt': datetime.now().isoformat()
+        }]
+        save_json('companies.json', companies)
+        
+except Exception as e:
+    print(f"Error initializing data: {e}")
+    # Fallback to empty data
+    users = []
+    products = []
+    sales = []
+    expenses = []
+    activities = []
+    reminders = []
+    settings = [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
+    companies = [{
+        'id': 1,
+        'name': 'Demo Company',
+        'plan': 'ultra',
+        'createdAt': datetime.now().isoformat()
+    }]
 
 # SSE subscribers: list of tuples (Queue, company_id)
 _subscribers = []
