@@ -26,7 +26,7 @@ from queue import Queue, Empty
 
 app = Flask(__name__)
 # Use BACKEND_ALLOWED_ORIGINS (comma-separated) to restrict CORS in production
-allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000')
+allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://posifine11.vercel.app,https://posifine11.netlify.app')
 allowed_list = [o.strip() for o in allowed.split(',') if o.strip()]
 CORS(app, origins=allowed_list, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])
 app.config['SECRET_KEY'] = os.environ.get('APP_SECRET', 'simple-secret-key')
@@ -77,7 +77,7 @@ def save_json(filename, data):
 # Ensure responses have correct CORS headers. Use BACKEND_ALLOWED_ORIGINS env var (comma-separated)
 @app.after_request
 def add_cors_headers(response):
-    allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', '*')
+    allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://posifine11.vercel.app,https://posifine11.netlify.app')
     origin = request.headers.get('Origin')
     if allowed.strip() == '*':
         response.headers['Access-Control-Allow-Origin'] = '*'
