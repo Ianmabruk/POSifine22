@@ -15,6 +15,7 @@ products = []
 sales = []
 expenses = []
 activities = []
+reminders = []
 settings = [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
 
 def token_required(f):
@@ -151,7 +152,7 @@ def me():
 @token_required
 def handle_products():
     if request.method == 'GET':
-        # Return ALL products for everyone - shared data
+        # Return ALL products for everyone - shared globally
         return jsonify(products)
     
     data = request.get_json()
@@ -159,12 +160,24 @@ def handle_products():
         'id': len(products) + 1,
         'name': data.get('name', ''),
         'price': float(data.get('price', 0)),
+        'cost': float(data.get('cost', 0)),
         'quantity': int(data.get('quantity', 0)),
         'image': data.get('image', ''),
         'category': data.get('category', 'general'),
+        'unit': data.get('unit', 'pcs'),
+        'recipe': data.get('recipe', []),  # For composite products
+        'isComposite': bool(data.get('recipe', [])),
         'createdAt': datetime.now().isoformat(),
-        'createdBy': request.user.get('id')  # Track who created it
+        'createdBy': request.user.get('id')
     }
+    
+    # If it's a composite product, validate recipe ingredients exist
+    if product['recipe']:
+        for ingredient in product['recipe']:
+            ingredient_product = next((p for p in products if p['id'] == ingredient.get('productId')), None)
+            if not ingredient_product:
+                return jsonify({'error': f'Ingredient product not found: {ingredient.get("productId")}'}), 400
+    
     products.append(product)
     return jsonify(product)
 
@@ -198,11 +211,29 @@ def handle_sales():
         return jsonify(sales)
     
     data = request.get_json()
+    
+    # Process each item and handle composite products
+    for item in data.get('items', []):
+        product = next((p for p in products if p['id'] == item['productId']), None)
+        if product:
+            # If it's a composite product, deduct ingredients from stock
+            if product.get('isComposite') and product.get('recipe'):
+                for ingredient in product['recipe']:
+                    ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
+                    if ingredient_product:
+                        required_qty = ingredient['quantity'] * item['quantity']
+                        ingredient_product['quantity'] = max(0, ingredient_product['quantity'] - required_qty)
+            else:
+                # Regular product - deduct from stock
+                product['quantity'] = max(0, product['quantity'] - item['quantity'])
+    
     sale = {
         'id': len(sales) + 1,
         'items': data.get('items', []),
         'total': float(data.get('total', 0)),
-        'cashierId': request.user['id']
+        'cashierId': request.user['id'],
+        'cashierName': next((u['name'] for u in users if u['id'] == request.user['id']), 'Unknown'),
+        'createdAt': datetime.now().isoformat()
     }
     sales.append(sale)
     return jsonify(sale)
@@ -262,7 +293,9 @@ def main_admin_users():
 def main_admin_activities():
     if request.user.get('type') != 'main_admin':
         return jsonify({'error': 'Access denied'}), 403
-    return jsonify(activities)
+    # Sort activities by timestamp (newest first)
+    sorted_activities = sorted(activities, key=lambda x: x.get('timestamp', ''), reverse=True)
+    return jsonify(sorted_activities)
 
 @app.route('/api/main-admin/stats')
 @token_required
@@ -351,6 +384,48 @@ def handle_users():
     })
     
     return jsonify({k: v for k, v in user.items() if k != 'password'})
+
+@app.route('/api/reminders', methods=['GET', 'POST'])
+@token_required
+def handle_reminders():
+    if request.method == 'GET':
+        return jsonify(reminders)
+    
+    data = request.get_json()
+    reminder = {
+        'id': len(reminders) + 1,
+        'title': data.get('title', ''),
+        'description': data.get('description', ''),
+        'dueDate': data.get('dueDate', ''),
+        'priority': data.get('priority', 'medium'),
+        'completed': False,
+        'createdBy': request.user.get('id'),
+        'createdAt': datetime.now().isoformat()
+    }
+    reminders.append(reminder)
+    return jsonify(reminder)
+
+@app.route('/api/reminders/<int:reminder_id>', methods=['PUT', 'DELETE'])
+@token_required
+def handle_reminder(reminder_id):
+    reminder = next((r for r in reminders if r['id'] == reminder_id), None)
+    if not reminder:
+        return jsonify({'error': 'Reminder not found'}), 404
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        reminder.update({
+            'title': data.get('title', reminder['title']),
+            'description': data.get('description', reminder['description']),
+            'dueDate': data.get('dueDate', reminder['dueDate']),
+            'priority': data.get('priority', reminder['priority']),
+            'completed': data.get('completed', reminder['completed'])
+        })
+        return jsonify(reminder)
+    
+    if request.method == 'DELETE':
+        reminders.remove(reminder)
+        return jsonify({'message': 'Reminder deleted'}), 200
 
 if __name__ == '__main__':
     app.run(debug=True)
