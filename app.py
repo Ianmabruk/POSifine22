@@ -336,27 +336,44 @@ def handle_users():
     if request.method == 'GET':
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
     
-    # Get user info from token
+    # Debug: Print token info
+    print(f"Token user: {request.user}")
+    print(f"All users: {[{'id': u['id'], 'email': u['email'], 'role': u['role'], 'plan': u['plan']} for u in users]}")
+    
+    # Get user info from token - handle both string and int IDs
     token_user_id = request.user.get('id')
-    token_user_role = request.user.get('role')
+    token_email = request.user.get('email')
     
-    # Find current user in database
-    current_user = next((u for u in users if u['id'] == token_user_id), None)
+    # Find current user - try both ID and email
+    current_user = None
     
-    # If user not found by ID, try by email (fallback)
-    if not current_user:
-        token_email = request.user.get('email')
+    # Try by ID (handle both int and string)
+    for u in users:
+        if str(u['id']) == str(token_user_id) or u['id'] == token_user_id:
+            current_user = u
+            break
+    
+    # Fallback: try by email
+    if not current_user and token_email:
         current_user = next((u for u in users if u['email'] == token_email), None)
     
     if not current_user:
-        return jsonify({'error': f'Current user not found. Token ID: {token_user_id}'}), 404
+        return jsonify({
+            'error': f'Current user not found. Token ID: {token_user_id}, Email: {token_email}',
+            'debug': {
+                'tokenUser': request.user,
+                'allUsers': [{'id': u['id'], 'email': u['email']} for u in users]
+            }
+        }), 404
     
     # Check permissions
     if current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
-        return jsonify({'error': f'Ultra admin required. Current: role={current_user.get("role")}, plan={current_user.get("plan")}'}), 403
+        return jsonify({
+            'error': f'Ultra admin required. Current: role={current_user.get("role")}, plan={current_user.get("plan")}'
+        }), 403
     
     data = request.get_json()
-    user = {
+    new_user = {
         'id': len(users) + 1,
         'email': data.get('email', '').lower(),
         'password': data.get('password', 'changeme123'),
@@ -366,11 +383,24 @@ def handle_users():
         'active': True,
         'locked': False,
         'pin': data.get('pin', ''),
-        'createdBy': current_user['id']
+        'createdBy': current_user['id'],
+        'createdAt': datetime.now().isoformat()
     }
-    users.append(user)
+    users.append(new_user)
     
-    return jsonify({k: v for k, v in user.items() if k != 'password'})
+    # Log activity
+    activities.append({
+        'id': len(activities) + 1,
+        'type': 'user_created',
+        'userId': new_user['id'],
+        'email': new_user['email'],
+        'name': new_user['name'],
+        'plan': new_user['plan'],
+        'createdBy': current_user['id'],
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    return jsonify({k: v for k, v in new_user.items() if k != 'password'})
 
 @app.route('/api/reminders', methods=['GET', 'POST'])
 @token_required
