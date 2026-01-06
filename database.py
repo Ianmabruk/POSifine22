@@ -32,6 +32,7 @@ def init_db():
             active BOOLEAN DEFAULT 1,
             locked BOOLEAN DEFAULT 0,
             pin TEXT,
+            cashierPIN TEXT,
             createdBy INTEGER,
             createdAt TEXT,
             FOREIGN KEY (accountId) REFERENCES accounts (id)
@@ -154,9 +155,9 @@ def create_user(email, password, name, role, plan, account_id, pin=None, created
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO users (email, password, name, role, plan, accountId, pin, createdBy, createdAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (email, password, name, role, plan, account_id, pin, created_by, datetime.now().isoformat()))
+        INSERT INTO users (email, password, name, role, plan, accountId, pin, cashierPIN, createdBy, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (email, password, name, role, plan, account_id, pin, pin, created_by, datetime.now().isoformat()))
     user_id = cursor.lastrowid
     conn.commit()
     conn.close()

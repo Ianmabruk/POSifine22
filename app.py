@@ -7,7 +7,22 @@ from functools import wraps
 import database as db
 
 app = Flask(__name__)
-CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['*'])
+
+# Enhanced CORS configuration
+CORS(app, 
+     origins=['*'],
+     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+     allow_headers=['*'],
+     supports_credentials=True)
+
+# Add CORS headers to all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', '*')
+    response.headers.add('Access-Control-Allow-Methods', '*')
+    return response
+
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
 
 # Initialize database
@@ -62,7 +77,7 @@ def signup():
     account_id = db.create_account(email, plan, trial_ends_at)
     
     # Determine role based on plan
-    role = 'admin' if plan == 'ultra' else 'cashier'
+    role = 'admin' if plan in ['ultra', 'outer'] else 'cashier'
     
     # Create user
     user_id = db.create_user(email, password, name, role, plan, account_id)
@@ -70,8 +85,14 @@ def signup():
     # Log activity
     db.create_activity('signup', user_id, email, name, plan)
     
-    token = jwt.encode({'id': user_id, 'email': email, 'role': role, 'accountId': account_id}, 
-                      app.config['SECRET_KEY'], algorithm='HS256')
+    token = jwt.encode({
+        'id': user_id, 
+        'email': email, 
+        'role': role, 
+        'plan': plan,
+        'package': plan,  # Add package field for compatibility
+        'accountId': account_id
+    }, app.config['SECRET_KEY'], algorithm='HS256')
     
     user = db.get_user_by_id(user_id)
     return jsonify({
@@ -100,8 +121,55 @@ def login():
     # Log activity
     db.create_activity('login', user['id'], user['email'], user['name'], user.get('plan', 'trial'))
     
-    token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role'], 'accountId': user['accountId']}, 
-                      app.config['SECRET_KEY'], algorithm='HS256')
+    token = jwt.encode({
+        'id': user['id'], 
+        'email': email, 
+        'role': user['role'], 
+        'plan': user.get('plan', 'trial'),
+        'package': user.get('plan', 'trial'),  # Add package field for compatibility
+        'accountId': user['accountId']
+    }, app.config['SECRET_KEY'], algorithm='HS256')
+    
+    return jsonify({
+        'token': token,
+        'user': {k: v for k, v in user.items() if k != 'password'}
+    })
+
+@app.route('/api/auth/pin-login', methods=['POST', 'OPTIONS'])
+def pin_login():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    data = request.get_json()
+    email = data.get('email', '').lower()
+    pin = data.get('pin', '')
+    
+    if not pin or len(pin) != 4:
+        return jsonify({'error': 'Invalid PIN format'}), 400
+    
+    user = db.get_user_by_email(email)
+    if not user:
+        return jsonify({'error': 'User not found'}), 401
+    
+    if not user.get('pin') or user['pin'] != pin:
+        return jsonify({'error': 'Invalid PIN'}), 401
+    
+    # Check if account is locked
+    account = db.get_account(user['accountId'])
+    if account and account.get('isLocked'):
+        return jsonify({'error': 'Account locked'}), 403
+    
+    # Log activity
+    db.create_activity('pin_login', user['id'], user['email'], user['name'], user.get('plan', 'trial'))
+    
+    token = jwt.encode({
+        'id': user['id'], 
+        'email': email, 
+        'role': user['role'], 
+        'plan': user.get('plan', 'trial'),
+        'package': user.get('plan', 'trial'),  # Add package field for compatibility
+        'accountId': user['accountId']
+    }, app.config['SECRET_KEY'], algorithm='HS256')
     
     return jsonify({
         'token': token,
@@ -240,28 +308,46 @@ def handle_users():
         users = db.get_users_by_account(account_id)
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
     
-    # Allow any authenticated user to create cashiers
+    # POST - Create new user (cashier)
     current_user = db.get_user_by_id(request.user['id'])
     if not current_user:
-        return jsonify({'error': 'User not found'}), 404
+        return jsonify({'error': 'Current user not found'}), 404
+    
+    # Only admins can create users
+    if current_user['role'] != 'admin':
+        return jsonify({'error': 'Only admins can create users'}), 403
     
     data = request.get_json()
-    user_id = db.create_user(
-        email=data.get('email', '').lower(),
-        password=data.get('password', 'changeme123'),
-        name=data.get('name', ''),
-        role='cashier',
-        plan='ultra',
-        account_id=current_user['accountId'],
-        pin=data.get('pin', ''),
-        created_by=current_user['id']
-    )
     
-    # Log activity
-    db.create_activity('user_created', user_id, data.get('email', ''), data.get('name', ''), 'ultra', current_user['id'])
+    # Validate required fields
+    if not data.get('email') or not data.get('name'):
+        return jsonify({'error': 'Email and name are required'}), 400
     
-    user = db.get_user_by_id(user_id)
-    return jsonify({k: v for k, v in user.items() if k != 'password'})
+    # Check if user already exists
+    if db.get_user_by_email(data.get('email').lower()):
+        return jsonify({'error': 'User with this email already exists'}), 400
+    
+    try:
+        user_id = db.create_user(
+            email=data.get('email', '').lower(),
+            password=data.get('password', 'changeme123'),
+            name=data.get('name', ''),
+            role='cashier',  # Always create as cashier
+            plan=current_user['plan'],  # Inherit plan from admin
+            account_id=current_user['accountId'],
+            pin=data.get('pin', ''),
+            created_by=current_user['id']
+        )
+        
+        # Log activity
+        db.create_activity('user_created', user_id, data.get('email', ''), data.get('name', ''), current_user['plan'], current_user['id'])
+        
+        user = db.get_user_by_id(user_id)
+        return jsonify({k: v for k, v in user.items() if k != 'password'})
+        
+    except Exception as e:
+        print(f"Error creating user: {e}")
+        return jsonify({'error': 'Failed to create user'}), 500
 
 @app.route('/api/reminders', methods=['GET', 'POST'])
 @token_required
