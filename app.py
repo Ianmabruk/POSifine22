@@ -308,10 +308,21 @@ def handle_users():
         account_users = [u for u in users if u.get('accountId') == account_id]
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in account_users])
     
+    # Debug logging
+    print(f"Token user: {request.user}")
+    
     # Only Ultra admins can create users
     current_user = next((u for u in users if u['id'] == request.user['id']), None)
-    if not current_user or current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
-        return jsonify({'error': 'Ultra admin required'}), 403
+    print(f"Found current user: {current_user}")
+    
+    if not current_user:
+        return jsonify({'error': 'Current user not found'}), 404
+    
+    if current_user.get('role') != 'admin':
+        return jsonify({'error': f'Admin role required, got: {current_user.get("role")}'}), 403
+        
+    if current_user.get('plan') != 'ultra':
+        return jsonify({'error': f'Ultra plan required, got: {current_user.get("plan")}'}), 403
     
     data = request.get_json()
     new_user = {
