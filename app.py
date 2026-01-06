@@ -40,8 +40,11 @@ def home():
 def health():
     return jsonify({'status': 'ok'})
 
-@app.route('/api/auth/signup', methods=['POST'])
+@app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     data = request.get_json()
     email = data.get('email', '').lower()
     password = data.get('password', '')
@@ -76,8 +79,11 @@ def signup():
         'user': {k: v for k, v in user.items() if k != 'password'}
     })
 
-@app.route('/api/auth/login', methods=['POST'])
+@app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
 def login():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     data = request.get_json()
     email = data.get('email', '').lower()
     password = data.get('password', '')
