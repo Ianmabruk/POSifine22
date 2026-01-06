@@ -46,9 +46,15 @@ def token_required(f):
 def home():
     return jsonify({'message': 'POS API is running'})
 
-@app.route('/api/health')
-def health():
-    return jsonify({'status': 'ok'})
+@app.route('/api/debug')
+def debug():
+    return jsonify({
+        'accounts': len(accounts),
+        'users': len(users),
+        'products': len(products),
+        'all_products': products,
+        'all_users': users
+    })
 
 @app.route('/api/auth/signup', methods=['POST'])
 def signup():
