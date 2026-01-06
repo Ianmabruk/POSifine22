@@ -9,19 +9,40 @@ app = Flask(__name__)
 CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['*'])
 app.config['SECRET_KEY'] = 'simple-secret-key'
 
-# ACCOUNT-BASED DATA MODEL (NOT COMPANY-BASED)
-# Each account has its own data pool that all users in that account share
+import json
+import os
+from pathlib import Path
 
-# Account = Primary data owner (Ultra admin or Basic user)
-# Users = People who can access an account's data
-accounts = []
-users = []
-products = []  # Each product has accountId
-sales = []     # Each sale has accountId  
-expenses = []  # Each expense has accountId
-activities = []
-reminders = []
-settings = [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
+# Data persistence
+DATA_DIR = Path('/tmp')
+
+def load_data(filename, default=None):
+    try:
+        path = DATA_DIR / filename
+        if path.exists():
+            with open(path, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return default or []
+
+def save_data(filename, data):
+    try:
+        path = DATA_DIR / filename
+        with open(path, 'w') as f:
+            json.dump(data, f)
+    except:
+        pass
+
+# Load persistent data
+accounts = load_data('accounts.json', [])
+users = load_data('users.json', [])
+products = load_data('products.json', [])
+sales = load_data('sales.json', [])
+expenses = load_data('expenses.json', [])
+activities = load_data('activities.json', [])
+reminders = load_data('reminders.json', [])
+settings = load_data('settings.json', [{'screenLockPassword': '2005', 'businessName': 'My Business'}])
 
 def token_required(f):
     @wraps(f)
@@ -102,6 +123,11 @@ def signup():
         'locked': False
     }
     users.append(user)
+    
+    # Persist data
+    save_data('accounts.json', accounts)
+    save_data('users.json', users)
+    save_data('activities.json', activities)
     
     # Log activity
     activities.append({
@@ -202,6 +228,7 @@ def handle_products():
                 return jsonify({'error': f'Ingredient product not found: {ingredient.get("productId")}'}), 400
     
     products.append(product)
+    save_data('products.json', products)
     return jsonify(product)
 
 @app.route('/api/products/<int:product_id>', methods=['PUT', 'DELETE'])
@@ -346,6 +373,8 @@ def handle_users():
         'createdAt': datetime.now().isoformat()
     }
     users.append(new_user)
+    save_data('users.json', users)
+    save_data('activities.json', activities)
     
     # Log activity
     activities.append({
