@@ -1,32 +1,37 @@
+import os
+import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import jwt
-import os
 from datetime import datetime, timedelta
 from functools import wraps
-import database as db
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Enhanced CORS configuration
-CORS(app, 
-     origins=['*'],
-     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-     allow_headers=['*'],
-     supports_credentials=True)
+# CORS configuration
+CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['*'])
 
-# Add CORS headers to all responses
+# Configuration
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# Import database after app creation to avoid circular imports
+try:
+    import database as db
+    logger.info("Database module imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import database: {e}")
+    raise
+
 @app.after_request
 def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', '*')
-    response.headers.add('Access-Control-Allow-Methods', '*')
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = '*'
     return response
-
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
-
-# Initialize database
-db.init_db()
 
 def token_required(f):
     @wraps(f)
@@ -37,103 +42,120 @@ def token_required(f):
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
             request.user = data
-            
-            # For main admin, skip user lookup
             if data.get('type') == 'main_admin':
                 return f(*args, **kwargs)
-            
-        except:
+        except Exception as e:
+            logger.error(f"Token validation failed: {e}")
             return jsonify({'error': 'Invalid token'}), 401
         return f(*args, **kwargs)
     return decorated
 
 @app.route('/')
 def home():
-    return jsonify({'message': 'POS API is running'})
+    return jsonify({'message': 'POS API is running', 'status': 'ok'})
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok'})
+    try:
+        # Test database connection
+        conn = db.get_db()
+        conn.close()
+        return jsonify({'status': 'ok', 'database': 'connected'})
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({'status': 'error', 'database': 'disconnected'}), 500
 
 @app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
     if request.method == 'OPTIONS':
         return '', 200
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
+        email = data.get('email', '').lower().strip()
+        password = data.get('password', '').strip()
+        name = data.get('name', '').strip()
+        plan = data.get('plan', 'trial')
         
-    data = request.get_json()
-    email = data.get('email', '').lower()
-    password = data.get('password', '')
-    name = data.get('name', '')
-    plan = data.get('plan', 'trial')
-    
-    if not email or not password or not name:
-        return jsonify({'error': 'Missing fields'}), 400
-    
-    if db.get_user_by_email(email):
-        return jsonify({'error': 'User exists'}), 400
-    
-    # Create account
-    trial_ends_at = (datetime.now() + timedelta(days=30)).isoformat()
-    account_id = db.create_account(email, plan, trial_ends_at)
-    
-    # Determine role based on plan
-    role = 'admin' if plan in ['ultra', 'outer'] else 'cashier'
-    
-    # Create user
-    user_id = db.create_user(email, password, name, role, plan, account_id)
-    
-    # Log activity
-    db.create_activity('signup', user_id, email, name, plan)
-    
-    token = jwt.encode({
-        'id': user_id, 
-        'email': email, 
-        'role': role, 
-        'plan': plan,
-        'package': plan,  # Add package field for compatibility
-        'accountId': account_id
-    }, app.config['SECRET_KEY'], algorithm='HS256')
-    
-    user = db.get_user_by_id(user_id)
-    return jsonify({
-        'token': token,
-        'user': {k: v for k, v in user.items() if k != 'password'}
-    })
+        if not all([email, password, name]):
+            return jsonify({'error': 'Email, password, and name are required'}), 400
+        
+        if db.get_user_by_email(email):
+            return jsonify({'error': 'User already exists'}), 400
+        
+        # Create account
+        trial_ends_at = (datetime.now() + timedelta(days=30)).isoformat()
+        account_id = db.create_account(email, plan, trial_ends_at)
+        
+        # Determine role based on plan
+        role = 'admin' if plan in ['ultra', 'outer'] else 'cashier'
+        
+        # Create user
+        user_id = db.create_user(email, password, name, role, plan, account_id)
+        
+        # Log activity
+        db.create_activity('signup', user_id, email, name, plan)
+        
+        token = jwt.encode({
+            'id': user_id, 'email': email, 'role': role, 'plan': plan,
+            'package': plan, 'accountId': account_id
+        }, app.config['SECRET_KEY'], algorithm='HS256')
+        
+        user = db.get_user_by_id(user_id)
+        return jsonify({
+            'token': token,
+            'user': {k: v for k, v in user.items() if k != 'password'}
+        })
+        
+    except Exception as e:
+        logger.error(f"Signup error: {e}")
+        return jsonify({'error': 'Signup failed'}), 500
 
 @app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
 def login():
     if request.method == 'OPTIONS':
         return '', 200
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
+        email = data.get('email', '').lower().strip()
+        password = data.get('password', '').strip()
         
-    data = request.get_json()
-    email = data.get('email', '').lower()
-    password = data.get('password', '')
-    
-    user = db.get_user_by_email(email)
-    if not user or user['password'] != password:
-        return jsonify({'error': 'Invalid credentials'}), 401
-    
-    # Check if account is locked
-    account = db.get_account(user['accountId'])
-    if account and account.get('isLocked'):
-        return jsonify({'error': 'Account locked'}), 403
-    
-    # Log activity
-    db.create_activity('login', user['id'], user['email'], user['name'], user.get('plan', 'trial'))
-    
-    token = jwt.encode({
-        'id': user['id'], 
-        'email': email, 
-        'role': user['role'], 
-        'plan': user.get('plan', 'trial'),
-        'package': user.get('plan', 'trial'),  # Add package field for compatibility
-        'accountId': user['accountId']
-    }, app.config['SECRET_KEY'], algorithm='HS256')
-    
-    return jsonify({
-        'token': token,
-        'user': {k: v for k, v in user.items() if k != 'password'}
-    })
+        if not email or not password:
+            return jsonify({'error': 'Email and password required'}), 400
+        
+        user = db.get_user_by_email(email)
+        if not user or user['password'] != password:
+            return jsonify({'error': 'Invalid credentials'}), 401
+        
+        # Check if account is locked
+        account = db.get_account(user['accountid'])
+        if account and account.get('islocked'):
+            return jsonify({'error': 'Account locked'}), 403
+        
+        # Log activity
+        db.create_activity('login', user['id'], user['email'], user['name'], user.get('plan', 'trial'))
+        
+        token = jwt.encode({
+            'id': user['id'], 'email': email, 'role': user['role'], 
+            'plan': user.get('plan', 'trial'), 'package': user.get('plan', 'trial'), 
+            'accountId': user['accountid']
+        }, app.config['SECRET_KEY'], algorithm='HS256')
+        
+        return jsonify({
+            'token': token,
+            'user': {k: v for k, v in user.items() if k != 'password'}
+        })
+        
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        return jsonify({'error': 'Login failed'}), 500
 
 @app.route('/api/auth/pin-login', methods=['POST', 'OPTIONS'])
 def pin_login():
@@ -467,12 +489,22 @@ def upload_image():
     data = request.get_json()
     return jsonify({'url': data.get('image', ''), 'success': True})
 
-# Initialize database on startup
+# Initialize database and start app
 if __name__ == '__main__':
     try:
+        logger.info("Initializing database...")
         db.init_db()
-        print("✅ Database initialized")
+        logger.info("Database initialized successfully")
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
     except Exception as e:
-        print(f"⚠️ Database init warning: {e}")
-    
-    app.run(debug=True)
+        logger.error(f"Failed to start application: {e}")
+        raise
+else:
+    # For production deployment (gunicorn)
+    try:
+        logger.info("Production mode: Initializing database...")
+        db.init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")

@@ -2,120 +2,128 @@ import psycopg2
 import psycopg2.extras
 import json
 import os
+import logging
 from datetime import datetime
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 def get_db_url():
-    return os.environ.get('DATABASE_URL', 'postgresql://localhost/pos_db')
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        # Handle Render's DATABASE_URL format
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        return database_url
+    return 'postgresql://localhost/pos_db'
 
 def init_db():
-    conn = psycopg2.connect(get_db_url())
-    cursor = conn.cursor()
-    
-    # Create tables
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS accounts (
-            id SERIAL PRIMARY KEY,
-            ownerEmail TEXT UNIQUE,
-            plan TEXT,
-            isLocked BOOLEAN DEFAULT FALSE,
-            trialEndsAt TEXT,
-            createdAt TEXT
-        );
+    try:
+        conn = psycopg2.connect(get_db_url())
+        cursor = conn.cursor()
         
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            email TEXT UNIQUE,
-            password TEXT,
-            name TEXT,
-            role TEXT,
-            plan TEXT,
-            accountId INTEGER REFERENCES accounts(id),
-            active BOOLEAN DEFAULT TRUE,
-            locked BOOLEAN DEFAULT FALSE,
-            pin TEXT,
-            cashierPIN TEXT,
-            createdBy INTEGER,
-            createdAt TEXT
-        );
+        # Create tables with proper PostgreSQL syntax
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS accounts (
+                id SERIAL PRIMARY KEY,
+                owneremail TEXT UNIQUE,
+                plan TEXT,
+                islocked BOOLEAN DEFAULT FALSE,
+                trialendsat TEXT,
+                createdat TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email TEXT UNIQUE,
+                password TEXT,
+                name TEXT,
+                role TEXT,
+                plan TEXT,
+                accountid INTEGER REFERENCES accounts(id),
+                active BOOLEAN DEFAULT TRUE,
+                locked BOOLEAN DEFAULT FALSE,
+                pin TEXT,
+                cashierpin TEXT,
+                createdby INTEGER,
+                createdat TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS products (
+                id SERIAL PRIMARY KEY,
+                accountid INTEGER REFERENCES accounts(id),
+                name TEXT,
+                price REAL,
+                cost REAL DEFAULT 0,
+                quantity INTEGER DEFAULT 0,
+                image TEXT,
+                category TEXT DEFAULT 'general',
+                unit TEXT DEFAULT 'pcs',
+                recipe TEXT DEFAULT '[]',
+                iscomposite BOOLEAN DEFAULT FALSE,
+                createdat TEXT,
+                createdby INTEGER,
+                updatedat TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS sales (
+                id SERIAL PRIMARY KEY,
+                accountid INTEGER REFERENCES accounts(id),
+                items TEXT,
+                total REAL,
+                cashierid INTEGER,
+                cashiername TEXT,
+                createdat TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS expenses (
+                id SERIAL PRIMARY KEY,
+                accountid INTEGER REFERENCES accounts(id),
+                description TEXT,
+                amount REAL,
+                createdat TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS activities (
+                id SERIAL PRIMARY KEY,
+                type TEXT,
+                userid INTEGER,
+                email TEXT,
+                name TEXT,
+                plan TEXT,
+                createdby INTEGER,
+                timestamp TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS settings (
+                id SERIAL PRIMARY KEY,
+                screenlockpassword TEXT DEFAULT '2005',
+                businessname TEXT DEFAULT 'My Business'
+            );
+        ''')
         
-        CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            accountId INTEGER REFERENCES accounts(id),
-            name TEXT,
-            price REAL,
-            cost REAL DEFAULT 0,
-            quantity INTEGER DEFAULT 0,
-            image TEXT,
-            category TEXT DEFAULT 'general',
-            unit TEXT DEFAULT 'pcs',
-            recipe TEXT DEFAULT '[]',
-            isComposite BOOLEAN DEFAULT FALSE,
-            createdAt TEXT,
-            createdBy INTEGER,
-            updatedAt TEXT
-        );
+        # Insert default settings if not exists
+        cursor.execute('SELECT COUNT(*) FROM settings')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('INSERT INTO settings (screenlockpassword, businessname) VALUES (%s, %s)', 
+                          ('2005', 'My Business'))
         
-        CREATE TABLE IF NOT EXISTS sales (
-            id SERIAL PRIMARY KEY,
-            accountId INTEGER REFERENCES accounts(id),
-            items TEXT,
-            total REAL,
-            cashierId INTEGER,
-            cashierName TEXT,
-            createdAt TEXT
-        );
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
         
-        CREATE TABLE IF NOT EXISTS expenses (
-            id SERIAL PRIMARY KEY,
-            accountId INTEGER REFERENCES accounts(id),
-            description TEXT,
-            amount REAL,
-            createdAt TEXT
-        );
-        
-        CREATE TABLE IF NOT EXISTS activities (
-            id SERIAL PRIMARY KEY,
-            type TEXT,
-            userId INTEGER,
-            email TEXT,
-            name TEXT,
-            plan TEXT,
-            createdBy INTEGER,
-            timestamp TEXT
-        );
-        
-        CREATE TABLE IF NOT EXISTS reminders (
-            id SERIAL PRIMARY KEY,
-            accountId INTEGER REFERENCES accounts(id),
-            title TEXT,
-            description TEXT,
-            dueDate TEXT,
-            priority TEXT DEFAULT 'medium',
-            completed BOOLEAN DEFAULT FALSE,
-            createdBy INTEGER,
-            createdAt TEXT
-        );
-        
-        CREATE TABLE IF NOT EXISTS settings (
-            id SERIAL PRIMARY KEY,
-            screenLockPassword TEXT DEFAULT '2005',
-            businessName TEXT DEFAULT 'My Business'
-        );
-    ''')
-    
-    # Insert default settings if not exists
-    cursor.execute('SELECT COUNT(*) FROM settings')
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('INSERT INTO settings (screenLockPassword, businessName) VALUES (%s, %s)', 
-                      ('2005', 'My Business'))
-    
-    conn.commit()
-    conn.close()
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
 
 def get_db():
-    conn = psycopg2.connect(get_db_url())
-    conn.cursor_factory = psycopg2.extras.RealDictCursor
-    return conn
+    try:
+        conn = psycopg2.connect(get_db_url())
+        conn.cursor_factory = psycopg2.extras.RealDictCursor
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        raise
 
 def dict_from_row(row):
     return dict(row) if row else None
@@ -124,69 +132,97 @@ def list_from_rows(rows):
     return [dict(row) for row in rows]
 
 def create_account(owner_email, plan, trial_ends_at):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO accounts (ownerEmail, plan, trialEndsAt, createdAt)
-        VALUES (%s, %s, %s, %s) RETURNING id
-    ''', (owner_email, plan, trial_ends_at, datetime.now().isoformat()))
-    account_id = cursor.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return account_id
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO accounts (owneremail, plan, trialendsat, createdat)
+            VALUES (%s, %s, %s, %s) RETURNING id
+        ''', (owner_email, plan, trial_ends_at, datetime.now().isoformat()))
+        account_id = cursor.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return account_id
+    except Exception as e:
+        logger.error(f"Failed to create account: {e}")
+        raise
 
 def get_account(account_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM accounts WHERE id = %s', (account_id,))
-    result = dict_from_row(cursor.fetchone())
-    conn.close()
-    return result
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM accounts WHERE id = %s', (account_id,))
+        result = dict_from_row(cursor.fetchone())
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Failed to get account: {e}")
+        return None
 
 # User operations
 def create_user(email, password, name, role, plan, account_id, pin=None, created_by=None):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO users (email, password, name, role, plan, accountId, pin, cashierPIN, createdBy, createdAt)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-    ''', (email, password, name, role, plan, account_id, pin, pin, created_by, datetime.now().isoformat()))
-    user_id = cursor.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return user_id
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO users (email, password, name, role, plan, accountid, pin, cashierpin, createdby, createdat)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+        ''', (email, password, name, role, plan, account_id, pin, pin, created_by, datetime.now().isoformat()))
+        user_id = cursor.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return user_id
+    except Exception as e:
+        logger.error(f"Failed to create user: {e}")
+        raise
 
 def get_user_by_email(email):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
-    result = dict_from_row(cursor.fetchone())
-    conn.close()
-    return result
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
+        result = dict_from_row(cursor.fetchone())
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Failed to get user by email: {e}")
+        return None
 
 def get_user_by_id(user_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))
-    result = dict_from_row(cursor.fetchone())
-    conn.close()
-    return result
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))
+        result = dict_from_row(cursor.fetchone())
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Failed to get user by id: {e}")
+        return None
 
 def get_users_by_account(account_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE accountId = %s', (account_id,))
-    result = list_from_rows(cursor.fetchall())
-    conn.close()
-    return result
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE accountid = %s', (account_id,))
+        result = list_from_rows(cursor.fetchall())
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Failed to get users by account: {e}")
+        return []
 
 def get_all_users():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users')
-    result = list_from_rows(cursor.fetchall())
-    conn.close()
-    return result
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users')
+        result = list_from_rows(cursor.fetchall())
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Failed to get all users: {e}")
+        return []
 
 # Product operations
 def create_product(account_id, name, price, cost, quantity, image, category, unit, recipe, is_composite, created_by):
