@@ -240,10 +240,10 @@ def handle_users():
         users = db.get_users_by_account(account_id)
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
     
-    # Only Ultra admins can create users
+    # Allow any admin to create users (simplified check)
     current_user = db.get_user_by_id(request.user['id'])
-    if not current_user or current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
-        return jsonify({'error': 'Ultra admin required'}), 403
+    if not current_user or current_user.get('role') != 'admin':
+        return jsonify({'error': 'Admin access required'}), 403
     
     data = request.get_json()
     user_id = db.create_user(
