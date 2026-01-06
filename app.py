@@ -467,5 +467,12 @@ def upload_image():
     data = request.get_json()
     return jsonify({'url': data.get('image', ''), 'success': True})
 
+# Initialize database on startup
 if __name__ == '__main__':
+    try:
+        db.init_db()
+        print("✅ Database initialized")
+    except Exception as e:
+        print(f"⚠️ Database init warning: {e}")
+    
     app.run(debug=True)

@@ -1,46 +1,46 @@
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import json
 import os
 from datetime import datetime
 
-DB_PATH = '/tmp/pos_database.db'
+def get_db_url():
+    return os.environ.get('DATABASE_URL', 'postgresql://localhost/pos_db')
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(get_db_url())
     cursor = conn.cursor()
     
     # Create tables
-    cursor.executescript('''
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             ownerEmail TEXT UNIQUE,
             plan TEXT,
-            isLocked BOOLEAN DEFAULT 0,
+            isLocked BOOLEAN DEFAULT FALSE,
             trialEndsAt TEXT,
             createdAt TEXT
         );
         
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             email TEXT UNIQUE,
             password TEXT,
             name TEXT,
             role TEXT,
             plan TEXT,
-            accountId INTEGER,
-            active BOOLEAN DEFAULT 1,
-            locked BOOLEAN DEFAULT 0,
+            accountId INTEGER REFERENCES accounts(id),
+            active BOOLEAN DEFAULT TRUE,
+            locked BOOLEAN DEFAULT FALSE,
             pin TEXT,
             cashierPIN TEXT,
             createdBy INTEGER,
-            createdAt TEXT,
-            FOREIGN KEY (accountId) REFERENCES accounts (id)
+            createdAt TEXT
         );
         
         CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            accountId INTEGER,
+            id SERIAL PRIMARY KEY,
+            accountId INTEGER REFERENCES accounts(id),
             name TEXT,
             price REAL,
             cost REAL DEFAULT 0,
@@ -49,35 +49,32 @@ def init_db():
             category TEXT DEFAULT 'general',
             unit TEXT DEFAULT 'pcs',
             recipe TEXT DEFAULT '[]',
-            isComposite BOOLEAN DEFAULT 0,
+            isComposite BOOLEAN DEFAULT FALSE,
             createdAt TEXT,
             createdBy INTEGER,
-            updatedAt TEXT,
-            FOREIGN KEY (accountId) REFERENCES accounts (id)
+            updatedAt TEXT
         );
         
         CREATE TABLE IF NOT EXISTS sales (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            accountId INTEGER,
+            id SERIAL PRIMARY KEY,
+            accountId INTEGER REFERENCES accounts(id),
             items TEXT,
             total REAL,
             cashierId INTEGER,
             cashierName TEXT,
-            createdAt TEXT,
-            FOREIGN KEY (accountId) REFERENCES accounts (id)
+            createdAt TEXT
         );
         
         CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            accountId INTEGER,
+            id SERIAL PRIMARY KEY,
+            accountId INTEGER REFERENCES accounts(id),
             description TEXT,
             amount REAL,
-            createdAt TEXT,
-            FOREIGN KEY (accountId) REFERENCES accounts (id)
+            createdAt TEXT
         );
         
         CREATE TABLE IF NOT EXISTS activities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             type TEXT,
             userId INTEGER,
             email TEXT,
@@ -88,20 +85,19 @@ def init_db():
         );
         
         CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            accountId INTEGER,
+            id SERIAL PRIMARY KEY,
+            accountId INTEGER REFERENCES accounts(id),
             title TEXT,
             description TEXT,
             dueDate TEXT,
             priority TEXT DEFAULT 'medium',
-            completed BOOLEAN DEFAULT 0,
+            completed BOOLEAN DEFAULT FALSE,
             createdBy INTEGER,
-            createdAt TEXT,
-            FOREIGN KEY (accountId) REFERENCES accounts (id)
+            createdAt TEXT
         );
         
         CREATE TABLE IF NOT EXISTS settings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             screenLockPassword TEXT DEFAULT '2005',
             businessName TEXT DEFAULT 'My Business'
         );
@@ -110,17 +106,15 @@ def init_db():
     # Insert default settings if not exists
     cursor.execute('SELECT COUNT(*) FROM settings')
     if cursor.fetchone()[0] == 0:
-        cursor.execute('INSERT INTO settings (screenLockPassword, businessName) VALUES (?, ?)', 
+        cursor.execute('INSERT INTO settings (screenLockPassword, businessName) VALUES (%s, %s)', 
                       ('2005', 'My Business'))
     
     conn.commit()
     conn.close()
 
 def get_db():
-    if not os.path.exists(DB_PATH):
-        init_db()
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(get_db_url())
+    conn.cursor_factory = psycopg2.extras.RealDictCursor
     return conn
 
 def dict_from_row(row):
@@ -129,15 +123,14 @@ def dict_from_row(row):
 def list_from_rows(rows):
     return [dict(row) for row in rows]
 
-# Account operations
 def create_account(owner_email, plan, trial_ends_at):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO accounts (ownerEmail, plan, trialEndsAt, createdAt)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s) RETURNING id
     ''', (owner_email, plan, trial_ends_at, datetime.now().isoformat()))
-    account_id = cursor.lastrowid
+    account_id = cursor.fetchone()[0]
     conn.commit()
     conn.close()
     return account_id
@@ -145,7 +138,7 @@ def create_account(owner_email, plan, trial_ends_at):
 def get_account(account_id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM accounts WHERE id = ?', (account_id,))
+    cursor.execute('SELECT * FROM accounts WHERE id = %s', (account_id,))
     result = dict_from_row(cursor.fetchone())
     conn.close()
     return result
@@ -156,9 +149,9 @@ def create_user(email, password, name, role, plan, account_id, pin=None, created
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO users (email, password, name, role, plan, accountId, pin, cashierPIN, createdBy, createdAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     ''', (email, password, name, role, plan, account_id, pin, pin, created_by, datetime.now().isoformat()))
-    user_id = cursor.lastrowid
+    user_id = cursor.fetchone()[0]
     conn.commit()
     conn.close()
     return user_id
@@ -166,7 +159,7 @@ def create_user(email, password, name, role, plan, account_id, pin=None, created
 def get_user_by_email(email):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE email = ?', (email,))
+    cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
     result = dict_from_row(cursor.fetchone())
     conn.close()
     return result
@@ -174,7 +167,7 @@ def get_user_by_email(email):
 def get_user_by_id(user_id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+    cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))
     result = dict_from_row(cursor.fetchone())
     conn.close()
     return result
@@ -182,7 +175,7 @@ def get_user_by_id(user_id):
 def get_users_by_account(account_id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE accountId = ?', (account_id,))
+    cursor.execute('SELECT * FROM users WHERE accountId = %s', (account_id,))
     result = list_from_rows(cursor.fetchall())
     conn.close()
     return result
@@ -201,9 +194,9 @@ def create_product(account_id, name, price, cost, quantity, image, category, uni
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO products (accountId, name, price, cost, quantity, image, category, unit, recipe, isComposite, createdAt, createdBy)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     ''', (account_id, name, price, cost, quantity, image, category, unit, json.dumps(recipe), is_composite, datetime.now().isoformat(), created_by))
-    product_id = cursor.lastrowid
+    product_id = cursor.fetchone()[0]
     conn.commit()
     conn.close()
     return product_id
@@ -211,7 +204,7 @@ def create_product(account_id, name, price, cost, quantity, image, category, uni
 def get_products_by_account(account_id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM products WHERE accountId = ?', (account_id,))
+    cursor.execute('SELECT * FROM products WHERE accountId = %s', (account_id,))
     rows = cursor.fetchall()
     products = []
     for row in rows:
@@ -228,15 +221,15 @@ def update_product(product_id, **kwargs):
     set_clause = []
     values = []
     for key, value in kwargs.items():
-        set_clause.append(f"{key} = ?")
+        set_clause.append(f"{key} = %s")
         values.append(value)
     
     if set_clause:
         values.append(datetime.now().isoformat())
         values.append(product_id)
         cursor.execute(f'''
-            UPDATE products SET {", ".join(set_clause)}, updatedAt = ?
-            WHERE id = ?
+            UPDATE products SET {", ".join(set_clause)}, updatedAt = %s
+            WHERE id = %s
         ''', values)
         conn.commit()
     
@@ -245,7 +238,7 @@ def update_product(product_id, **kwargs):
 def delete_product(product_id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM products WHERE id = ?', (product_id,))
+    cursor.execute('DELETE FROM products WHERE id = %s', (product_id,))
     conn.commit()
     conn.close()
 
@@ -255,9 +248,9 @@ def create_sale(account_id, items, total, cashier_id, cashier_name):
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO sales (accountId, items, total, cashierId, cashierName, createdAt)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
     ''', (account_id, json.dumps(items), total, cashier_id, cashier_name, datetime.now().isoformat()))
-    sale_id = cursor.lastrowid
+    sale_id = cursor.fetchone()[0]
     conn.commit()
     conn.close()
     return sale_id
@@ -265,7 +258,7 @@ def create_sale(account_id, items, total, cashier_id, cashier_name):
 def get_sales_by_account(account_id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM sales WHERE accountId = ?', (account_id,))
+    cursor.execute('SELECT * FROM sales WHERE accountId = %s', (account_id,))
     rows = cursor.fetchall()
     sales = []
     for row in rows:
@@ -281,7 +274,7 @@ def create_activity(activity_type, user_id, email, name, plan, created_by=None):
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO activities (type, userId, email, name, plan, createdBy, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
     ''', (activity_type, user_id, email, name, plan, created_by, datetime.now().isoformat()))
     conn.commit()
     conn.close()
@@ -310,7 +303,7 @@ def update_settings(**kwargs):
     set_clause = []
     values = []
     for key, value in kwargs.items():
-        set_clause.append(f"{key} = ?")
+        set_clause.append(f"{key} = %s")
         values.append(value)
     
     if set_clause:

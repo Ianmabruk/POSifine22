@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: universal-pos-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -c "import database; database.init_db()" && gunicorn app:app
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: universal-pos-db
+          property: connectionString
+
+databases:
+  - name: universal-pos-db
+    databaseName: pos_db
+    user: pos_user
