@@ -1,1867 +1,1183 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import jwt
-import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import wraps
-import time
+import json
+from pathlib import Path
+import tempfile
+import shutil
+try:
+    import database
+except Exception:
+    database = None
+
+# Try to enable WebSocket support via flask_sock when available
+try:
+    from flask_sock import Sock
+    has_sock = True
+except Exception:
+    Sock = None
+    has_sock = False
+
+import threading
+from queue import Queue, Empty
 
 app = Flask(__name__)
+# Use BACKEND_ALLOWED_ORIGINS (comma-separated) to restrict CORS in production
+allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://posifine11.vercel.app,https://posifine11.netlify.app')
+allowed_list = [o.strip() for o in allowed.split(',') if o.strip()]
+CORS(app, origins=allowed_list, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'Authorization'])
+app.config['SECRET_KEY'] = os.environ.get('APP_SECRET', 'simple-secret-key')
 
-CORS(app, origins="*")
+# Data persistence helpers (simple JSON files in backend/data)
+DATA_DIR = Path(__file__).parent / 'data'
 
-app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
-app.config['JSON_SORT_KEYS'] = False
+# Ensure data directory exists
+DATA_DIR.mkdir(exist_ok=True)
 
-# Simple in-memory storage for serverless
-DATA_STORE = {
-    'users': [],
-    'products': [],
-    'sales': [],
-    'expenses': [],
-    'activities': []
-}
+def load_json(filename):
+    path = DATA_DIR / filename
+    try:
+        if not path.exists():
+            return []
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading {filename}: {e}")
+        return []
 
-def get_data(table):
-    return DATA_STORE.get(table, [])
+def save_json(filename, data):
+    path = DATA_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Atomic write to avoid partial/corrupt files on failure
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent))
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            shutil.move(tmp, str(path))
+        except Exception as e:
+            print(f"Error saving {filename}: {e}")
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Error creating temp file for {filename}: {e}")
+        # Fallback to direct write
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e2:
+            print(f"Fallback save failed for {filename}: {e2}")
 
-def save_data(table, data):
-    DATA_STORE[table] = data
-    return True
 
-def add_data(table, item):
-    items = get_data(table)
-    item['id'] = len(items) + 1
-    items.append(item)
-    save_data(table, items)
-    return item
+# Ensure responses have correct CORS headers. Use BACKEND_ALLOWED_ORIGINS env var (comma-separated)
+@app.after_request
+def add_cors_headers(response):
+    allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://posifine11.vercel.app,https://posifine11.netlify.app')
+    origin = request.headers.get('Origin')
+    if allowed.strip() == '*':
+        response.headers['Access-Control-Allow-Origin'] = '*'
+    else:
+        allowed_list = [o.strip() for o in allowed.split(',') if o.strip()]
+        if origin and origin in allowed_list:
+            response.headers['Access-Control-Allow-Origin'] = origin
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    return response
+
+# Global storage - load from data files so state persists across restarts
+try:
+    users = load_json('users.json')
+    products = load_json('products.json')
+    sales = load_json('sales.json')
+    expenses = load_json('expenses.json')
+    activities = load_json('activities.json')
+    reminders = load_json('reminders.json')
+    settings = load_json('settings.json') or [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
+    companies = load_json('companies.json')
+    
+    # Ensure companies has at least one entry
+    if not companies:
+        companies = [{
+            'id': 1,
+            'name': 'Demo Company',
+            'plan': 'ultra',
+            'createdAt': datetime.now().isoformat()
+        }]
+        save_json('companies.json', companies)
+        
+except Exception as e:
+    print(f"Error initializing data: {e}")
+    # Fallback to empty data
+    users = []
+    products = []
+    sales = []
+    expenses = []
+    activities = []
+    reminders = []
+    settings = [{'screenLockPassword': '2005', 'businessName': 'My Business'}]
+    companies = [{
+        'id': 1,
+        'name': 'Demo Company',
+        'plan': 'ultra',
+        'createdAt': datetime.now().isoformat()
+    }]
+
+# SSE subscribers: list of tuples (Queue, company_id)
+_subscribers = []
+_subs_lock = threading.Lock()
+
+# WebSocket clients per company: { company_id: set(ws, ...) }
+_ws_clients = {}
+_ws_lock = threading.Lock()
+
+def broadcast_products_update(event_type, payload, company_id=None):
+    """Broadcast a JSON payload to all SSE subscribers for a company."""
+    msg = {'type': event_type, 'payload': payload}
+    with _subs_lock:
+        for q, cid in list(_subscribers):
+            try:
+                if company_id is None or cid == company_id:
+                    q.put(msg)
+            except Exception:
+                pass
+    # Also push to any active WebSocket clients
+    try:
+        text = json.dumps(msg)
+        with _ws_lock:
+            if company_id is not None:
+                clients = list(_ws_clients.get(company_id, []))
+            else:
+                clients = [ws for s in _ws_clients.values() for ws in s]
+
+        for ws in clients:
+            try:
+                ws.send(text)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+@app.route('/api/stream/products')
+def stream_products():
+    """Server-Sent Events endpoint for product updates scoped to user's company.
+    Supports token via `Authorization: Bearer <token>` header or `?token=<token>` query param (for EventSource).
+    """
+    # Authentication: allow token in header or query param (EventSource cannot set headers)
+    token = request.headers.get('Authorization', '').replace('Bearer ', '') or request.args.get('token')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    try:
+        data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        user = next((u for u in users if u.get('id') == data.get('id')), None)
+        if user:
+            request.user = user
+        else:
+            request.user = data
+    except Exception:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    company_id = request.user.get('company_id')
+    q = Queue()
+    # send initial snapshot
+    try:
+        company_products = [p for p in products if p.get('company_id') == company_id]
+        q.put({'type': 'initial', 'payload': company_products})
+    except Exception:
+        q.put({'type': 'initial', 'payload': []})
+
+    with _subs_lock:
+        _subscribers.append((q, company_id))
+
+    def gen():
+        try:
+            while True:
+                try:
+                    msg = q.get(timeout=30)
+                except Empty:
+                    yield ': keep-alive\n\n'
+                    continue
+                yield f"data: {json.dumps(msg)}\n\n"
+        finally:
+            with _subs_lock:
+                try:
+                    _subscribers.remove((q, company_id))
+                except ValueError:
+                    pass
+
+    return app.response_class(gen(), mimetype='text/event-stream')
+
+
+# WebSocket endpoint (preferred) - requires flask-sock and a server that supports websockets
+if has_sock:
+    sock = Sock(app)
+
+    @sock.route('/api/ws/products')
+    def ws_products(ws):
+        # Accept token via query param or initial auth message
+        token = request.args.get('token')
+        user = None
+        if token:
+            try:
+                data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+                user = next((u for u in users if u.get('id') == data.get('id')), None) or data
+            except Exception:
+                user = None
+
+        # If no token in query, expect the client to send an auth message first
+        if not user:
+            try:
+                auth_msg = ws.receive(timeout=5)
+                if auth_msg:
+                    try:
+                        j = json.loads(auth_msg)
+                        t = j.get('token') or j.get('auth')
+                        if t:
+                            data = jwt.decode(t, app.config['SECRET_KEY'], algorithms=['HS256'])
+                            user = next((u for u in users if u.get('id') == data.get('id')), None) or data
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if not user:
+            try:
+                ws.send(json.dumps({'error': 'Unauthorized'}))
+            except Exception:
+                pass
+            return
+
+        company_id = user.get('company_id')
+
+        # Register client
+        with _ws_lock:
+            _ws_clients.setdefault(company_id, set()).add(ws)
+
+        # Send initial snapshot
+        try:
+            company_products = [p for p in products if p.get('company_id') == company_id]
+            ws.send(json.dumps({'type': 'initial', 'payload': company_products}))
+        except Exception:
+            try:
+                ws.send(json.dumps({'type': 'initial', 'payload': []}))
+            except Exception:
+                pass
+
+        # Keep connection alive and handle inbound messages if needed
+        try:
+            while True:
+                msg = ws.receive()
+                if msg is None:
+                    break
+                # Allow clients to request a refresh explicitly
+                try:
+                    data = json.loads(msg)
+                    if data.get('type') == 'refresh':
+                        company_products = [p for p in products if p.get('company_id') == company_id]
+                        ws.send(json.dumps({'type': 'products_snapshot', 'payload': company_products}))
+                except Exception:
+                    # ignore malformed messages
+                    pass
+        finally:
+            # Cleanup
+            with _ws_lock:
+                try:
+                    _ws_clients.get(company_id, set()).discard(ws)
+                except Exception:
+                    pass
+
+
+# Background listener to support Postgres LISTEN/NOTIFY for cross-process broadcasts
+def _start_db_notification_listener():
+    if not os.environ.get('DATABASE_URL'):
+        return
+    if not database:
+        return
+    try:
+        import select
+        conn = database.get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("LISTEN products_update;")
+        print('[DB LISTENER] Listening on products_update channel')
+
+        while True:
+            try:
+                if select.select([conn], [], [], 30) == ([], [], []):
+                    continue
+                conn.poll()
+                while conn.notifies:
+                    notify = conn.notifies.pop(0)
+                    try:
+                        payload = json.loads(notify.payload)
+                        cid = payload.get('company_id')
+                        # Fetch fresh company products and broadcast
+                        try:
+                            company_products = database.db_select('products', 'company_id = %s', (cid,))
+                            broadcast_products_update('products_snapshot', company_products, cid)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+            except Exception:
+                # Sleep briefly and attempt to reconnect
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                try:
+                    conn = database.get_db_connection()
+                    if not conn:
+                        return
+                    cur = conn.cursor()
+                    cur.execute("LISTEN products_update;")
+                except Exception:
+                    return
+    except Exception:
+        return
+
+
+# Start background DB listener thread if DB is enabled
+if os.environ.get('DATABASE_URL') and database:
+    t = threading.Thread(target=_start_db_notification_listener, daemon=True)
+    t.start()
 
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = None
-        auth_header = request.headers.get('Authorization')
-        if auth_header and auth_header.startswith('Bearer '):
-            token = auth_header[7:]
-        
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
         if not token:
-            return jsonify({'error': 'Token is missing'}), 401
-        
+            return jsonify({'error': 'Token missing'}), 401
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            request.user = data
-            
-            if data.get('type') in ['main_admin', 'owner']:
+            # Attach full user record if available, include company_id
+            user = next((u for u in users if u.get('id') == data.get('id')), None)
+            if user:
+                request.user = user
+            else:
+                request.user = data
+            # Allow main_admin token type bypass
+            if data.get('type') == 'main_admin':
                 return f(*args, **kwargs)
             
-            users = get_data('users')
-            user = next((u for u in users if u['id'] == data.get('id')), None)
-            
-            if not user or user.get('locked', False):
-                return jsonify({'error': 'User not found or locked'}), 401
-                
-        except jwt.ExpiredSignatureError:
-            return jsonify({'error': 'Token has expired'}), 401
-        except jwt.InvalidTokenError:
+        except Exception:
             return jsonify({'error': 'Invalid token'}), 401
-        
         return f(*args, **kwargs)
     return decorated
 
-# ============================================================================
-# AUTHENTICATION ENDPOINTS
-# ============================================================================
+@app.route('/')
+def home():
+    return jsonify({'message': 'POS API is running'})
 
-@app.route('/api/auth/signup', methods=['POST'])
+@app.route('/api/health')
+def health():
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
+    if request.method == 'OPTIONS':
+        return '', 200
         
-        email = data.get('email', '').strip().lower()
-        password = data.get('password', '')
-        name = data.get('name', '').strip()
-        
-        if not email or not password or not name:
-            return jsonify({'error': 'Email, password, and name are required'}), 400
-        
-        users = get_data('users')
-        if any(u['email'] == email for u in users):
-            return jsonify({'error': 'User already exists'}), 400
-        
-        plan = data.get('plan', 'trial')
-        user = {
-            'email': email,
-            'password': password,
-            'name': name,
-            'role': 'admin' if len(users) == 0 or plan in ['ultra', 'basic'] else 'cashier',
+    data = request.get_json()
+    email = data.get('email', '').lower()
+    password = data.get('password', '')
+    name = data.get('name', '')
+    plan = data.get('plan', 'trial')
+    
+    if not email or not password or not name:
+        return jsonify({'error': 'Missing fields'}), 400
+    
+    if any(u['email'] == email for u in users):
+        return jsonify({'error': 'User exists'}), 400
+    
+    # Create a new company for the first user or accept companyId when provided
+    if len(users) == 0:
+        role = 'admin'
+        # create company
+        company = {
+            'id': len(companies) + 1,
+            'name': data.get('companyName', f"{name}'s Company"),
             'plan': plan,
-            'active': True,
-            'locked': False,
-            'permissions': {},
             'createdAt': datetime.now().isoformat()
         }
-        
-        user = add_data('users', user)
-        
-        # Log activity
-        add_data('activities', {
-            'type': 'signup',
-            'userId': user['id'],
-            'email': email,
-            'name': name,
-            'plan': plan,
-            'timestamp': datetime.now().isoformat()
-        })
-        
-        token = jwt.encode({
-            'id': user['id'],
-            'email': user['email'],
-            'role': user['role']
-        }, app.config['SECRET_KEY'], algorithm='HS256')
-        
-        return jsonify({
-            'token': token,
-            'user': {k: v for k, v in user.items() if k != 'password'}
-        }), 201
-        
-    except Exception as e:
-        return jsonify({'error': f'Signup failed: {str(e)}'}), 500
+        companies.append(company)
+        company_id = company['id']
+    else:
+        # If signing up under an existing company provide companyId
+        company_id = data.get('companyId') or data.get('company_id')
+        if company_id is None:
+            # default to first company for simplicity (invitations flow is out-of-scope)
+            company_id = companies[0]['id'] if companies else 1
+        # If user selected Ultra package, make them an admin for that company.
+        # This ensures Ultra signups get admin privileges and land on the Admin dashboard.
+        role = 'admin' if plan == 'ultra' else ('cashier' if plan == 'basic' else 'cashier')
+
+    user = {
+        'id': len(users) + 1,
+        'email': email,
+        'password': password,
+        'name': name,
+        'role': role,
+        'plan': plan,
+        'company_id': company_id,
+        'active': True,
+        'locked': False
+    }
+    users.append(user)
+
+    # Log activity
+    activities.append({
+        'id': len(activities) + 1,
+        'type': 'signup',
+        'userId': user['id'],
+        'email': email,
+        'name': name,
+        'plan': user['plan'],
+        'timestamp': datetime.now().isoformat()
+    })
+
+    token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role'], 'company_id': user['company_id']}, 
+                      app.config['SECRET_KEY'], algorithm='HS256')
+
+    # persist users and companies
+    save_json('users.json', users)
+    save_json('companies.json', companies)
+
+    return jsonify({
+        'token': token,
+        'user': {k: v for k, v in user.items() if k != 'password'}
+    })
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        email = data.get('email', '').strip().lower()
-        password = data.get('password', '')
-        
-        if not email or not password:
-            return jsonify({'error': 'Email and password are required'}), 400
-        
-        users = get_data('users')
-        user = next((u for u in users if u['email'] == email and u['password'] == password), None)
-        
-        if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
-        if user.get('locked', False):
-            return jsonify({'error': 'Account is locked'}), 403
-        
-        # Log activity
-        add_data('activities', {
-            'type': 'login',
-            'userId': user['id'],
-            'email': user['email'],
-            'name': user['name'],
-            'plan': user.get('plan', 'trial'),
-            'timestamp': datetime.now().isoformat()
-        })
-        
-        token = jwt.encode({
-            'id': user['id'],
-            'email': user['email'],
-            'role': user['role']
-        }, app.config['SECRET_KEY'], algorithm='HS256')
-        
-        return jsonify({
-            'token': token,
-            'user': {k: v for k, v in user.items() if k != 'password'}
-        })
-        
-    except Exception as e:
-        return jsonify({'error': f'Login failed: {str(e)}'}), 500
+    data = request.get_json()
+    email = data.get('email', '').lower()
+    password = data.get('password', '')
+    
+    user = next((u for u in users if u['email'] == email and u['password'] == password), None)
+    if not user:
+        return jsonify({'error': 'Invalid credentials'}), 401
+    
+    # Log activity
+    activities.append({
+        'id': len(activities) + 1,
+        'type': 'login',
+        'userId': user['id'],
+        'email': user['email'],
+        'name': user['name'],
+        'plan': user.get('plan', 'trial'),
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role'], 'company_id': user.get('company_id')}, 
+                      app.config['SECRET_KEY'], algorithm='HS256')
+    
+    return jsonify({
+        'token': token,
+        'user': {k: v for k, v in user.items() if k != 'password'}
+    })
 
-@app.route('/api/auth/pin-login', methods=['POST'])
-def pin_login():
-    """PIN-based login endpoint for cashiers"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        email = data.get('email', '').strip().lower()
-        pin = data.get('pin', '')
-        
-        if not email:
-            return jsonify({'error': 'Email is required'}), 400
-        
-        if not pin:
-            return jsonify({'error': 'PIN is required'}), 400
-        
-        users = safe_load_json('users.json')
-        user = next((u for u in users if u['email'] == email), None)
-        
-        if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
-        # Check if PIN is set
-        if not user.get('pin'):
-            return jsonify({'error': 'PIN not set for this user'}), 400
-        
-        # Verify PIN
-        if user.get('pin') != pin:
-            return jsonify({'error': 'Invalid PIN'}), 401
-        
-        # Check account status
-        if user.get('locked', False):
-            return jsonify({'error': 'Account is locked. Contact administrator.'}), 403
-        
-        if not user.get('active', False):
-            return jsonify({'error': 'Account is not active'}), 403
-        
-        # Generate token with user information
-        token_data = {
-            'id': user['id'],
-            'email': user['email'],
-            'role': user['role']
-        }
-        token = jwt.encode(token_data, app.config['SECRET_KEY'], algorithm='HS256')
-        
-        return jsonify({
-            'token': token,
-            'user': {k: v for k, v in user.items() if k != 'password'}
-        })
-        
-    except Exception as e:
-        print(f"PIN login error: {e}")
-        return jsonify({'error': f'PIN login failed: {str(e)}'}), 500
-
-@app.route('/api/auth/me', methods=['GET'])
+@app.route('/api/auth/me')
 @token_required
-def get_current_user():
-    try:
-        users = get_data('users')
-        user = next((u for u in users if u['id'] == request.user.get('id')), None)
-        
-        if user:
-            return jsonify({k: v for k, v in user.items() if k != 'password'})
-        else:
-            return jsonify({'error': 'User not found'}), 404
-            
-    except Exception as e:
-        return jsonify({'error': f'Failed to get user: {str(e)}'}), 500
+def me():
+    user = next((u for u in users if u['id'] == request.user.get('id')), None)
+    if user:
+        return jsonify({k: v for k, v in user.items() if k != 'password'})
+    return jsonify({'error': 'User not found'}), 404
 
 @app.route('/api/products', methods=['GET', 'POST'])
 @token_required
-def products():
-    try:
-        if request.method == 'GET':
-            return jsonify(get_data('products'))
-        
-        data = request.get_json()
-        if not data or not data.get('name'):
-            return jsonify({'error': 'Product name is required'}), 400
-        
-        product = {
-            'name': data['name'],
-            'price': float(data.get('price', 0)),
-            'quantity': int(data.get('quantity', 0)),
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        product = add_data('products', product)
-        return jsonify(product), 201
-        
-    except Exception as e:
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+def handle_products():
+    if request.method == 'GET':
+        # Return products for the user's company only (single source of truth)
+        company_id = request.user.get('company_id')
+        if not company_id:
+            return jsonify({'error': 'Missing company context'}), 400
+        company_products = [p for p in products if p.get('company_id') == company_id]
 
-@app.route('/api/sales', methods=['GET', 'POST'])
-@token_required
-def sales():
-    try:
-        if request.method == 'GET':
-            return jsonify(get_data('sales'))
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        sale = {
-            'items': data.get('items', []),
-            'total': float(data.get('total', 0)),
-            'cashierId': request.user.get('id'),
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        sale = add_data('sales', sale)
-        return jsonify(sale), 201
-        
-    except Exception as e:
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+        # Compute producible units for composite products and expose as maxUnits
+        def compute_max_units(prod):
+            # Prefer inline recipe (file-backed). recipe is list of {productId, quantity}
+            recipe = prod.get('recipe') or []
+            if recipe:
+                max_units = float('inf')
+                for ingredient in recipe:
+                    pid = ingredient.get('productId')
+                    if pid is None:
+                        continue
+                    raw = next((r for r in company_products if r.get('id') == pid), None)
+                    if not raw:
+                        return 0
+                    available = raw.get('quantity', 0) or 0
+                    needed = ingredient.get('quantity', 0) or 0
+                    if needed <= 0:
+                        return 0
+                    possible = available // needed
+                    if possible < max_units:
+                        max_units = possible
+                return int(max_units) if max_units != float('inf') else 0
 
-@app.route('/api/expenses', methods=['GET', 'POST'])
-@token_required
-def expenses():
-    try:
-        if request.method == 'GET':
-            return jsonify(get_data('expenses'))
-        
-        data = request.get_json()
-        if not data or not data.get('description'):
-            return jsonify({'error': 'Description is required'}), 400
-        
-        expense = {
-            'description': data['description'],
-            'amount': float(data.get('amount', 0)),
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        expense = add_data('expenses', expense)
-        return jsonify(expense), 201
-        
-    except Exception as e:
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/stats', methods=['GET'])
-@token_required
-def get_stats():
-    try:
-        sales = get_data('sales')
-        expenses = get_data('expenses')
-        
-        total_sales = sum(sale.get('total', 0) for sale in sales)
-        total_expenses = sum(expense.get('amount', 0) for expense in expenses)
-        profit = total_sales - total_expenses
-        
-        return jsonify({
-            'totalSales': total_sales,
-            'totalExpenses': total_expenses,
-            'profit': profit,
-            'productCount': len(get_data('products'))
-        })
-        
-    except Exception as e:
-        return jsonify({'error': f'Failed to get statistics: {str(e)}'}), 500
-
-# ============================================================================
-# USER MANAGEMENT ENDPOINTS
-# ============================================================================
-
-@app.route('/api/users', methods=['GET', 'POST'])
-@token_required
-def users_list():
-    """Get all users or create new user (admin only)"""
-    try:
-        if request.method == 'GET':
-            # Check if user is admin
-            if request.user.get('role') != 'admin':
-                return jsonify({'error': 'Admin access required'}), 403
-            
-            users = safe_load_json('users.json')
-            return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
-        
-        # POST - Admin creating cashier
-        if request.user.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        # Validate required fields
-        required_fields = ['email', 'name']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'error': f'{field.capitalize()} is required'}), 400
-        
-        email = data['email'].strip().lower()
-        name = data['name'].strip()
-        
-        users = safe_load_json('users.json')
-        
-        # Check if user already exists
-        if any(u['email'] == email for u in users):
-            return jsonify({'error': 'User already exists'}), 400
-        
-        # Create new cashier user
-        user = {
-            'id': len(users) + 1,
-            'email': email,
-            'password': data.get('password', 'changeme123'),  # Default password
-            'name': name,
-            'role': 'cashier',
-            'plan': 'basic',
-            'price': 900,
-            'active': True,  # Always active
-            'locked': False,
-            'pin': None,
-            'permissions': {
-                'viewSales': True,
-                'viewInventory': True,
-                'viewExpenses': False,
-                'manageProducts': False
-            },
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        users.append(user)
-        if not safe_save_json('users.json', users):
-            return jsonify({'error': 'Failed to save user data'}), 500
-        
-        return jsonify({k: v for k, v in user.items() if k != 'password'}), 201
-        
-    except Exception as e:
-        print(f"Users endpoint error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/users/<int:id>', methods=['PUT', 'DELETE'])
-@token_required
-def user_detail(id):
-    """Update or delete user"""
-    try:
-        users = safe_load_json('users.json')
-        user = next((u for u in users if u['id'] == id), None)
-        
-        if not user:
-            return jsonify({'error': 'User not found'}), 404
-        
-        if request.method == 'PUT':
-            # Check permissions
-            if request.user.get('id') != id and request.user.get('role') != 'admin':
-                return jsonify({'error': 'Unauthorized'}), 403
-            
-            data = request.get_json()
-            if not data:
-                return jsonify({'error': 'Request data is required'}), 400
-            
-            # Update user fields (excluding protected fields)
-            protected_fields = {'id', 'password'}
-            for key, value in data.items():
-                if key not in protected_fields:
-                    user[key] = value
-            
-            if not safe_save_json('users.json', users):
-                return jsonify({'error': 'Failed to save user data'}), 500
-            
-            # If role changed, generate new token
-            if 'role' in data:
-                new_token = jwt.encode({
-                    'id': user['id'],
-                    'email': user['email'],
-                    'role': user['role']
-                }, app.config['SECRET_KEY'], algorithm='HS256')
-                
-                return jsonify({
-                    'token': new_token,
-                    'user': {k: v for k, v in user.items() if k != 'password'}
-                })
-            
-            return jsonify({k: v for k, v in user.items() if k != 'password'})
-        
-        # DELETE
-        if request.user.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
-        users = [u for u in users if u['id'] != id]
-        if not safe_save_json('users.json', users):
-            return jsonify({'error': 'Failed to delete user'}), 500
-        
-        return '', 204
-        
-    except Exception as e:
-        print(f"User detail error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/users/<int:id>/set-pin', methods=['POST'])
-@token_required
-def set_user_pin(id):
-    """Set PIN for a user (admin only)"""
-    try:
-        if request.user.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
-        data = request.get_json()
-        if not data or 'pin' not in data:
-            return jsonify({'error': 'PIN is required'}), 400
-        
-        pin = data['pin']
-        
-        # Validate PIN (should be 4 digits)
-        if not pin or len(str(pin)) != 4 or not str(pin).isdigit():
-            return jsonify({'error': 'PIN must be exactly 4 digits'}), 400
-        
-        users = safe_load_json('users.json')
-        user = next((u for u in users if u['id'] == id), None)
-        
-        if not user:
-            return jsonify({'error': 'User not found'}), 404
-        
-        # Set the PIN
-        user['pin'] = str(pin)
-        
-        if not safe_save_json('users.json', users):
-            return jsonify({'error': 'Failed to save PIN'}), 500
-        
-        return jsonify({
-            'message': 'PIN set successfully',
-            'user': {k: v for k, v in user.items() if k != 'password'}
-        })
-        
-    except Exception as e:
-        print(f"Set PIN error: {e}")
-        return jsonify({'error': f'Failed to set PIN: {str(e)}'}), 500
-
-@app.route('/api/users/<int:id>/lock', methods=['POST'])
-@token_required
-def lock_user(id):
-    """Lock/unlock a user (admin only)"""
-    try:
-        if request.user.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
-        data = request.get_json()
-        if not data or 'locked' not in data:
-            return jsonify({'error': 'Locked status is required'}), 400
-        
-        locked = bool(data['locked'])
-        
-        users = safe_load_json('users.json')
-        user = next((u for u in users if u['id'] == id), None)
-        
-        if not user:
-            return jsonify({'error': 'User not found'}), 404
-        
-        # Update lock status
-        user['locked'] = locked
-        user['active'] = not locked  # If locked, make inactive
-        
-        if not safe_save_json('users.json', users):
-            return jsonify({'error': 'Failed to update user status'}), 500
-        
-        return jsonify({
-            'message': f'User {"locked" if locked else "unlocked"} successfully',
-            'user': {k: v for k, v in user.items() if k != 'password'}
-        })
-        
-    except Exception as e:
-        print(f"Lock user error: {e}")
-        return jsonify({'error': f'Failed to update user status: {str(e)}'}), 500
-
-# ============================================================================
-# PRODUCT ENDPOINTS
-# ============================================================================
-
-@app.route('/api/products', methods=['GET', 'POST'])
-@token_required
-def products():
-    """Get all products or create new product"""
-    try:
-        if request.method == 'GET':
-            products = safe_load_json('products.json')
-            
-            # Filter products based on user role
-            if request.user.get('role') == 'cashier':
-                # Cashiers only see products visible to them
-                products = [p for p in products if not p.get('expenseOnly', False)]
-            
-            # Sort by creation date (newest first)
-            products.sort(key=lambda x: x.get('createdAt', ''), reverse=True)
-            return jsonify(products)
-        
-        # POST - Create new product
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        # Validate required fields
-        if not data.get('name'):
-            return jsonify({'error': 'Product name is required'}), 400
-        
-        products = safe_load_json('products.json')
-        
-        product = {
-            'id': len(products) + 1,
-            'name': data['name'].strip(),
-            'price': float(data.get('price', 0)),
-            'cost': float(data.get('cost', 0)),
-            'quantity': int(data.get('quantity', 0)),
-            'unit': data.get('unit', 'pcs'),
-            'category': data.get('category', 'raw'),
-            'recipe': data.get('recipe', []),
-            'expenseOnly': data.get('expenseOnly', False),
-            'visibleToCashier': data.get('visibleToCashier', True),
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        products.append(product)
-        if not safe_save_json('products.json', products):
-            return jsonify({'error': 'Failed to save product data'}), 500
-        
-        return jsonify(product), 201
-        
-    except Exception as e:
-        print(f"Products endpoint error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/products/<int:id>', methods=['PUT', 'DELETE'])
-@token_required
-def product_detail(id):
-    """Update or delete product"""
-    try:
-        products = safe_load_json('products.json')
-        product = next((p for p in products if p['id'] == id), None)
-        
-        if not product:
-            return jsonify({'error': 'Product not found'}), 404
-        
-        if request.method == 'PUT':
-            data = request.get_json()
-            if not data:
-                return jsonify({'error': 'Request data is required'}), 400
-            
-            # Update product fields (excluding protected fields)
-            protected_fields = {'id'}
-            for key, value in data.items():
-                if key not in protected_fields:
-                    if key in ['price', 'cost']:
-                        product[key] = float(value)
-                    elif key in ['quantity']:
-                        product[key] = int(value)
-                    else:
-                        product[key] = value
-            
-            if not safe_save_json('products.json', products):
-                return jsonify({'error': 'Failed to save product data'}), 500
-            
-            return jsonify(product)
-        
-        # DELETE
-        products = [p for p in products if p['id'] != id]
-        if not safe_save_json('products.json', products):
-            return jsonify({'error': 'Failed to delete product'}), 500
-        
-        return '', 204
-        
-    except Exception as e:
-        print(f"Product detail error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/products/<int:id>/max-producible', methods=['GET'])
-@token_required
-def max_producible(id):
-    """Calculate maximum producible units for a product"""
-    try:
-        products = safe_load_json('products.json')
-        product = next((p for p in products if p['id'] == id), None)
-        
-        if not product or not product.get('recipe'):
-            return jsonify({'maxUnits': 0, 'limitingIngredient': None})
-        
-        max_units = float('inf')
-        limiting = None
-        
-        for ingredient in product['recipe']:
-            raw = next((p for p in products if p['id'] == ingredient['productId']), None)
-            if raw:
-                available = raw.get('quantity', 0)
-                needed = ingredient['quantity']
-                possible = available / needed if needed > 0 else 0
-                if possible < max_units:
-                    max_units = possible
-                    limiting = raw['name']
-        
-        return jsonify({
-            'maxUnits': int(max_units) if max_units != float('inf') else 0,
-            'limitingIngredient': limiting
-        })
-        
-    except Exception as e:
-        print(f"Max producible error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-# ============================================================================
-# SALES ENDPOINTS
-# ============================================================================
-
-@app.route('/api/sales', methods=['GET', 'POST'])
-@token_required
-def sales():
-    """Get all sales or create new sale"""
-    try:
-        if request.method == 'GET':
-            sales = safe_load_json('sales.json')
-            return jsonify(sales)
-        
-        # POST - Create new sale
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        batches = safe_load_json('batches.json')
-        expenses = safe_load_json('expenses.json')
-        
-        total_cogs = 0
-        
-        # Process each item sold using FIFO from batches
-        for item in data.get('items', []):
-            product_id = item['productId']
-            quantity_sold = item['quantity']
-            
-            # Get batches for this product (FIFO - oldest first)
-            product_batches = [b for b in batches if b.get('productId') == product_id and b.get('quantity', 0) > 0]
-            product_batches.sort(key=lambda x: x.get('createdAt', ''))
-            
-            remaining_qty = quantity_sold
-            
-            # Deduct from batches using FIFO
-            for batch in product_batches:
-                if remaining_qty <= 0:
-                    break
-                
-                available = batch.get('quantity', 0)
-                take_from_batch = min(remaining_qty, available)
-                
-                # Calculate COGS from this batch
-                batch_cost = batch.get('cost', 0)
-                total_cogs += batch_cost * take_from_batch
-                
-                # Update batch quantity
-                batch['quantity'] = available - take_from_batch
-                remaining_qty -= take_from_batch
-        
-        # Save updated batches
-        if not safe_save_json('batches.json', batches):
-            return jsonify({'error': 'Failed to update inventory'}), 500
-        
-        # Create sale record
-        sales_list = safe_load_json('sales.json')
-        sale = {
-            'id': len(sales_list) + 1,
-            'items': data['items'],
-            'total': data['total'],
-            'cogs': total_cogs,
-            'profit': data['total'] - total_cogs,
-            'paymentMethod': data.get('paymentMethod', 'cash'),
-            'cashierId': request.user.get('id'),
-            'cashierName': next((u['name'] for u in safe_load_json('users.json') if u['id'] == request.user.get('id')), 'Unknown'),
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        sales_list.append(sale)
-        if not safe_save_json('sales.json', sales_list):
-            return jsonify({'error': 'Failed to save sale data'}), 500
-        
-        return jsonify(sale), 201
-        
-    except Exception as e:
-        print(f"Sales endpoint error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-# ============================================================================
-# EXPENSES ENDPOINTS
-# ============================================================================
-
-@app.route('/api/expenses', methods=['GET', 'POST'])
-@token_required
-def expenses():
-    """Get all expenses or create new expense"""
-    try:
-        if request.method == 'GET':
-            expenses = safe_load_json('expenses.json')
-            return jsonify(expenses)
-        
-        # POST - Create new expense
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        if not data.get('description'):
-            return jsonify({'error': 'Expense description is required'}), 400
-        
-        if not data.get('amount'):
-            return jsonify({'error': 'Expense amount is required'}), 400
-        
-        expenses = safe_load_json('expenses.json')
-        
-        expense = {
-            'id': len(expenses) + 1,
-            'description': data['description'].strip(),
-            'amount': float(data['amount']),
-            'category': data.get('category', 'general'),
-            'automatic': False,
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        expenses.append(expense)
-        if not safe_save_json('expenses.json', expenses):
-            return jsonify({'error': 'Failed to save expense data'}), 500
-        
-        return jsonify(expense), 201
-        
-    except Exception as e:
-        print(f"Expenses endpoint error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-# ============================================================================
-# SETTINGS ENDPOINTS
-# ============================================================================
-
-@app.route('/api/settings', methods=['GET', 'POST'])
-@token_required
-def settings():
-    """Get or update settings"""
-    try:
-        if request.method == 'GET':
-            settings = safe_load_json('settings.json')
-            return jsonify(settings[0] if settings else {})
-        
-        # POST - Update settings
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        settings = safe_load_json('settings.json')
-        if settings:
-            settings[0].update(data)
-        else:
-            settings = [data]
-        
-        if not safe_save_json('settings.json', settings):
-            return jsonify({'error': 'Failed to save settings'}), 500
-        
-        return jsonify(settings[0])
-        
-    except Exception as e:
-        print(f"Settings endpoint error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-# ============================================================================
-# BATCHES ENDPOINTS
-# ============================================================================
-
-@app.route('/api/batches', methods=['GET', 'POST'])
-@token_required
-def batches_endpoint():
-    """Get all batches or create new batch"""
-    try:
-        if request.method == 'GET':
-            product_id = request.args.get('productId')
-            batches = safe_load_json('batches.json')
-            
-            if product_id:
-                batches = [b for b in batches if b.get('productId') == int(product_id)]
-            
-            return jsonify(batches)
-        
-        # POST - Create new batch
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        required_fields = ['productId', 'quantity']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'error': f'{field} is required'}), 400
-        
-        batches = safe_load_json('batches.json')
-        
-        batch = {
-            'id': len(batches) + 1,
-            'productId': int(data['productId']),
-            'quantity': int(data['quantity']),
-            'originalQuantity': int(data['quantity']),
-            'expiryDate': data.get('expiryDate'),
-            'batchNumber': data.get('batchNumber', f'BATCH-{len(batches) + 1}-{int(time.time())}'),
-            'cost': float(data.get('cost', 0)),
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        batches.append(batch)
-        if not safe_save_json('batches.json', batches):
-            return jsonify({'error': 'Failed to save batch data'}), 500
-        
-        return jsonify(batch), 201
-        
-    except Exception as e:
-        print(f"Batches endpoint error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/batches/<int:id>', methods=['PUT', 'DELETE'])
-@token_required
-def batch_detail(id):
-    """Update or delete batch"""
-    try:
-        batches = safe_load_json('batches.json')
-        batch = next((b for b in batches if b['id'] == id), None)
-        
-        if not batch:
-            return jsonify({'error': 'Batch not found'}), 404
-        
-        if request.method == 'PUT':
-            data = request.get_json()
-            if not data:
-                return jsonify({'error': 'Request data is required'}), 400
-            
-            # Update batch fields (excluding protected fields)
-            protected_fields = {'id', 'createdAt'}
-            for key, value in data.items():
-                if key not in protected_fields:
-                    if key in ['quantity', 'originalQuantity', 'productId']:
-                        batch[key] = int(value)
-                    elif key in ['cost']:
-                        batch[key] = float(value)
-                    else:
-                        batch[key] = value
-            
-            if not safe_save_json('batches.json', batches):
-                return jsonify({'error': 'Failed to save batch data'}), 500
-            
-            return jsonify(batch)
-        
-        # DELETE
-        batches = [b for b in batches if b['id'] != id]
-        if not safe_save_json('batches.json', batches):
-            return jsonify({'error': 'Failed to delete batch'}), 500
-        
-        return '', 204
-        
-    except Exception as e:
-        print(f"Batch detail error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-# ============================================================================
-# STATISTICS ENDPOINTS
-# ============================================================================
-
-@app.route('/api/stats', methods=['GET'])
-@token_required
-def get_stats():
-    """Get dashboard statistics"""
-    try:
-        sales = safe_load_json('sales.json')
-        expenses = safe_load_json('expenses.json')
-        products = safe_load_json('products.json')
-        
-        # Calculate totals
-        total_sales = sum(sale.get('total', 0) for sale in sales)
-        total_expenses = sum(expense.get('amount', 0) for expense in expenses)
-        total_cogs = sum(sale.get('cogs', 0) for sale in sales)
-        gross_profit = total_sales - total_cogs
-        net_profit = gross_profit - total_expenses
-        
-        # Calculate daily sales (today)
-        today = datetime.now().date()
-        daily_sales = sum(
-            sale.get('total', 0) for sale in sales 
-            if sale.get('createdAt') and datetime.fromisoformat(sale['createdAt']).date() == today
-        )
-        
-        # Calculate weekly sales (last 7 days)
-        week_ago = today - timedelta(days=7)
-        weekly_sales = sum(
-            sale.get('total', 0) for sale in sales 
-            if sale.get('createdAt') and datetime.fromisoformat(sale['createdAt']).date() >= week_ago
-        )
-        
-        # Count products
-        product_count = len(products)
-        
-        return jsonify({
-            'totalSales': total_sales,
-            'totalExpenses': total_expenses,
-            'totalCOGS': total_cogs,
-            'grossProfit': gross_profit,
-            'netProfit': net_profit,
-            'profit': net_profit,  # Legacy field
-            'dailySales': daily_sales,
-            'weeklySales': weekly_sales,
-            'productCount': product_count
-        })
-        
-    except Exception as e:
-        print(f"Stats endpoint error: {e}")
-        return jsonify({'error': f'Failed to get statistics: {str(e)}'}), 500
-
-# ============================================================================
-# ADDITIONAL ENDPOINTS (Supporting existing functionality)
-# ============================================================================
-
-@app.route('/api/credit-requests', methods=['GET', 'POST'])
-@token_required
-def credit_requests():
-    """Get all credit requests or create new credit request"""
-    try:
-        if request.method == 'GET':
-            requests = safe_load_json('credit_requests.json')
-            return jsonify(requests)
-        
-        # POST - Create new credit request
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        required_fields = ['productId', 'quantity', 'customerName', 'amount']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'error': f'{field.capitalize()} is required'}), 400
-        
-        requests = safe_load_json('credit_requests.json')
-        credit_request = {
-            'id': len(requests) + 1,
-            'productId': data['productId'],
-            'quantity': data['quantity'],
-            'customerName': data['customerName'].strip(),
-            'amount': data['amount'],
-            'cashierId': request.user.get('id'),
-            'status': 'pending',
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        requests.append(credit_request)
-        if not safe_save_json('credit_requests.json', requests):
-            return jsonify({'error': 'Failed to save credit request'}), 500
-        
-        return jsonify(credit_request), 201
-        
-    except Exception as e:
-        print(f"Credit requests error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/credit-requests/<int:id>/approve', methods=['POST'])
-@token_required
-def approve_credit(id):
-    """Approve credit request (admin only)"""
-    try:
-        if request.user.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
-        requests = safe_load_json('credit_requests.json')
-        credit_request = next((r for r in requests if r['id'] == id), None)
-        
-        if not credit_request:
-            return jsonify({'error': 'Request not found'}), 404
-        
-        credit_request['status'] = 'approved'
-        credit_request['approvedAt'] = datetime.now().isoformat()
-        
-        if not safe_save_json('credit_requests.json', requests):
-            return jsonify({'error': 'Failed to update request'}), 500
-        
-        return jsonify(credit_request)
-        
-    except Exception as e:
-        print(f"Approve credit error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/credit-requests/<int:id>/reject', methods=['POST'])
-@token_required
-def reject_credit(id):
-    """Reject credit request (admin only)"""
-    try:
-        if request.user.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
-        requests = safe_load_json('credit_requests.json')
-        credit_request = next((r for r in requests if r['id'] == id), None)
-        
-        if not credit_request:
-            return jsonify({'error': 'Request not found'}), 404
-        
-        credit_request['status'] = 'rejected'
-        if not safe_save_json('credit_requests.json', requests):
-            return jsonify({'error': 'Failed to update request'}), 500
-        
-        return jsonify(credit_request)
-        
-    except Exception as e:
-        print(f"Reject credit error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/users/give-access', methods=['POST'])
-@token_required
-def give_access():
-    """Give access to a user by email (admin only)"""
-    try:
-        if request.user.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
-        data = request.get_json()
-        if not data or not data.get('email'):
-            return jsonify({'error': 'Email is required'}), 400
-        
-        email = data['email'].strip().lower()
-        users = safe_load_json('users.json')
-        user = next((u for u in users if u['email'] == email), None)
-        
-        if not user:
-            return jsonify({'error': 'User not found'}), 404
-        
-        # Activate user
-        user['active'] = True
-        user['locked'] = False
-        
-        if not safe_save_json('users.json', users):
-            return jsonify({'error': 'Failed to update user'}), 500
-        
-        return jsonify({'message': 'Access granted successfully'})
-        
-    except Exception as e:
-        print(f"Give access error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/signup-with-payment', methods=['POST'])
-def signup_with_payment():
-    """Create user account with payment in single transaction"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        # Validate required fields
-        required_fields = ['email', 'name', 'plan', 'amount']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'error': f'{field.capitalize()} is required'}), 400
-        
-        email = data['email'].strip().lower()
-        name = data['name'].strip()
-        plan = data['plan']
-        amount = float(data['amount'])
-        
-        # Check if user already exists
-        users = safe_load_json('users.json')
-        if any(u['email'] == email for u in users):
-            return jsonify({'error': 'User already exists'}), 400
-        
-        # Create user
-        user = {
-            'id': len(users) + 1,
-            'email': email,
-            'password': data.get('password', 'changeme123'),
-            'name': name,
-            'role': 'admin',  # First user is always admin for their account
-            'plan': plan,
-            'active': True,
-            'locked': False,
-            'pin': None,
-            'permissions': {},
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        users.append(user)
-        if not safe_save_json('users.json', users):
-            return jsonify({'error': 'Failed to save user'}), 500
-        
-        # Create payment record
-        payments = safe_load_json('payments.json')
-        payment = {
-            'id': len(payments) + 1,
-            'userId': user['id'],
-            'email': email,
-            'fullName': name,
-            'plan': plan,
-            'amount': amount,
-            'method': data.get('paymentMethod', 'card'),
-            'accountNumber': data.get('accountNumber', ''),
-            'status': 'approved',
-            'createdAt': datetime.now().isoformat(),
-            'approvedAt': datetime.now().isoformat()
-        }
-        
-        payments.append(payment)
-        if not safe_save_json('payments.json', payments):
-            return jsonify({'error': 'Failed to save payment'}), 500
-        
-        # Generate token
-        token = jwt.encode({
-            'id': user['id'],
-            'email': user['email'],
-            'role': user['role']
-        }, app.config['SECRET_KEY'], algorithm='HS256')
-        
-        return jsonify({
-            'token': token,
-            'user': {k: v for k, v in user.items() if k != 'password'},
-            'payment': payment
-        }), 201
-        
-    except Exception as e:
-        print(f"Signup with payment error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/payments', methods=['GET'])
-@token_required
-def get_payments():
-    """Get all payments (admin only)"""
-    try:
-        if request.user.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
-        payments = safe_load_json('payments.json')
-        return jsonify(payments)
-        
-    except Exception as e:
-        print(f"Get payments error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/demo-requests', methods=['GET', 'POST'])
-def demo_requests():
-    """Get all demo requests or create new demo request"""
-    try:
-        if request.method == 'GET':
-            # Require admin token for GET
-            auth_header = request.headers.get('Authorization')
-            if auth_header:
+            # Fallback: if DB is enabled, attempt to compute from composite_components
+            if os.environ.get('DATABASE_URL'):
                 try:
-                    token = auth_header.replace('Bearer ', '')
-                    data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-                    if data.get('role') != 'admin':
-                        return jsonify({'error': 'Admin access required'}), 403
-                except:
-                    return jsonify({'error': 'Invalid token'}), 401
-            else:
-                return jsonify({'error': 'Token required'}), 401
-            
-            requests = safe_load_json('emails.json')  # Using emails.json for demo requests
-            return jsonify([r for r in requests if r.get('type') == 'demo'])
-        
-        # POST - Create new demo request (no auth required)
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        required_fields = ['name', 'email']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'error': f'{field.capitalize()} is required'}), 400
-        
-        requests = safe_load_json('emails.json')
-        demo_request = {
-            'id': len(requests) + 1,
-            'type': 'demo',
-            'name': data['name'].strip(),
-            'email': data['email'].strip(),
-            'company': data.get('company', '').strip(),
-            'status': 'pending',
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        requests.append(demo_request)
-        if not safe_save_json('emails.json', requests):
-            return jsonify({'error': 'Failed to save demo request'}), 500
-        
-        return jsonify(demo_request), 201
-        
-    except Exception as e:
-        print(f"Demo requests error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+                    conn = database.get_db_connection()
+                    if not conn:
+                        return 0
+                    cur = conn.cursor()
+                    cur.execute("SELECT component_product_id, quantity FROM composite_components WHERE composite_product_id = %s", (prod.get('id'),))
+                    rows = cur.fetchall()
+                    cur.close()
+                    conn.close()
+                    if not rows:
+                        return 0
+                    max_units = float('inf')
+                    for row in rows:
+                        comp_pid = row.get('component_product_id')
+                        per_unit = float(row.get('quantity') or 0)
+                        raw = next((r for r in company_products if r.get('id') == comp_pid), None)
+                        if not raw:
+                            return 0
+                        available = raw.get('quantity', 0) or 0
+                        if per_unit <= 0:
+                            return 0
+                        possible = available // per_unit
+                        if possible < max_units:
+                            max_units = possible
+                    return int(max_units) if max_units != float('inf') else 0
+                except Exception:
+                    return 0
 
-# ============================================================================
-# MAIN ADMIN ENDPOINTS (SUPER ADMIN)
-# ============================================================================
+            return 0
+
+        for p in company_products:
+            if p.get('isComposite') or p.get('is_composite'):
+                p['maxUnits'] = compute_max_units(p)
+            else:
+                p['maxUnits'] = p.get('quantity', 0)
+
+        return jsonify(company_products)
+    
+    data = request.get_json()
+    # Only admins can create or update products
+    if request.user.get('role') != 'admin':
+        return jsonify({'error': 'Unauthorized: only admins can create products'}), 403
+
+    company_id = request.user.get('company_id')
+    product = {
+        'id': len(products) + 1,
+        'company_id': company_id,
+        'name': data.get('name', ''),
+        'price': float(data.get('price', 0)),
+        'cost': float(data.get('cost', 0)),
+        # For composite products quantity is not tracked on the composite itself
+        'quantity': 0 if data.get('recipe') else int(data.get('quantity', 0)),
+        'image': data.get('image', ''),
+        'category': data.get('category', 'general'),
+        'unit': data.get('unit', 'pcs'),
+        'recipe': data.get('recipe', []),  # For composite products
+        'isComposite': bool(data.get('recipe')),
+        'visible_to_cashier': bool(data.get('visible_to_cashier', True)),
+        'createdAt': datetime.now().isoformat(),
+        'createdBy': request.user.get('id')
+    }
+
+    # Plan enforcement: Basic plan cannot create composite products
+    company = next((c for c in companies if c.get('id') == company_id), None)
+    if product['isComposite'] and company and company.get('plan') == 'basic':
+        return jsonify({'error': 'Basic plan cannot create composite products'}), 403
+
+    # Validate recipe ingredients exist and belong to same company
+    if product['recipe']:
+        for ingredient in product['recipe']:
+            pid = ingredient.get('productId')
+            if pid is None:
+                continue
+            ingredient_product = next((p for p in products if p['id'] == pid and p.get('company_id') == company_id), None)
+            if not ingredient_product:
+                return jsonify({'error': f'Ingredient product not found or does not belong to company: {pid}'}), 400
+
+    # Log product creation for diagnostics
+    print(f"[PRODUCT CREATE] company={company_id} by user={request.user.get('id')} payload={product}")
+
+    products.append(product)
+    save_json('products.json', products)
+    # Broadcast creation to SSE subscribers for this company
+    try:
+        broadcast_products_update('product_created', product, company_id)
+    except Exception:
+        pass
+    return jsonify(product)
+
+@app.route('/api/products/<int:product_id>', methods=['PUT', 'DELETE'])
+@token_required
+def handle_product(product_id):
+    product = next((p for p in products if p['id'] == product_id), None)
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        # Only admins from same company can update
+        if request.user.get('role') != 'admin' or request.user.get('company_id') != product.get('company_id'):
+            return jsonify({'error': 'Unauthorized'}), 403
+
+        # Update allowed fields (do not allow quantity change for composite)
+        product['name'] = data.get('name', product['name'])
+        product['price'] = float(data.get('price', product['price']))
+        if not product.get('isComposite'):
+            product['quantity'] = int(data.get('quantity', product.get('quantity', 0)))
+        product['image'] = data.get('image', product.get('image', ''))
+        product['category'] = data.get('category', product.get('category', 'general'))
+        product['updatedAt'] = datetime.now().isoformat()
+        # Log product update for diagnostics
+        print(f"[PRODUCT UPDATE] company={product.get('company_id')} by user={request.user.get('id')} product_id={product_id} updates={data}")
+        save_json('products.json', products)
+        try:
+            broadcast_products_update('product_updated', product, product.get('company_id'))
+        except Exception:
+            pass
+        return jsonify(product)
+    
+    if request.method == 'DELETE':
+        # Only admins from same company can delete
+        if request.user.get('role') != 'admin' or request.user.get('company_id') != product.get('company_id'):
+            return jsonify({'error': 'Unauthorized'}), 403
+
+        # Log product deletion for diagnostics
+        print(f"[PRODUCT DELETE] company={product.get('company_id')} by user={request.user.get('id')} product_id={product_id}")
+        products.remove(product)
+        save_json('products.json', products)
+        try:
+            broadcast_products_update('product_deleted', {'id': product_id}, product.get('company_id'))
+        except Exception:
+            pass
+        return jsonify({'message': 'Product deleted successfully'}), 200
+
+
+@app.route('/api/products/<int:product_id>/max-producible', methods=['GET'])
+@token_required
+def product_max_producible(product_id):
+    product = next((p for p in products if p['id'] == product_id), None)
+    if not product or not product.get('recipe'):
+        return jsonify({'maxUnits': 0, 'limitingIngredient': None})
+
+    max_units = float('inf')
+    limiting = None
+    for ingredient in product['recipe']:
+        # Skip ingredients that are custom/name-only (no productId)
+        pid = ingredient.get('productId')
+        if pid is None:
+            continue
+        raw = next((p for p in products if p['id'] == pid and p.get('company_id') == product.get('company_id')), None)
+        if not raw:
+            # If a referenced raw product is missing, treat as zero producible
+            return jsonify({'maxUnits': 0, 'limitingIngredient': None})
+        available = raw.get('quantity', 0)
+        needed = ingredient.get('quantity', 0)
+        possible = available / needed if needed > 0 else 0
+        if possible < max_units:
+            max_units = possible
+            limiting = raw.get('name')
+
+    return jsonify({'maxUnits': int(max_units) if max_units != float('inf') else 0, 'limitingIngredient': limiting})
+
+
+@app.route('/api/diagnostic', methods=['GET', 'POST', 'OPTIONS'])
+def diagnostic():
+    # Lightweight diagnostic endpoint to check CORS and request payloads
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
+    data = None
+    try:
+        data = request.get_json(silent=True)
+    except Exception:
+        data = None
+
+    origin = request.headers.get('Origin')
+    resp = jsonify({
+        'ok': True,
+        'origin': origin,
+        'received': data,
+        'headers': {k: v for k, v in request.headers.items()}
+    })
+    # Echo CORS header for quick verification
+    # echo allowed origin for verification
+    allowed = os.environ.get('BACKEND_ALLOWED_ORIGINS', ','.join(allowed_list))
+    if allowed.strip() == '*':
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+    else:
+        if origin and origin in [o.strip() for o in allowed.split(',') if o.strip()]:
+            resp.headers['Access-Control-Allow-Origin'] = origin
+            resp.headers['Vary'] = 'Origin'
+    return resp
+
+@app.route('/api/sales', methods=['GET', 'POST'])
+@token_required
+def handle_sales():
+    if request.method == 'GET':
+        # Return sales for user's company only
+        company_id = request.user.get('company_id')
+        user_sales = [s for s in sales if s.get('company_id') == company_id]
+        return jsonify(user_sales)
+
+    data = request.get_json()
+
+    # Only cashiers or admins of the same company can create sales
+    if request.user.get('role') not in ('cashier', 'admin'):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    company_id = request.user.get('company_id')
+    items = data.get('items', [])
+    total = float(data.get('total', 0))
+
+    # If a real database is configured, prefer transactional DB-backed sale
+    if os.environ.get('DATABASE_URL'):
+        cashier_name = next((u['name'] for u in users if u.get('id') == request.user.get('id')), 'Unknown')
+        ok, result = database.composite_sale(company_id, request.user.get('id'), cashier_name, items, total)
+        if ok:
+            # fetch latest company products from DB and broadcast
+            try:
+                if database:
+                    company_products = database.db_select('products', 'company_id = %s', (company_id,))
+                    broadcast_products_update('products_snapshot', company_products, company_id)
+            except Exception:
+                pass
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+
+    # Validate availability first (operate on copies to ensure transactional behavior)
+    insufficient = []
+    products_copy = [dict(p) for p in products]
+
+    def find_prod(pid):
+        return next((p for p in products_copy if p['id'] == pid and p.get('company_id') == company_id), None)
+
+    for item in items:
+        product = find_prod(item['productId'])
+        if not product:
+            insufficient.append({'productId': item.get('productId'), 'reason': 'Product not found'})
+            continue
+
+        qty_needed = item.get('quantity', 0)
+
+        if product.get('isComposite') and product.get('recipe'):
+            for ingredient in product['recipe']:
+                pid = ingredient.get('productId')
+                if pid is None:
+                    continue
+                ingredient_product = find_prod(pid)
+                if not ingredient_product:
+                    insufficient.append({'productId': item.get('productId'), 'reason': f"Missing ingredient {pid}"})
+                    continue
+                required_qty = ingredient.get('quantity', 0) * qty_needed
+                if ingredient_product.get('quantity', 0) < required_qty:
+                    insufficient.append({
+                        'productId': item.get('productId'),
+                        'reason': f"Insufficient ingredient {ingredient_product.get('name')}",
+                        'needed': required_qty,
+                        'available': ingredient_product.get('quantity', 0)
+                    })
+        else:
+            if product.get('quantity', 0) < qty_needed:
+                insufficient.append({'productId': item.get('productId'), 'reason': 'Insufficient product quantity', 'needed': qty_needed, 'available': product.get('quantity', 0)})
+
+    if insufficient:
+        return jsonify({'error': 'Insufficient stock', 'details': insufficient}), 400
+
+    # Apply deductions to the copy
+    total = float(data.get('total', 0))
+    total_cogs = 0
+    for item in items:
+        product = find_prod(item['productId'])
+        qty = item.get('quantity', 0)
+        if not product:
+            continue
+
+        if product.get('isComposite') and product.get('recipe'):
+            for ingredient in product['recipe']:
+                pid = ingredient.get('productId')
+                if pid is None:
+                    continue
+                ingredient_product = find_prod(pid)
+                if not ingredient_product:
+                    continue
+                required_qty = ingredient.get('quantity', 0) * qty
+                ingredient_product['quantity'] = max(0, ingredient_product.get('quantity', 0) - required_qty)
+                total_cogs += ingredient_product.get('cost', 0) * required_qty
+        else:
+            product['quantity'] = max(0, product.get('quantity', 0) - qty)
+            total_cogs += product.get('cost', 0) * qty
+
+    # Commit: replace products and append sale atomically
+    # Merge products_copy back into products for saving
+    for updated in products_copy:
+        for i, p in enumerate(products):
+            if p['id'] == updated['id'] and p.get('company_id') == company_id:
+                products[i] = updated
+
+    sale = {
+        'id': len(sales) + 1,
+        'company_id': company_id,
+        'items': items,
+        'total': total,
+        'cashierId': request.user.get('id'),
+        'cashierName': next((u['name'] for u in users if u.get('id') == request.user.get('id')), 'Unknown'),
+        'createdAt': datetime.now().isoformat(),
+        'cogs': total_cogs
+    }
+    sales.append(sale)
+
+    # Persist changes atomically
+    save_json('products.json', products)
+    save_json('sales.json', sales)
+    save_json('expenses.json', expenses)
+
+    # Broadcast updated product snapshot to subscribers for this company
+    try:
+        company_products = [p for p in products if p.get('company_id') == company_id]
+        broadcast_products_update('products_snapshot', company_products, company_id)
+    except Exception:
+        pass
+
+    return jsonify(sale)
+
+@app.route('/api/expenses', methods=['GET', 'POST'])
+@token_required
+def handle_expenses():
+    if request.method == 'GET':
+        return jsonify(expenses)
+    
+    data = request.get_json()
+    expense = {
+        'id': len(expenses) + 1,
+        'description': data.get('description', ''),
+        'amount': float(data.get('amount', 0))
+    }
+    expenses.append(expense)
+    return jsonify(expense)
+
+@app.route('/api/stats')
+@token_required
+def stats():
+    total_sales = sum(s.get('total', 0) for s in sales)
+    total_expenses = sum(e.get('amount', 0) for e in expenses)
+    return jsonify({
+        'totalSales': total_sales,
+        'totalExpenses': total_expenses,
+        'profit': total_sales - total_expenses,
+        'productCount': len(products)
+    })
 
 @app.route('/api/main-admin/auth/login', methods=['POST'])
 def main_admin_login():
-    """Main admin login endpoint - Only ianmabruk3@gmail.com allowed"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        email = data.get('email', '').strip().lower()
-        password = data.get('password', '')
-        
-        if not email or not password:
-            return jsonify({'error': 'Email and password are required'}), 400
-        
-        # Only allow ianmabruk3@gmail.com with password admin123
-        if email == 'ianmabruk3@gmail.com' and password == 'admin123':
-            token_data = {
-                'id': 'main_admin',
-                'email': email,
-                'type': 'main_admin',
-                'role': 'main_admin'
-            }
-            token = jwt.encode(token_data, app.config['SECRET_KEY'], algorithm='HS256')
-            
-            return jsonify({
-                'token': token,
-                'user': {
-                    'id': 'main_admin',
-                    'email': email,
-                    'name': 'Ian Mabruk',
-                    'type': 'main_admin',
-                    'role': 'main_admin'
-                }
-            })
-        
-        return jsonify({'error': 'Access denied. Owner access only.'}), 401
-        
-    except Exception as e:
-        print(f"Main admin login error: {e}")
-        return jsonify({'error': f'Login failed: {str(e)}'}), 500
-
-@app.route('/api/main-admin/companies', methods=['GET'])
-@token_required
-def get_all_companies():
-    """Get all companies with stats (owner only)"""
-    try:
-        if request.user.get('type') != 'owner':
-            return jsonify({'error': 'Owner access required'}), 403
-        
-        users = safe_load_json('users.json')
-        sales = safe_load_json('sales.json')
-        
-        # Group users by email domain to simulate companies
-        companies_data = {}
-        
-        for user in users:
-            # Use email as company identifier for now
-            company_key = user['email']
-            
-            if company_key not in companies_data:
-                companies_data[company_key] = {
-                    'id': user['id'],
-                    'name': f"{user['name']}'s Business",
-                    'email': user['email'],
-                    'plan': user.get('plan', 'basic'),
-                    'active': user.get('active', True),
-                    'locked': user.get('locked', False),
-                    'role': user.get('role', 'cashier'),
-                    'users': [],
-                    'totalSales': 0,
-                    'transactionCount': 0,
-                    'createdAt': user.get('createdAt'),
-                    'trialExpiry': None,
-                    'lastActivity': user.get('createdAt')
-                }
-            
-            companies_data[company_key]['users'].append({
-                'id': user['id'],
-                'name': user['name'],
-                'email': user['email'],
-                'role': user['role'],
-                'active': user.get('active', True),
-                'locked': user.get('locked', False)
-            })
-        
-        # Calculate sales per company
-        for sale in sales:
-            cashier_id = sale.get('cashierId')
-            if cashier_id:
-                cashier = next((u for u in users if u['id'] == cashier_id), None)
-                if cashier:
-                    company_key = cashier['email']
-                    if company_key in companies_data:
-                        companies_data[company_key]['totalSales'] += sale.get('total', 0)
-                        companies_data[company_key]['transactionCount'] += 1
-                        companies_data[company_key]['lastActivity'] = sale.get('createdAt')
-        
-        return jsonify(list(companies_data.values()))
-        
-    except Exception as e:
-        print(f"Get companies error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/main-admin/stats', methods=['GET'])
-@token_required
-def get_main_admin_stats():
-    """Get global statistics for main admin"""
-    try:
-        if request.user.get('type') not in ['main_admin', 'owner']:
-            return jsonify({'error': 'Main admin access required'}), 403
-        
-        users = safe_load_json('users.json')
-        sales = safe_load_json('sales.json')
-        payments = safe_load_json('payments.json')
-        
-        # Calculate user stats
-        total_users = len(users)
-        active_users = len([u for u in users if u.get('active', True)])
-        locked_users = len([u for u in users if u.get('locked', False)])
-        trial_users = len([u for u in users if not u.get('plan') or u.get('plan') == 'trial'])
-        
-        # Plan distribution
-        plan_counts = {'basic': 0, 'ultra': 0, 'trial': 0}
-        for user in users:
-            plan = user.get('plan', 'trial')
-            if plan in plan_counts:
-                plan_counts[plan] += 1
-            elif not plan:
-                plan_counts['trial'] += 1
-        
-        # Sales stats
-        total_sales = sum(sale.get('total', 0) for sale in sales)
-        total_transactions = len(sales)
-        
-        # Payment stats
-        total_revenue = sum(p.get('amount', 0) for p in payments if p.get('status') == 'approved')
-        pending_payments = len([p for p in payments if p.get('status') == 'pending'])
-        
-        # Calculate MRR (Monthly Recurring Revenue)
-        mrr = (plan_counts['basic'] * 1000) + (plan_counts['ultra'] * 2400)
-        
+    data = request.get_json()
+    email = data.get('email', '').lower()
+    password = data.get('password', '')
+    
+    if email == 'ianmabruk3@gmail.com' and password == 'admin123':
+        token = jwt.encode({'id': 'admin', 'email': email, 'type': 'main_admin'}, 
+                          app.config['SECRET_KEY'], algorithm='HS256')
         return jsonify({
-            'totalUsers': total_users,
-            'activeUsers': active_users,
-            'lockedUsers': locked_users,
-            'trialUsers': trial_users,
-            'planDistribution': plan_counts,
-            'totalSales': total_sales,
-            'totalTransactions': total_transactions,
-            'totalRevenue': total_revenue,
-            'pendingPayments': pending_payments,
-            'mrr': mrr
+            'token': token,
+            'user': {'id': 'admin', 'email': email, 'name': 'Ian Mabruk', 'type': 'main_admin'}
         })
-        
-    except Exception as e:
-        print(f"Get main admin stats error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+    
+    return jsonify({'error': 'Access denied'}), 401
 
-
-
-@app.route('/api/main-admin/activities', methods=['GET'])
+@app.route('/api/main-admin/users')
 @token_required
-def get_activities():
-    """Get all user activities for main admin"""
-    try:
-        if request.user.get('type') not in ['main_admin', 'owner']:
-            return jsonify({'error': 'Main admin access required'}), 403
-        
-        activities = safe_load_json('activities.json')
-        # Sort by timestamp (newest first)
-        activities.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
-        return jsonify(activities)
-        
-    except Exception as e:
-        print(f"Get activities error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-@app.route('/api/main-admin/users', methods=['GET'])
+def main_admin_users():
+    if request.user.get('type') != 'main_admin':
+        return jsonify({'error': 'Access denied'}), 403
+    return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
+
+@app.route('/api/main-admin/activities')
 @token_required
-def main_admin_get_users():
-    """Get all users for main admin"""
-    try:
-        if request.user.get('type') not in ['main_admin', 'owner']:
-            return jsonify({'error': 'Main admin access required'}), 403
-        
-        users = safe_load_json('users.json')
-        # Add trial status calculation
-        for user in users:
-            if user.get('plan') == 'trial' or not user.get('plan'):
-                user['isFreeTrial'] = True
-                if user.get('trialExpiry'):
-                    try:
-                        expiry = datetime.fromisoformat(user['trialExpiry'])
-                        user['trialDaysLeft'] = max(0, (expiry - datetime.now()).days)
-                    except:
-                        user['trialDaysLeft'] = 0
-                else:
-                    user['trialDaysLeft'] = 30  # Default trial period
-            else:
-                user['isFreeTrial'] = False
-                user['trialDaysLeft'] = 0
-        
+def main_admin_activities():
+    if request.user.get('type') != 'main_admin':
+        return jsonify({'error': 'Access denied'}), 403
+    # Sort activities by timestamp (newest first)
+    sorted_activities = sorted(activities, key=lambda x: x.get('timestamp', ''), reverse=True)
+    return jsonify(sorted_activities)
+
+@app.route('/api/main-admin/stats')
+@token_required
+def main_admin_stats():
+    if request.user.get('type') != 'main_admin':
+        return jsonify({'error': 'Access denied'}), 403
+    
+    total_users = len(users)
+    active_users = len([u for u in users if u.get('active', True)])
+    total_sales = sum(s.get('total', 0) for s in sales)
+    
+    return jsonify({
+        'totalUsers': total_users,
+        'activeUsers': active_users,
+        'totalSales': total_sales,
+        'totalTransactions': len(sales)
+    })
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+@token_required
+def handle_settings():
+    if request.method == 'GET':
+        return jsonify(settings[0] if settings else {})
+    
+    data = request.get_json()
+    if settings:
+        settings[0].update(data)
+    else:
+        settings.append(data)
+    
+    return jsonify(settings[0])
+
+@app.route('/api/upload-image', methods=['POST'])
+@token_required
+def upload_image():
+    data = request.get_json()
+    image_data = data.get('image', '')
+    
+    # For demo purposes, just return the base64 data
+    # In production, you'd upload to cloud storage
+    return jsonify({
+        'url': image_data,
+        'success': True
+    })
+
+@app.route('/api/users', methods=['GET', 'POST'])
+@token_required
+def handle_users():
+    if request.method == 'GET':
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
-        
-    except Exception as e:
-        print(f"Main admin get users error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/main-admin/payments', methods=['GET'])
-@token_required
-def main_admin_get_payments():
-    """Get all payments for main admin"""
-    try:
-        if request.user.get('type') != 'main_admin':
-            return jsonify({'error': 'Main admin access required'}), 403
-        
-        payments = safe_load_json('payments.json')
-        return jsonify(payments)
-        
-    except Exception as e:
-        print(f"Main admin get payments error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/main-admin/users/<int:user_id>/plan', methods=['POST'])
-@token_required
-def main_admin_change_plan(user_id):
-    """Change user plan by main admin"""
-    try:
-        if request.user.get('type') not in ['main_admin', 'owner']:
-            return jsonify({'error': 'Main admin access required'}), 403
-        
-        data = request.get_json()
-        if not data or 'plan' not in data:
-            return jsonify({'error': 'Plan is required'}), 400
-        
-        plan = data['plan']
-        if plan not in ['trial', 'basic', 'ultra']:
-            return jsonify({'error': 'Invalid plan'}), 400
-        
-        users = safe_load_json('users.json')
-        user = next((u for u in users if u['id'] == user_id), None)
-        
-        if not user:
-            return jsonify({'error': 'User not found'}), 404
-        
-        user['plan'] = plan
-        user['price'] = 2400 if plan == 'ultra' else (1000 if plan == 'basic' else 0)
-        
-        if not safe_save_json('users.json', users):
-            return jsonify({'error': 'Failed to update user plan'}), 500
-        
+    
+    # Debug: Print token info
+    print(f"Token user: {request.user}")
+    print(f"All users: {[{'id': u['id'], 'email': u['email'], 'role': u['role'], 'plan': u['plan']} for u in users]}")
+    
+    # Get user info from token - handle both string and int IDs
+    token_user_id = request.user.get('id')
+    token_email = request.user.get('email')
+    
+    # Find current user - try both ID and email
+    current_user = None
+    
+    # Try by ID (handle both int and string)
+    for u in users:
+        if str(u['id']) == str(token_user_id) or u['id'] == token_user_id:
+            current_user = u
+            break
+    
+    # Fallback: try by email
+    if not current_user and token_email:
+        current_user = next((u for u in users if u['email'] == token_email), None)
+    
+    if not current_user:
         return jsonify({
-            'message': f'User plan changed to {plan} successfully',
-            'user': {k: v for k, v in user.items() if k != 'password'}
-        })
-        
-    except Exception as e:
-        print(f"Change plan error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/main-admin/system/clear-data', methods=['POST'])
-@token_required
-def main_admin_clear_data():
-    """Clear system data (main admin only)"""
-    try:
-        if request.user.get('type') not in ['main_admin', 'owner']:
-            return jsonify({'error': 'Main admin access required'}), 403
-        
-        data = request.get_json()
-        clear_type = data.get('type', 'all')
-        
-        if clear_type == 'sales' or clear_type == 'all':
-            if not safe_save_json('sales.json', []):
-                return jsonify({'error': 'Failed to clear sales'}), 500
-        
-        if clear_type == 'expenses' or clear_type == 'all':
-            if not safe_save_json('expenses.json', []):
-                return jsonify({'error': 'Failed to clear expenses'}), 500
-        
-        if clear_type == 'products' or clear_type == 'all':
-            if not safe_save_json('products.json', []):
-                return jsonify({'error': 'Failed to clear products'}), 500
-        
-        if clear_type == 'users' or clear_type == 'all':
-            if not safe_save_json('users.json', []):
-                return jsonify({'error': 'Failed to clear users'}), 500
-        
-        return jsonify({'message': f'{clear_type.capitalize()} data cleared successfully'})
-        
-    except Exception as e:
-        print(f"Clear data error: {e}")
-        return jsonify({'error': f'Failed to clear data: {str(e)}'}), 500
-
-@app.route('/api/main-admin/system/reset', methods=['POST'])
-@token_required
-def system_reset():
-    """Reset system data (owner only)"""
-    try:
-        if request.user.get('type') != 'owner':
-            return jsonify({'error': 'Owner access required'}), 403
-        
-        data = request.get_json()
-        reset_type = data.get('type', 'all')
-        
-        if reset_type == 'sales':
-            if not safe_save_json('sales.json', []):
-                return jsonify({'error': 'Failed to reset sales'}), 500
-        elif reset_type == 'products':
-            if not safe_save_json('products.json', []):
-                return jsonify({'error': 'Failed to reset products'}), 500
-        elif reset_type == 'all':
-            # Reset all data except users and settings
-            files_to_reset = ['sales.json', 'products.json', 'expenses.json', 'batches.json', 'production.json']
-            for filename in files_to_reset:
-                if not safe_save_json(filename, []):
-                    return jsonify({'error': f'Failed to reset {filename}'}), 500
-        
-        return jsonify({'message': f'System {reset_type} data reset successfully'})
-        
-    except Exception as e:
-        print(f"System reset error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/main-admin/demo-requests', methods=['GET', 'POST'])
-@token_required
-def manage_demo_requests():
-    """Manage demo requests (owner only)"""
-    try:
-        if request.method == 'GET':
-            if request.user.get('type') != 'owner':
-                return jsonify({'error': 'Owner access required'}), 403
-            
-            requests = safe_load_json('demo_requests.json')
-            return jsonify(requests)
-        
-        # POST - Approve demo request
-        if request.user.get('type') != 'owner':
-            return jsonify({'error': 'Owner access required'}), 403
-        
-        data = request.get_json()
-        request_id = data.get('requestId')
-        action = data.get('action')  # 'approve' or 'reject'
-        
-        requests = safe_load_json('demo_requests.json')
-        demo_request = next((r for r in requests if r['id'] == request_id), None)
-        
-        if not demo_request:
-            return jsonify({'error': 'Demo request not found'}), 404
-        
-        demo_request['status'] = action
-        demo_request['processedAt'] = datetime.now().isoformat()
-        
-        if not safe_save_json('demo_requests.json', requests):
-            return jsonify({'error': 'Failed to update demo request'}), 500
-        
-        return jsonify(demo_request)
-        
-    except Exception as e:
-        print(f"Demo requests error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-# ============================================================================
-# CUSTOMER CREDIT SYSTEM (ULTRA FEATURE)
-# ============================================================================
-
-@app.route('/api/customers', methods=['GET', 'POST'])
-@token_required
-def customers():
-    """Get all customers or create new customer"""
-    try:
-        if request.method == 'GET':
-            customers = safe_load_json('customers.json')
-            return jsonify(customers)
-        
-        # POST - Create new customer (Ultra plan only)
-        user_plan = request.user.get('plan', 'basic')
-        if user_plan != 'ultra':
-            return jsonify({'error': 'Customer management requires Ultra plan'}), 403
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        required_fields = ['name', 'email']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'error': f'{field} is required'}), 400
-        
-        customers = safe_load_json('customers.json')
-        
-        customer = {
-            'id': len(customers) + 1,
-            'name': data['name'].strip(),
-            'email': data['email'].strip().lower(),
-            'phone': data.get('phone', ''),
-            'creditBalance': float(data.get('creditBalance', 0)),
-            'companyId': request.user.get('companyId', 'default'),
-            'active': True,
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        customers.append(customer)
-        if not safe_save_json('customers.json', customers):
-            return jsonify({'error': 'Failed to save customer data'}), 500
-        
-        return jsonify(customer), 201
-        
-    except Exception as e:
-        print(f"Customers endpoint error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-@app.route('/api/customers/<int:customer_id>/credit', methods=['POST'])
-@token_required
-def add_customer_credit(customer_id):
-    """Add credit to customer account (Ultra plan only)"""
-    try:
-        user_plan = request.user.get('plan', 'basic')
-        if user_plan != 'ultra':
-            return jsonify({'error': 'Customer credit requires Ultra plan'}), 403
-        
-        data = request.get_json()
-        if not data or 'amount' not in data:
-            return jsonify({'error': 'Amount is required'}), 400
-        
-        amount = float(data['amount'])
-        if amount <= 0:
-            return jsonify({'error': 'Amount must be positive'}), 400
-        
-        customers = safe_load_json('customers.json')
-        customer = next((c for c in customers if c['id'] == customer_id), None)
-        
-        if not customer:
-            return jsonify({'error': 'Customer not found'}), 404
-        
-        # Update credit balance
-        customer['creditBalance'] = customer.get('creditBalance', 0) + amount
-        
-        # Log credit transaction
-        credit_logs = safe_load_json('credit_logs.json')
-        credit_log = {
-            'id': len(credit_logs) + 1,
-            'customerId': customer_id,
-            'type': 'credit_added',
-            'amount': amount,
-            'balance': customer['creditBalance'],
-            'description': data.get('description', 'Credit added'),
-            'addedBy': request.user.get('id'),
-            'createdAt': datetime.now().isoformat()
-        }
-        credit_logs.append(credit_log)
-        
-        if not safe_save_json('customers.json', customers):
-            return jsonify({'error': 'Failed to update customer'}), 500
-        
-        if not safe_save_json('credit_logs.json', credit_logs):
-            return jsonify({'error': 'Failed to log transaction'}), 500
-        
+            'error': f'Current user not found. Token ID: {token_user_id}, Email: {token_email}',
+            'debug': {
+                'tokenUser': request.user,
+                'allUsers': [{'id': u['id'], 'email': u['email']} for u in users]
+            }
+        }), 404
+    
+    # Check permissions
+    if current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
         return jsonify({
-            'customer': customer,
-            'transaction': credit_log
-        })
-        
-    except Exception as e:
-        print(f"Add customer credit error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
-
-# ============================================================================
-# STOCK TAKING SYSTEM
-# ============================================================================
-
-@app.route('/api/stock-taking', methods=['GET', 'POST'])
-@token_required
-def stock_taking():
-    """Stock taking operations"""
+            'error': f'Ultra admin required. Current: role={current_user.get("role")}, plan={current_user.get("plan")}'
+        }), 403
+    
+    data = request.get_json()
+    new_user = {
+        'id': len(users) + 1,
+        'email': data.get('email', '').lower(),
+        'password': data.get('password', 'changeme123'),
+        'name': data.get('name', ''),
+        'role': data.get('role', 'cashier'),  # Allow role specification
+        'plan': current_user.get('plan', 'ultra'),  # Inherit plan from creator
+        'active': True,
+        'locked': False,
+        'pin': data.get('pin', ''),
+        'createdBy': current_user['id'],
+        # Ensure the created user is assigned to the creator's company
+        'company_id': current_user.get('company_id'),
+        'createdAt': datetime.now().isoformat()
+    }
+    users.append(new_user)
+    # Persist users to disk so the new user is available for login
+    save_json('users.json', users)
+    
+    # Log activity
+    activities.append({
+        'id': len(activities) + 1,
+        'type': 'user_created',
+        'userId': new_user['id'],
+        'email': new_user['email'],
+        'name': new_user['name'],
+        'plan': new_user['plan'],
+        'createdBy': current_user['id'],
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    # Optionally return a token for the newly created user so they can sign in immediately
     try:
-        if request.method == 'GET':
-            stock_takes = safe_load_json('stock_takes.json')
-            return jsonify(stock_takes)
-        
-        # POST - Create new stock take
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'Request data is required'}), 400
-        
-        stock_takes = safe_load_json('stock_takes.json')
-        products = safe_load_json('products.json')
-        batches = safe_load_json('batches.json')
-        
-        stock_take = {
-            'id': len(stock_takes) + 1,
-            'userId': request.user.get('id'),
-            'companyId': request.user.get('companyId', 'default'),
-            'items': data.get('items', []),
-            'status': 'pending',
-            'variances': [],
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        # Calculate variances
-        for item in stock_take['items']:
-            product_id = item['productId']
-            physical_count = item['physicalCount']
-            
-            # Get system count from batches
-            system_count = sum(b.get('quantity', 0) for b in batches if b.get('productId') == product_id)
-            
-            variance = physical_count - system_count
-            if variance != 0:
-                stock_take['variances'].append({
-                    'productId': product_id,
-                    'systemCount': system_count,
-                    'physicalCount': physical_count,
-                    'variance': variance
-                })
-        
-        stock_takes.append(stock_take)
-        if not safe_save_json('stock_takes.json', stock_takes):
-            return jsonify({'error': 'Failed to save stock take'}), 500
-        
-        return jsonify(stock_take), 201
-        
-    except Exception as e:
-        print(f"Stock taking error: {e}")
-        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+        token = jwt.encode({'id': new_user['id'], 'email': new_user['email'], 'role': new_user['role'], 'company_id': new_user.get('company_id')}, 
+                          app.config['SECRET_KEY'], algorithm='HS256')
+    except Exception:
+        token = None
 
-@app.route('/api/clear-data', methods=['POST'])
-@token_required
-def clear_data():
-    """Clear sales and expenses data"""
-    try:
-        data = request.get_json()
-        clear_type = data.get('type', 'all')
-        
-        if clear_type == 'sales' or clear_type == 'all':
-            if not safe_save_json('sales.json', []):
-                return jsonify({'error': 'Failed to clear sales'}), 500
-        
-        if clear_type == 'expenses' or clear_type == 'all':
-            if not safe_save_json('expenses.json', []):
-                return jsonify({'error': 'Failed to clear expenses'}), 500
-        
-        return jsonify({'message': 'Data cleared successfully'})
-        
-    except Exception as e:
-        print(f"Clear data error: {e}")
-        return jsonify({'error': f'Failed to clear data: {str(e)}'}), 500
-
-# ============================================================================
-# HEALTH CHECK AND UTILITY ENDPOINTS
-# ============================================================================
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
     return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'version': '2.0.0'
+        'user': {k: v for k, v in new_user.items() if k != 'password'},
+        'token': token
     })
 
-@app.route('/api/', methods=['GET'])
-def api_root():
-    """API root endpoint"""
-    return jsonify({
-        'message': 'POS Backend API v2.0',
-        'endpoints': {
-            'auth': ['/api/auth/signup', '/api/auth/login', '/api/auth/me'],
-            'users': ['/api/users', '/api/users/<id>'],
-            'products': ['/api/products', '/api/products/<id>'],
-            'sales': ['/api/sales'],
-            'expenses': ['/api/expenses'],
-            'settings': ['/api/settings'],
-            'credit_requests': ['/api/credit-requests']
-        }
-    })
+@app.route('/api/reminders', methods=['GET', 'POST'])
+@token_required
+def handle_reminders():
+    if request.method == 'GET':
+        return jsonify(reminders)
+    
+    data = request.get_json()
+    reminder = {
+        'id': len(reminders) + 1,
+        'title': data.get('title', ''),
+        'description': data.get('description', ''),
+        'dueDate': data.get('dueDate', ''),
+        'priority': data.get('priority', 'medium'),
+        'completed': False,
+        'createdBy': request.user.get('id'),
+        'createdAt': datetime.now().isoformat()
+    }
+    reminders.append(reminder)
+    save_json('reminders.json', reminders)
+    return jsonify(reminder)
 
-# ============================================================================
-# ERROR HANDLERS
-# ============================================================================
+@app.route('/api/reminders/<int:reminder_id>', methods=['PUT', 'DELETE'])
+@token_required
+def handle_reminder(reminder_id):
+    reminder = next((r for r in reminders if r['id'] == reminder_id), None)
+    if not reminder:
+        return jsonify({'error': 'Reminder not found'}), 404
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        reminder.update({
+            'title': data.get('title', reminder['title']),
+            'description': data.get('description', reminder['description']),
+            'dueDate': data.get('dueDate', reminder['dueDate']),
+            'priority': data.get('priority', reminder['priority']),
+            'completed': data.get('completed', reminder['completed'])
+        })
+        save_json('reminders.json', reminders)
+        return jsonify(reminder)
+    
+    if request.method == 'DELETE':
+        reminders.remove(reminder)
+        save_json('reminders.json', reminders)
+        return jsonify({'message': 'Reminder deleted'}), 200
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
+@app.route('/api/batches', methods=['GET', 'POST'])
+def handle_batches():
+    # Allow GET without token for basic functionality
+    if request.method == 'GET':
+        return jsonify([])
+    # POST requires token
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    return jsonify({'id': 1, 'message': 'Batch created'})
 
-@app.errorhandler(405)
-def method_not_allowed(error):
-    return jsonify({'error': 'Method not allowed'}), 405
+@app.route('/api/production', methods=['GET', 'POST'])
+def handle_production():
+    if request.method == 'GET':
+        return jsonify([])
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    return jsonify({'id': 1, 'message': 'Production created'})
 
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
+@app.route('/api/categories/generate-code', methods=['POST'])
+def generate_category_code():
+    return jsonify({'code': 'CAT001'})
 
-# ============================================================================
-# MAIN APPLICATION ENTRY POINT
-# ============================================================================
+@app.route('/api/price-history', methods=['GET', 'POST'])
+def handle_price_history():
+    if request.method == 'GET':
+        return jsonify([])
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    return jsonify({'id': 1, 'message': 'Price history created'})
+
+@app.route('/api/service-fees', methods=['GET', 'POST'])
+def handle_service_fees():
+    if request.method == 'GET':
+        return jsonify([])
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    return jsonify({'id': 1, 'message': 'Service fee created'})
+
+@app.route('/api/service-fees/<int:fee_id>', methods=['PUT', 'DELETE'])
+def handle_service_fee(fee_id):
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    if request.method == 'PUT':
+        return jsonify({'id': fee_id, 'message': 'Service fee updated'})
+    return jsonify({'message': 'Service fee deleted'})
+
+@app.route('/api/discounts', methods=['GET', 'POST'])
+def handle_discounts():
+    if request.method == 'GET':
+        return jsonify([])
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    return jsonify({'id': 1, 'message': 'Discount created'})
+
+@app.route('/api/discounts/<int:discount_id>', methods=['PUT', 'DELETE'])
+def handle_discount(discount_id):
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    if request.method == 'PUT':
+        return jsonify({'id': discount_id, 'message': 'Discount updated'})
+    return jsonify({'message': 'Discount deleted'})
+
+@app.route('/api/credit-requests', methods=['GET', 'POST'])
+def handle_credit_requests():
+    if request.method == 'GET':
+        return jsonify([])
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    return jsonify({'id': 1, 'message': 'Credit request created'})
+
+@app.route('/api/credit-requests/<int:request_id>/approve', methods=['POST'])
+def approve_credit_request(request_id):
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    return jsonify({'message': 'Credit request approved'})
+
+@app.route('/api/credit-requests/<int:request_id>/reject', methods=['POST'])
+def reject_credit_request(request_id):
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token:
+        return jsonify({'error': 'Token missing'}), 401
+    return jsonify({'message': 'Credit request rejected'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5002))
-    debug_mode = os.environ.get('FLASK_ENV') == 'development'
-    
-    print(f"Starting POS Backend API v2.0 on port {port}")
-    print(f"Debug mode: {debug_mode}")
-    print("Available endpoints:")
-    print("  - Authentication: /api/auth/*")
-    print("  - Users: /api/users")
-    print("  - Products: /api/products")
-    print("  - Sales: /api/sales")
-    print("  - Expenses: /api/expenses")
-    print("  - Settings: /api/settings")
-    print("  - Credit Requests: /api/credit-requests")
-    
-    app.run(host='0.0.0.0', port=port, debug=debug_mode)
+    host = os.environ.get('HOST', '0.0.0.0')
+    # Run without the reloader for predictable single-process behavior during tests
+    app.run(debug=False, use_reloader=False, host=host, port=port)
