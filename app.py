@@ -1,30 +1,15 @@
-import os
-import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import jwt
+import json
+import os
 from datetime import datetime, timedelta
 from functools import wraps
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 app = Flask(__name__)
 
-# CORS configuration
-CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allow_headers=['*'])
-
-# Configuration
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
-
-# Import database after app creation to avoid circular imports
-try:
-    import database as db
-    logger.info("Database module imported successfully")
-except Exception as e:
-    logger.error(f"Failed to import database: {e}")
-    raise
+# Complete CORS fix
+CORS(app, origins=['*'], methods=['*'], allow_headers=['*'])
 
 @app.after_request
 def after_request(response):
@@ -32,6 +17,28 @@ def after_request(response):
     response.headers['Access-Control-Allow-Headers'] = '*'
     response.headers['Access-Control-Allow-Methods'] = '*'
     return response
+
+app.config['SECRET_KEY'] = 'ultra-pos-secret-2024'
+
+# File-based storage
+DATA_DIR = '/tmp'
+USERS_FILE = f'{DATA_DIR}/users.json'
+PRODUCTS_FILE = f'{DATA_DIR}/products.json'
+SALES_FILE = f'{DATA_DIR}/sales.json'
+
+def load_data(filename):
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_data(filename, data):
+    with open(filename, 'w') as f:
+        json.dump(data, f)
+
+def get_next_id(data):
+    return max([item.get('id', 0) for item in data] + [0]) + 1
 
 def token_required(f):
     @wraps(f)
@@ -42,205 +49,99 @@ def token_required(f):
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
             request.user = data
-            if data.get('type') == 'main_admin':
-                return f(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"Token validation failed: {e}")
+        except:
             return jsonify({'error': 'Invalid token'}), 401
         return f(*args, **kwargs)
     return decorated
 
 @app.route('/')
 def home():
-    return jsonify({'message': 'POS API is running', 'status': 'ok'})
-
-@app.route('/api/health')
-def health():
-    try:
-        # Test database connection
-        conn = db.get_db()
-        conn.close()
-        return jsonify({'status': 'ok', 'database': 'connected'})
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return jsonify({'status': 'error', 'database': 'disconnected'}), 500
+    return jsonify({'message': 'POS API is running'})
 
 @app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
     if request.method == 'OPTIONS':
         return '', 200
-    
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-            
-        email = data.get('email', '').lower().strip()
-        password = data.get('password', '').strip()
-        name = data.get('name', '').strip()
-        plan = data.get('plan', 'trial')
-        
-        if not all([email, password, name]):
-            return jsonify({'error': 'Email, password, and name are required'}), 400
-        
-        if db.get_user_by_email(email):
-            return jsonify({'error': 'User already exists'}), 400
-        
-        # Create account
-        trial_ends_at = (datetime.now() + timedelta(days=30)).isoformat()
-        account_id = db.create_account(email, plan, trial_ends_at)
-        
-        # Determine role based on plan
-        role = 'admin' if plan in ['ultra', 'outer'] else 'cashier'
-        
-        # Create user
-        user_id = db.create_user(email, password, name, role, plan, account_id)
-        
-        # Log activity
-        db.create_activity('signup', user_id, email, name, plan)
-        
-        token = jwt.encode({
-            'id': user_id, 'email': email, 'role': role, 'plan': plan,
-            'package': plan, 'accountId': account_id
-        }, app.config['SECRET_KEY'], algorithm='HS256')
-        
-        user = db.get_user_by_id(user_id)
-        return jsonify({
-            'token': token,
-            'user': {k: v for k, v in user.items() if k != 'password'}
-        })
-        
-    except Exception as e:
-        logger.error(f"Signup error: {e}")
-        return jsonify({'error': 'Signup failed'}), 500
-
-@app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
-def login():
-    if request.method == 'OPTIONS':
-        return '', 200
-    
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-            
-        email = data.get('email', '').lower().strip()
-        password = data.get('password', '').strip()
-        
-        if not email or not password:
-            return jsonify({'error': 'Email and password required'}), 400
-        
-        user = db.get_user_by_email(email)
-        if not user or user['password'] != password:
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
-        # Check if account is locked
-        account = db.get_account(user['accountid'])
-        if account and account.get('islocked'):
-            return jsonify({'error': 'Account locked'}), 403
-        
-        # Log activity
-        db.create_activity('login', user['id'], user['email'], user['name'], user.get('plan', 'trial'))
-        
-        token = jwt.encode({
-            'id': user['id'], 'email': email, 'role': user['role'], 
-            'plan': user.get('plan', 'trial'), 'package': user.get('plan', 'trial'), 
-            'accountId': user['accountid']
-        }, app.config['SECRET_KEY'], algorithm='HS256')
-        
-        return jsonify({
-            'token': token,
-            'user': {k: v for k, v in user.items() if k != 'password'}
-        })
-        
-    except Exception as e:
-        logger.error(f"Login error: {e}")
-        return jsonify({'error': 'Login failed'}), 500
-
-@app.route('/api/auth/pin-login', methods=['POST', 'OPTIONS'])
-def pin_login():
-    if request.method == 'OPTIONS':
-        return '', 200
         
     data = request.get_json()
-    email = data.get('email', '').lower()
-    pin = data.get('pin', '')
+    users = load_data(USERS_FILE)
     
-    if not pin or len(pin) != 4:
-        return jsonify({'error': 'Invalid PIN format'}), 400
+    # Check if user exists
+    if any(u['email'] == data['email'] for u in users):
+        return jsonify({'error': 'User exists'}), 400
     
-    user = db.get_user_by_email(email)
-    if not user:
-        return jsonify({'error': 'User not found'}), 401
+    # Create user
+    user = {
+        'id': get_next_id(users),
+        'email': data['email'],
+        'password': data['password'],
+        'name': data['name'],
+        'role': 'admin' if data.get('plan') == 'ultra' else 'cashier',
+        'plan': data.get('plan', 'basic'),
+        'accountId': get_next_id(users),
+        'active': True,
+        'createdAt': datetime.now().isoformat()
+    }
     
-    if not user.get('pin') or user['pin'] != pin:
-        return jsonify({'error': 'Invalid PIN'}), 401
+    users.append(user)
+    save_data(USERS_FILE, users)
     
-    # Check if account is locked
-    account = db.get_account(user['accountId'])
-    if account and account.get('isLocked'):
-        return jsonify({'error': 'Account locked'}), 403
-    
-    # Log activity
-    db.create_activity('pin_login', user['id'], user['email'], user['name'], user.get('plan', 'trial'))
-    
-    token = jwt.encode({
-        'id': user['id'], 
-        'email': email, 
-        'role': user['role'], 
-        'plan': user.get('plan', 'trial'),
-        'package': user.get('plan', 'trial'),  # Add package field for compatibility
-        'accountId': user['accountId']
-    }, app.config['SECRET_KEY'], algorithm='HS256')
+    token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
+                      app.config['SECRET_KEY'], algorithm='HS256')
     
     return jsonify({
         'token': token,
         'user': {k: v for k, v in user.items() if k != 'password'}
     })
 
-@app.route('/api/auth/me')
-@token_required
-def me():
-    user = db.get_user_by_id(request.user['id'])
-    if user:
-        return jsonify({k: v for k, v in user.items() if k != 'password'})
-    return jsonify({'error': 'User not found'}), 404
+@app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
+def login():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    data = request.get_json()
+    users = load_data(USERS_FILE)
+    
+    user = next((u for u in users if u['email'] == data['email'] and u['password'] == data['password']), None)
+    if not user:
+        return jsonify({'error': 'Invalid credentials'}), 401
+    
+    token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
+                      app.config['SECRET_KEY'], algorithm='HS256')
+    
+    return jsonify({
+        'token': token,
+        'user': {k: v for k, v in user.items() if k != 'password'}
+    })
 
 @app.route('/api/products', methods=['GET', 'POST'])
 @token_required
 def handle_products():
+    products = load_data(PRODUCTS_FILE)
+    
     if request.method == 'GET':
-        account_id = request.user.get('accountId')
-        products = db.get_products_by_account(account_id)
         return jsonify(products)
     
     data = request.get_json()
-    account_id = request.user.get('accountId')
+    product = {
+        'id': get_next_id(products),
+        'name': data['name'],
+        'price': float(data['price']),
+        'quantity': int(data.get('quantity', 0)),
+        'category': data.get('category', 'general'),
+        'accountId': request.user['accountId'],
+        'createdAt': datetime.now().isoformat()
+    }
     
-    product_id = db.create_product(
-        account_id=account_id,
-        name=data.get('name', ''),
-        price=float(data.get('price', 0)),
-        cost=float(data.get('cost', 0)),
-        quantity=int(data.get('quantity', 0)),
-        image=data.get('image', ''),
-        category=data.get('category', 'general'),
-        unit=data.get('unit', 'pcs'),
-        recipe=data.get('recipe', []),
-        is_composite=bool(data.get('recipe', [])),
-        created_by=request.user.get('id')
-    )
+    products.append(product)
+    save_data(PRODUCTS_FILE, products)
     
-    # Return created product
-    products = db.get_products_by_account(account_id)
-    product = next((p for p in products if p['id'] == product_id), None)
     return jsonify(product)
 
 @app.route('/api/products/<int:product_id>', methods=['PUT', 'DELETE'])
 @token_required
 def handle_product(product_id):
-    account_id = request.user.get('accountId')
-    products = db.get_products_by_account(account_id)
+    products = load_data(PRODUCTS_FILE)
     product = next((p for p in products if p['id'] == product_id), None)
     
     if not product:
@@ -248,70 +149,70 @@ def handle_product(product_id):
     
     if request.method == 'PUT':
         data = request.get_json()
-        db.update_product(
-            product_id,
-            name=data.get('name', product['name']),
-            price=float(data.get('price', product['price'])),
-            quantity=int(data.get('quantity', product['quantity'])),
-            image=data.get('image', product.get('image', '')),
-            category=data.get('category', product.get('category', 'general'))
-        )
-        
-        # Return updated product
-        products = db.get_products_by_account(account_id)
-        updated_product = next((p for p in products if p['id'] == product_id), None)
-        return jsonify(updated_product)
+        product.update(data)
+        save_data(PRODUCTS_FILE, products)
+        return jsonify(product)
     
     if request.method == 'DELETE':
-        db.delete_product(product_id)
-        return jsonify({'message': 'Product deleted successfully'}), 200
+        products = [p for p in products if p['id'] != product_id]
+        save_data(PRODUCTS_FILE, products)
+        return jsonify({'message': 'Product deleted'})
+
+@app.route('/api/users', methods=['GET', 'POST'])
+@token_required
+def handle_users():
+    users = load_data(USERS_FILE)
+    
+    if request.method == 'GET':
+        return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
+    
+    data = request.get_json()
+    user = {
+        'id': get_next_id(users),
+        'email': data['email'],
+        'password': data.get('password', 'changeme123'),
+        'name': data['name'],
+        'role': 'cashier',
+        'plan': 'ultra',
+        'accountId': request.user['accountId'],
+        'pin': data.get('pin', '1234'),
+        'active': True,
+        'createdAt': datetime.now().isoformat()
+    }
+    
+    users.append(user)
+    save_data(USERS_FILE, users)
+    
+    return jsonify({k: v for k, v in user.items() if k != 'password'})
 
 @app.route('/api/sales', methods=['GET', 'POST'])
 @token_required
 def handle_sales():
-    account_id = request.user.get('accountId')
+    sales = load_data(SALES_FILE)
     
     if request.method == 'GET':
-        sales = db.get_sales_by_account(account_id)
         return jsonify(sales)
     
     data = request.get_json()
+    sale = {
+        'id': get_next_id(sales),
+        'items': data['items'],
+        'total': float(data['total']),
+        'accountId': request.user['accountId'],
+        'cashierId': request.user['id'],
+        'createdAt': datetime.now().isoformat()
+    }
     
-    # Process stock deduction
-    products = db.get_products_by_account(account_id)
-    for item in data.get('items', []):
-        product = next((p for p in products if p['id'] == item['productId']), None)
-        if product:
-            new_quantity = max(0, product['quantity'] - item['quantity'])
-            db.update_product(product['id'], quantity=new_quantity)
+    sales.append(sale)
+    save_data(SALES_FILE, sales)
     
-    # Create sale
-    user = db.get_user_by_id(request.user['id'])
-    sale_id = db.create_sale(
-        account_id=account_id,
-        items=data.get('items', []),
-        total=float(data.get('total', 0)),
-        cashier_id=request.user['id'],
-        cashier_name=user['name'] if user else 'Unknown'
-    )
-    
-    # Return created sale
-    sales = db.get_sales_by_account(account_id)
-    sale = next((s for s in sales if s['id'] == sale_id), None)
     return jsonify(sale)
-
-@app.route('/api/expenses', methods=['GET', 'POST'])
-@token_required
-def handle_expenses():
-    # Stub implementation
-    return jsonify([])
 
 @app.route('/api/stats')
 @token_required
 def stats():
-    account_id = request.user.get('accountId')
-    sales = db.get_sales_by_account(account_id)
-    products = db.get_products_by_account(account_id)
+    sales = load_data(SALES_FILE)
+    products = load_data(PRODUCTS_FILE)
     
     total_sales = sum(s.get('total', 0) for s in sales)
     
@@ -322,189 +223,5 @@ def stats():
         'productCount': len(products)
     })
 
-@app.route('/api/users', methods=['GET', 'POST'])
-@token_required
-def handle_users():
-    if request.method == 'GET':
-        account_id = request.user.get('accountId')
-        users = db.get_users_by_account(account_id)
-        return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
-    
-    # POST - Create new user (cashier)
-    current_user = db.get_user_by_id(request.user['id'])
-    if not current_user:
-        return jsonify({'error': 'Current user not found'}), 404
-    
-    # Only admins can create users
-    if current_user['role'] != 'admin':
-        return jsonify({'error': 'Only admins can create users'}), 403
-    
-    data = request.get_json()
-    
-    # Validate required fields
-    if not data.get('email') or not data.get('name'):
-        return jsonify({'error': 'Email and name are required'}), 400
-    
-    # Check if user already exists
-    if db.get_user_by_email(data.get('email').lower()):
-        return jsonify({'error': 'User with this email already exists'}), 400
-    
-    try:
-        user_id = db.create_user(
-            email=data.get('email', '').lower(),
-            password=data.get('password', 'changeme123'),
-            name=data.get('name', ''),
-            role='cashier',  # Always create as cashier
-            plan=current_user['plan'],  # Inherit plan from admin
-            account_id=current_user['accountId'],
-            pin=data.get('pin', ''),
-            created_by=current_user['id']
-        )
-        
-        # Log activity
-        db.create_activity('user_created', user_id, data.get('email', ''), data.get('name', ''), current_user['plan'], current_user['id'])
-        
-        user = db.get_user_by_id(user_id)
-        return jsonify({k: v for k, v in user.items() if k != 'password'})
-        
-    except Exception as e:
-        print(f"Error creating user: {e}")
-        return jsonify({'error': 'Failed to create user'}), 500
-
-@app.route('/api/reminders', methods=['GET', 'POST'])
-@token_required
-def handle_reminders():
-    return jsonify([])
-
-@app.route('/api/reminders/<int:reminder_id>', methods=['PUT', 'DELETE'])
-@token_required
-def handle_reminder(reminder_id):
-    return jsonify({'message': 'Reminder updated'})
-
-# MAIN ADMIN ENDPOINTS
-@app.route('/api/main-admin/auth/login', methods=['POST'])
-def main_admin_login():
-    data = request.get_json()
-    email = data.get('email', '').lower()
-    password = data.get('password', '')
-    
-    if email == 'ianmabruk3@gmail.com' and password == 'admin123':
-        token = jwt.encode({'id': 'admin', 'email': email, 'type': 'main_admin'}, 
-                          app.config['SECRET_KEY'], algorithm='HS256')
-        return jsonify({
-            'token': token,
-            'user': {'id': 'admin', 'email': email, 'name': 'Ian Mabruk', 'type': 'main_admin'}
-        })
-    
-    return jsonify({'error': 'Access denied'}), 401
-
-@app.route('/api/main-admin/users')
-@token_required
-def main_admin_users():
-    if request.user.get('type') != 'main_admin':
-        return jsonify({'error': 'Access denied'}), 403
-    users = db.get_all_users()
-    return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
-
-@app.route('/api/main-admin/activities')
-@token_required
-def main_admin_activities():
-    if request.user.get('type') != 'main_admin':
-        return jsonify({'error': 'Access denied'}), 403
-    activities = db.get_all_activities()
-    return jsonify(activities)
-
-@app.route('/api/main-admin/stats')
-@token_required
-def main_admin_stats():
-    if request.user.get('type') != 'main_admin':
-        return jsonify({'error': 'Access denied'}), 403
-    
-    users = db.get_all_users()
-    return jsonify({
-        'totalUsers': len(users),
-        'activeUsers': len([u for u in users if u.get('active', True)]),
-        'totalSales': 0,
-        'totalTransactions': 0
-    })
-
-@app.route('/api/settings', methods=['GET', 'POST'])
-@token_required
-def handle_settings():
-    if request.method == 'GET':
-        return jsonify(db.get_settings())
-    
-    data = request.get_json()
-    db.update_settings(**data)
-    return jsonify(db.get_settings())
-
-# Stub endpoints
-@app.route('/api/batches', methods=['GET', 'POST'])
-def handle_batches():
-    return jsonify([])
-
-@app.route('/api/production', methods=['GET', 'POST'])
-def handle_production():
-    return jsonify([])
-
-@app.route('/api/categories/generate-code', methods=['POST'])
-def generate_category_code():
-    return jsonify({'code': 'CAT001'})
-
-@app.route('/api/price-history', methods=['GET', 'POST'])
-def handle_price_history():
-    return jsonify([])
-
-@app.route('/api/service-fees', methods=['GET', 'POST'])
-def handle_service_fees():
-    return jsonify([])
-
-@app.route('/api/service-fees/<int:fee_id>', methods=['PUT', 'DELETE'])
-def handle_service_fee(fee_id):
-    return jsonify({'message': 'Service fee updated'})
-
-@app.route('/api/discounts', methods=['GET', 'POST'])
-def handle_discounts():
-    return jsonify([])
-
-@app.route('/api/discounts/<int:discount_id>', methods=['PUT', 'DELETE'])
-def handle_discount(discount_id):
-    return jsonify({'message': 'Discount updated'})
-
-@app.route('/api/credit-requests', methods=['GET', 'POST'])
-def handle_credit_requests():
-    return jsonify([])
-
-@app.route('/api/credit-requests/<int:request_id>/approve', methods=['POST'])
-def approve_credit_request(request_id):
-    return jsonify({'message': 'Credit request approved'})
-
-@app.route('/api/credit-requests/<int:request_id>/reject', methods=['POST'])
-def reject_credit_request(request_id):
-    return jsonify({'message': 'Credit request rejected'})
-
-@app.route('/api/upload-image', methods=['POST'])
-@token_required
-def upload_image():
-    data = request.get_json()
-    return jsonify({'url': data.get('image', ''), 'success': True})
-
-# Initialize database and start app
 if __name__ == '__main__':
-    try:
-        logger.info("Initializing database...")
-        db.init_db()
-        logger.info("Database initialized successfully")
-        port = int(os.environ.get('PORT', 5000))
-        app.run(host='0.0.0.0', port=port, debug=False)
-    except Exception as e:
-        logger.error(f"Failed to start application: {e}")
-        raise
-else:
-    # For production deployment (gunicorn)
-    try:
-        logger.info("Production mode: Initializing database...")
-        db.init_db()
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+    app.run(debug=True)
