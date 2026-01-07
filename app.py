@@ -20,7 +20,7 @@ def after_request(response):
 
 app.config['SECRET_KEY'] = 'ultra-pos-secret-2024'
 
-# File-based storage
+# File-based storage - NO DATABASE REQUIRED
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 USERS_FILE = f'{DATA_DIR}/users.json'
 PRODUCTS_FILE = f'{DATA_DIR}/products.json'
@@ -28,6 +28,8 @@ SALES_FILE = f'{DATA_DIR}/sales.json'
 
 # Ensure data directory exists
 os.makedirs(DATA_DIR, exist_ok=True)
+
+print(f"✅ Using file storage at: {DATA_DIR}")
 
 def load_data(filename):
     try:
@@ -59,7 +61,12 @@ def token_required(f):
 
 @app.route('/')
 def home():
-    return jsonify({'message': 'POS API is running'})
+    return jsonify({
+        'message': 'POS API is running', 
+        'storage': 'file-based',
+        'status': 'healthy',
+        'database': 'none'
+    })
 
 @app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
