@@ -21,10 +21,13 @@ def after_request(response):
 app.config['SECRET_KEY'] = 'ultra-pos-secret-2024'
 
 # File-based storage
-DATA_DIR = '/tmp'
+DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 USERS_FILE = f'{DATA_DIR}/users.json'
 PRODUCTS_FILE = f'{DATA_DIR}/products.json'
 SALES_FILE = f'{DATA_DIR}/sales.json'
+
+# Ensure data directory exists
+os.makedirs(DATA_DIR, exist_ok=True)
 
 def load_data(filename):
     try:
