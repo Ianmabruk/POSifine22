@@ -186,7 +186,7 @@ def signup():
             'email': data['email'],
             'password': data['password'],
             'name': data['name'],
-            'role': 'admin' if data.get('plan') == 'ultra' else 'cashier',
+            'role': 'admin' if data.get('plan') in ['1600', 'ultra'] else 'cashier',
             'plan': data.get('plan', 'basic'),
             'accountId': get_next_id(users),
             'active': True,
