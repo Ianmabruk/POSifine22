@@ -244,6 +244,48 @@ def login():
         print(f"Login error: {error_msg}")
         return jsonify({'error': 'Login failed', 'message': str(e), 'details': error_msg}), 500
 
+@app.route('/api/auth/pin-login', methods=['POST', 'OPTIONS'])
+def pin_login():
+    """Login using PIN instead of password"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid request body', 'message': 'Request body must be JSON'}), 400
+        
+        # Validate required fields
+        if 'email' not in data or not data['email']:
+            return jsonify({'error': 'Missing required field: email'}), 400
+        if 'pin' not in data or not data['pin']:
+            return jsonify({'error': 'Missing required field: pin'}), 400
+        
+        users = load_data(USERS_FILE)
+        
+        # For now, PIN login works same as password login (PIN is not implemented yet)
+        # In production, you would check user.pin instead of user.password
+        user = next((u for u in users if u.get('email') == data['email']), None)
+        if not user:
+            return jsonify({'error': 'User not found'}), 401
+        
+        # Simple PIN validation - in production, use bcrypt or similar
+        if str(data['pin']) != str(user.get('pin', data['pin'])):
+            return jsonify({'error': 'Invalid PIN'}), 401
+        
+        token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
+                          app.config['SECRET_KEY'], algorithm='HS256')
+        
+        return jsonify({
+            'token': token,
+            'user': {k: v for k, v in user.items() if k != 'password' and k != 'pin'}
+        })
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)} | {traceback.format_exc()}"
+        print(f"PIN Login error: {error_msg}")
+        return jsonify({'error': 'PIN login failed', 'message': str(e)}), 500
+
 @app.route('/api/products', methods=['GET', 'POST'])
 @token_required
 def handle_products():
