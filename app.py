@@ -60,6 +60,7 @@ SETTINGS_FILE = f'{DATA_DIR}/settings.json'
 REMINDERS_FILE = f'{DATA_DIR}/reminders.json'
 RECIPES_FILE = f'{DATA_DIR}/recipes.json'
 NOTES_FILE = f'{DATA_DIR}/cashier_notes.json'
+DISCOUNTS_FILE = f'{DATA_DIR}/discounts.json'
 
 # Ensure data directory exists and initialize empty JSON files
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -638,13 +639,24 @@ def handle_sales():
         'id': get_next_id(sales),
         'items': data['items'],
         'total': float(data['total']),
+        'discount': float(data.get('discount', 0)),
+        'tax': float(data.get('tax', 0)),
+        'taxType': data.get('taxType', 'exclusive'),
+        'paymentMethod': data.get('paymentMethod', 'cash'),
         'accountId': request.user['accountId'],
         'cashierId': request.user['id'],
+        'cashierName': request.user.get('name', 'Unknown'),
         'createdAt': datetime.now().isoformat()
     }
     
     sales.append(sale)
     save_data(SALES_FILE, sales)
+    
+    # Broadcast sale to all connected clients so admin sees it immediately
+    broadcast_update('sale_created', {
+        'sale': sale,
+        'allProducts': products
+    })
     
     return jsonify(sale)
 
@@ -752,7 +764,51 @@ def credit_requests():
 def discounts_endpoint():
     if request.method == 'OPTIONS':
         return '', 200
-    return jsonify([])
+    
+    discounts = load_data(DISCOUNTS_FILE)
+    
+    if request.method == 'GET':
+        return jsonify(discounts)
+    
+    data = request.get_json()
+    
+    if request.method == 'POST':
+        discount = {
+            'id': max([d.get('id', 0) for d in discounts], default=0) + 1,
+            'name': data.get('name', ''),
+            'type': data.get('type', 'percentage'),
+            'value': float(data.get('value', 0)),
+            'description': data.get('description', ''),
+            'active': data.get('active', True),
+            'createdAt': datetime.now().isoformat()
+        }
+        discounts.append(discount)
+        save_data(DISCOUNTS_FILE, discounts)
+        broadcast_update('discount_updated', {'discounts': discounts})
+        return jsonify(discount), 201
+    
+    elif request.method == 'PUT':
+        discount_id = int(data.get('id'))
+        discount = next((d for d in discounts if d['id'] == discount_id), None)
+        if discount:
+            discount.update({
+                'name': data.get('name', discount.get('name')),
+                'type': data.get('type', discount.get('type')),
+                'value': float(data.get('value', discount.get('value', 0))),
+                'description': data.get('description', discount.get('description')),
+                'active': data.get('active', discount.get('active'))
+            })
+            save_data(DISCOUNTS_FILE, discounts)
+            broadcast_update('discount_updated', {'discounts': discounts})
+            return jsonify(discount)
+        return jsonify({'error': 'Discount not found'}), 404
+    
+    elif request.method == 'DELETE':
+        discount_id = int(data.get('id'))
+        discounts = [d for d in discounts if d['id'] != discount_id]
+        save_data(DISCOUNTS_FILE, discounts)
+        broadcast_update('discount_updated', {'discounts': discounts})
+        return jsonify({'status': 'deleted'})
 
 @app.route('/api/recipes', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
