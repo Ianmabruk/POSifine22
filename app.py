@@ -26,7 +26,12 @@ def after_request(response):
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'ultra-pos-secret-2024')
 
 # File-based storage - NO DATABASE REQUIRED
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+# Use /app/data on Render, or data/ locally
+DATA_DIR = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data'))
+# Fallback to /app/data if directory doesn't exist locally
+if not os.path.exists(DATA_DIR) and os.path.exists('/app'):
+    DATA_DIR = '/app/data'
+
 USERS_FILE = f'{DATA_DIR}/users.json'
 PRODUCTS_FILE = f'{DATA_DIR}/products.json'
 SALES_FILE = f'{DATA_DIR}/sales.json'
@@ -42,9 +47,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 def init_json_file(filepath):
     """Initialize JSON file with empty array if it doesn't exist"""
-    if not os.path.exists(filepath):
-        with open(filepath, 'w') as f:
-            json.dump([], f)
+    try:
+        if not os.path.exists(filepath):
+            with open(filepath, 'w') as f:
+                json.dump([], f)
+        # Verify file has valid JSON
+        with open(filepath, 'r') as f:
+            content = f.read().strip()
+            if not content:
+                with open(filepath, 'w') as fw:
+                    json.dump([], fw)
+    except Exception as e:
+        print(f"Error initializing {filepath}: {e}")
 
 # Initialize all data files on startup
 for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
@@ -53,6 +67,7 @@ for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE,
     init_json_file(filepath)
 
 print(f"✅ Using file storage at: {DATA_DIR}")
+print(f"✅ Data directory exists: {os.path.exists(DATA_DIR)}")
 print(f"✅ Data files initialized")
 
 def load_data(filename):
@@ -162,7 +177,7 @@ def signup():
         users = load_data(USERS_FILE)
         
         # Check if user exists
-        if any(u['email'] == data['email'] for u in users):
+        if any(u.get('email') == data['email'] for u in users):
             return jsonify({'error': 'User already exists'}), 400
         
         # Create user
@@ -189,8 +204,10 @@ def signup():
             'user': {k: v for k, v in user.items() if k != 'password'}
         })
     except Exception as e:
-        print(f"Signup error: {str(e)}")
-        return jsonify({'error': 'Signup failed', 'message': str(e)}), 500
+        import traceback
+        error_msg = f"{str(e)} | {traceback.format_exc()}"
+        print(f"Signup error: {error_msg}")
+        return jsonify({'error': 'Signup failed', 'message': str(e), 'details': error_msg}), 500
 
 @app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
 def login():
@@ -210,7 +227,7 @@ def login():
         
         users = load_data(USERS_FILE)
         
-        user = next((u for u in users if u['email'] == data['email'] and u['password'] == data['password']), None)
+        user = next((u for u in users if u.get('email') == data['email'] and u.get('password') == data['password']), None)
         if not user:
             return jsonify({'error': 'Invalid credentials'}), 401
         
@@ -222,8 +239,10 @@ def login():
             'user': {k: v for k, v in user.items() if k != 'password'}
         })
     except Exception as e:
-        print(f"Login error: {str(e)}")
-        return jsonify({'error': 'Login failed', 'message': str(e)}), 500
+        import traceback
+        error_msg = f"{str(e)} | {traceback.format_exc()}"
+        print(f"Login error: {error_msg}")
+        return jsonify({'error': 'Login failed', 'message': str(e), 'details': error_msg}), 500
 
 @app.route('/api/products', methods=['GET', 'POST'])
 @token_required
