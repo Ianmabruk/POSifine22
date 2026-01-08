@@ -16,6 +16,23 @@ CORS(app, origins=['*'], methods=['*'], allow_headers=['*'])
 # WebSocket (flask-sock)
 sock = Sock(app)
 
+# Track connected WebSocket clients for broadcasting
+connected_clients = []
+
+def broadcast_update(message_type, data):
+    """Broadcast updates to all connected WebSocket clients"""
+    message = {'type': message_type, 'data': data, 'timestamp': datetime.now().isoformat()}
+    disconnected = []
+    for client in connected_clients:
+        try:
+            client.send(json.dumps(message))
+        except Exception:
+            disconnected.append(client)
+    # Remove disconnected clients
+    for client in disconnected:
+        if client in connected_clients:
+            connected_clients.remove(client)
+
 @app.after_request
 def after_request(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -136,7 +153,10 @@ def products_ws(ws):
             pass
         return
 
-    # Send current products on connect, then send periodic heartbeats
+    # Register this client for broadcasts
+    connected_clients.append(ws)
+    
+    # Send current products on connect
     products = load_data(PRODUCTS_FILE)
     try:
         ws.send(json.dumps({'type': 'initial', 'products': products}))
@@ -148,6 +168,10 @@ def products_ws(ws):
                 break
     except Exception:
         pass
+    finally:
+        # Remove client when disconnected
+        if ws in connected_clients:
+            connected_clients.remove(ws)
 
 @app.route('/')
 def home():
@@ -370,6 +394,14 @@ def update_stock(product_id):
         product['quantity'] = max(0, product.get('quantity', 0) - int(data['decrement']))
     
     save_data(PRODUCTS_FILE, products)
+    
+    # Broadcast stock update to all connected clients
+    broadcast_update('stock_updated', {
+        'id': product_id,
+        'product': product,
+        'allProducts': products
+    })
+    
     return jsonify(product)
 
 @app.route('/api/users', methods=['GET', 'POST'])
