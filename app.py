@@ -286,21 +286,34 @@ def pin_login():
         print(f"PIN Login error: {error_msg}")
         return jsonify({'error': 'PIN login failed', 'message': str(e)}), 500
 
-@app.route('/api/products', methods=['GET', 'POST'])
+@app.route('/api/products', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_products():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     products = load_data(PRODUCTS_FILE)
     
     if request.method == 'GET':
         return jsonify(products)
     
     data = request.get_json()
+    
+    # Validate required fields
+    if 'name' not in data or not data['name']:
+        return jsonify({'error': 'Product name is required'}), 400
+    if 'price' not in data or data['price'] is None:
+        return jsonify({'error': 'Product price is required'}), 400
+    
     product = {
         'id': get_next_id(products),
         'name': data['name'],
         'price': float(data['price']),
         'quantity': int(data.get('quantity', 0)),
         'category': data.get('category', 'general'),
+        'image': data.get('image', None),  # Base64 image or URL
+        'isComposite': data.get('isComposite', False),
+        'ingredients': data.get('ingredients', []),  # List of {productId, quantity}
         'accountId': request.user['accountId'],
         'createdAt': datetime.now().isoformat()
     }
@@ -310,9 +323,12 @@ def handle_products():
     
     return jsonify(product)
 
-@app.route('/api/products/<int:product_id>', methods=['PUT', 'DELETE'])
+@app.route('/api/products/<int:product_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
 @token_required
 def handle_product(product_id):
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     products = load_data(PRODUCTS_FILE)
     product = next((p for p in products if p['id'] == product_id), None)
     
@@ -329,6 +345,32 @@ def handle_product(product_id):
         products = [p for p in products if p['id'] != product_id]
         save_data(PRODUCTS_FILE, products)
         return jsonify({'message': 'Product deleted'})
+
+@app.route('/api/products/<int:product_id>/stock', methods=['PUT', 'OPTIONS'])
+@token_required
+def update_stock(product_id):
+    """Update product stock/inventory"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    products = load_data(PRODUCTS_FILE)
+    product = next((p for p in products if p['id'] == product_id), None)
+    
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
+    
+    data = request.get_json()
+    
+    # Handle different stock update types
+    if 'quantity' in data:
+        product['quantity'] = int(data['quantity'])
+    elif 'increment' in data:
+        product['quantity'] = product.get('quantity', 0) + int(data['increment'])
+    elif 'decrement' in data:
+        product['quantity'] = max(0, product.get('quantity', 0) - int(data['decrement']))
+    
+    save_data(PRODUCTS_FILE, products)
+    return jsonify(product)
 
 @app.route('/api/users', methods=['GET', 'POST'])
 @token_required
@@ -357,15 +399,36 @@ def handle_users():
     
     return jsonify({k: v for k, v in user.items() if k != 'password'})
 
-@app.route('/api/sales', methods=['GET', 'POST'])
+@app.route('/api/sales', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_sales():
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     sales = load_data(SALES_FILE)
     
     if request.method == 'GET':
         return jsonify(sales)
     
     data = request.get_json()
+    products = load_data(PRODUCTS_FILE)
+    
+    # Process sale items - deduct inventory and handle composite products
+    for item in data.get('items', []):
+        product = next((p for p in products if p['id'] == item['productId']), None)
+        if product:
+            # Deduct sold quantity
+            product['quantity'] = product.get('quantity', 0) - item['quantity']
+            
+            # If composite product, deduct ingredients
+            if product.get('isComposite'):
+                for ingredient in product.get('ingredients', []):
+                    ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
+                    if ingredient_product:
+                        ingredient_product['quantity'] = ingredient_product.get('quantity', 0) - (ingredient['quantity'] * item['quantity'])
+    
+    save_data(PRODUCTS_FILE, products)
+    
     sale = {
         'id': get_next_id(sales),
         'items': data['items'],
