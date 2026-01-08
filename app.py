@@ -399,6 +399,131 @@ def handle_users():
     
     return jsonify({k: v for k, v in user.items() if k != 'password'})
 
+@app.route('/api/main-admin/users-with-subscriptions', methods=['GET'])
+@token_required
+def get_users_with_subscriptions():
+    """Get all users enriched with subscription tracking data"""
+    users = load_data(USERS_FILE)
+    now = datetime.now()
+    
+    enriched_users = []
+    for u in users:
+        # Skip if no createdAt (shouldn't happen with new code)
+        if 'createdAt' not in u:
+            u['createdAt'] = datetime.now().isoformat()
+        
+        # Parse createdAt to datetime
+        try:
+            created_at = datetime.fromisoformat(u['createdAt'])
+        except:
+            created_at = datetime.now()
+        
+        # Calculate days active
+        days_active = (now - created_at).days
+        
+        # Determine if user is on free trial
+        is_free_trial = u.get('plan') in [None, 'free', '']
+        
+        # Check if reached 30-day limit
+        has_reached_trial_limit = days_active >= 30 and is_free_trial
+        
+        # Calculate days until expiry
+        days_until_expiry = max(0, 30 - days_active) if is_free_trial else 0
+        
+        # Determine subscription status
+        if is_free_trial:
+            if has_reached_trial_limit:
+                subscription_status = 'trial_expired'
+            else:
+                subscription_status = 'free_trial'
+        else:
+            subscription_status = 'paid'
+        
+        # Calculate trial expiry date
+        trial_expiry_date = None
+        if is_free_trial:
+            trial_expiry_date = (created_at + timedelta(days=30)).isoformat()
+        
+        # Enrich user object
+        enriched_user = {
+            k: v for k, v in u.items() if k != 'password'
+        }
+        enriched_user.update({
+            'daysActive': days_active,
+            'isFreeTrial': is_free_trial,
+            'hasReachedTrialLimit': has_reached_trial_limit,
+            'daysUntilExpiry': days_until_expiry,
+            'subscriptionStatus': subscription_status,
+            'trialExpireDate': trial_expiry_date,
+            'planPrice': 0 if is_free_trial else 99  # Default prices - adjust as needed
+        })
+        
+        enriched_users.append(enriched_user)
+    
+    return jsonify(enriched_users)
+
+@app.route('/api/main-admin/send-email', methods=['POST'])
+@token_required
+def send_admin_email():
+    """Send email to user for upgrade or trial reminder"""
+    data = request.get_json()
+    user_id = data.get('userId')
+    email_type = data.get('type')  # 'upgrade' or 'reminder'
+    
+    users = load_data(USERS_FILE)
+    user = next((u for u in users if u.get('id') == user_id), None)
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    # In production, integrate with email service (SendGrid, Mailgun, etc.)
+    # For now, just return success
+    if email_type == 'upgrade':
+        # Send upgrade email
+        subject = 'Your free trial has expired - Upgrade now!'
+        message = f"Hi {user.get('name', 'User')}, your 30-day free trial has ended. Please upgrade to continue using our service."
+    elif email_type == 'reminder':
+        # Send reminder email
+        days_left = data.get('daysLeft', 5)
+        subject = f'Your free trial expires in {days_left} days'
+        message = f"Hi {user.get('name', 'User')}, your free trial expires in {days_left} days. Upgrade now to avoid losing access."
+    else:
+        return jsonify({'error': 'Invalid email type'}), 400
+    
+    # TODO: Implement actual email sending
+    # For now, just log and return success
+    print(f"[EMAIL] To: {user.get('email')}, Subject: {subject}")
+    
+    return jsonify({
+        'success': True,
+        'message': f'Email sent to {user.get("email")}',
+        'user_id': user_id,
+        'type': email_type
+    })
+
+@app.route('/api/main-admin/users/<int:user_id>/lock', methods=['POST'])
+@token_required
+def toggle_user_lock(user_id):
+    """Lock or unlock a user account"""
+    data = request.get_json()
+    locked = data.get('locked', False)
+    
+    users = load_data(USERS_FILE)
+    user = next((u for u in users if u.get('id') == user_id), None)
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    user['active'] = not locked
+    save_data(USERS_FILE, users)
+    
+    return jsonify({
+        'success': True,
+        'user_id': user_id,
+        'locked': locked,
+        'message': f'User {"locked" if locked else "unlocked"} successfully'
+    })
+
 @app.route('/api/sales', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_sales():
