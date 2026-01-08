@@ -701,7 +701,44 @@ def expenses():
 def batches():
     if request.method == 'OPTIONS':
         return '', 200
-    return jsonify([])
+    
+    if request.method == 'GET':
+        # Load and return all batches
+        batches_data = load_data(BATCHES_FILE)
+        return jsonify(batches_data)
+    
+    # POST - Create new batch
+    data = request.get_json()
+    batches_data = load_data(BATCHES_FILE)
+    
+    batch = {
+        'id': max([b.get('id', 0) for b in batches_data], default=0) + 1,
+        'productId': int(data.get('productId')),
+        'quantity': int(data.get('quantity', 0)),
+        'expiryDate': data.get('expiryDate', ''),
+        'batchNumber': data.get('batchNumber', f'BATCH-{datetime.now().strftime("%Y%m%d%H%M%S")}'),
+        'cost': float(data.get('cost', 0)),
+        'createdAt': datetime.now().isoformat()
+    }
+    
+    batches_data.append(batch)
+    save_data(BATCHES_FILE, batches_data)
+    
+    # Also update product quantity in products.json
+    products = load_data(PRODUCTS_FILE)
+    product = next((p for p in products if p['id'] == batch['productId']), None)
+    if product:
+        product['quantity'] = product.get('quantity', 0) + batch['quantity']
+        save_data(PRODUCTS_FILE, products)
+        
+        # Broadcast stock update to all connected clients
+        broadcast_update('stock_updated', {
+            'id': batch['productId'],
+            'product': product,
+            'allProducts': products
+        })
+    
+    return jsonify(batch), 201
 
 @app.route('/api/credit-requests', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
