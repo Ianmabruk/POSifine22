@@ -58,6 +58,8 @@ DISCOUNTS_FILE = f'{DATA_DIR}/discounts.json'
 CREDIT_REQUESTS_FILE = f'{DATA_DIR}/credit_requests.json'
 SETTINGS_FILE = f'{DATA_DIR}/settings.json'
 REMINDERS_FILE = f'{DATA_DIR}/reminders.json'
+RECIPES_FILE = f'{DATA_DIR}/recipes.json'
+NOTES_FILE = f'{DATA_DIR}/cashier_notes.json'
 
 # Ensure data directory exists and initialize empty JSON files
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -309,6 +311,52 @@ def pin_login():
         error_msg = f"{str(e)} | {traceback.format_exc()}"
         print(f"PIN Login error: {error_msg}")
         return jsonify({'error': 'PIN login failed', 'message': str(e)}), 500
+
+@app.route('/api/main-admin/auth/login', methods=['POST', 'OPTIONS'])
+def main_admin_login():
+    """Main admin (owner) login"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid request body'}), 400
+        
+        email = data.get('email', '').lower()
+        password = data.get('password', '')
+        
+        if not email or not password:
+            return jsonify({'error': 'Email and password required'}), 400
+        
+        # Check if user is the main admin/owner
+        # Main admin should have role 'owner' or 'admin' with special flag
+        users = load_data(USERS_FILE)
+        user = next((u for u in users if u.get('email', '').lower() == email and u.get('password') == password), None)
+        
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
+        
+        # Check if user has admin/owner privileges
+        if user.get('role') not in ['owner', 'admin']:
+            return jsonify({'error': 'Access denied. Admin privileges required'}), 403
+        
+        token = jwt.encode({
+            'id': user['id'],
+            'email': user['email'],
+            'role': user['role'],
+            'accountId': user.get('accountId', 'main'),
+            'isMainAdmin': True
+        }, app.config['SECRET_KEY'], algorithm='HS256')
+        
+        return jsonify({
+            'token': token,
+            'user': {k: v for k, v in user.items() if k != 'password' and k != 'pin'}
+        })
+    except Exception as e:
+        import traceback
+        print(f"Main admin login error: {str(e)} | {traceback.format_exc()}")
+        return jsonify({'error': 'Login failed', 'message': str(e)}), 500
 
 @app.route('/api/products', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
@@ -668,6 +716,119 @@ def discounts_endpoint():
     if request.method == 'OPTIONS':
         return '', 200
     return jsonify([])
+
+@app.route('/api/recipes', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_recipes():
+    """Manage composite product recipes/BOMs"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    recipes = load_data(RECIPES_FILE)
+    
+    if request.method == 'GET':
+        return jsonify(recipes)
+    
+    # POST - Create new recipe
+    data = request.get_json()
+    recipe = {
+        'id': max([r.get('id', 0) for r in recipes], default=0) + 1,
+        'productId': data.get('productId'),
+        'name': data.get('name'),
+        'ingredients': data.get('ingredients', []),  # [{productId, quantity, name}, ...]
+        'createdAt': datetime.now().isoformat(),
+        'updatedAt': datetime.now().isoformat()
+    }
+    recipes.append(recipe)
+    save_data(RECIPES_FILE, recipes)
+    
+    return jsonify(recipe), 201
+
+@app.route('/api/recipes/<int:recipe_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_recipe(recipe_id):
+    """Update or delete a recipe"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    recipes = load_data(RECIPES_FILE)
+    recipe = next((r for r in recipes if r['id'] == recipe_id), None)
+    
+    if not recipe:
+        return jsonify({'error': 'Recipe not found'}), 404
+    
+    if request.method == 'GET':
+        return jsonify(recipe)
+    
+    if request.method == 'DELETE':
+        recipes = [r for r in recipes if r['id'] != recipe_id]
+        save_data(RECIPES_FILE, recipes)
+        return jsonify({'message': 'Recipe deleted'}), 200
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        recipe.update({
+            'name': data.get('name', recipe.get('name')),
+            'ingredients': data.get('ingredients', recipe.get('ingredients')),
+            'updatedAt': datetime.now().isoformat()
+        })
+        save_data(RECIPES_FILE, recipes)
+        return jsonify(recipe)
+
+@app.route('/api/cashier-notes', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_cashier_notes():
+    """Cashier notes/reminders for other staff"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    notes = load_data(NOTES_FILE)
+    
+    if request.method == 'GET':
+        return jsonify(notes)
+    
+    # POST - Create new note
+    data = request.get_json()
+    note = {
+        'id': max([n.get('id', 0) for n in notes], default=0) + 1,
+        'fromCashierId': request.user.get('id'),
+        'fromCashierName': request.user.get('name'),
+        'message': data.get('message'),
+        'priority': data.get('priority', 'normal'),  # low, normal, high
+        'read': False,
+        'createdAt': datetime.now().isoformat()
+    }
+    notes.append(note)
+    save_data(NOTES_FILE, notes)
+    
+    # Broadcast note to all connected dashboards
+    broadcast_update('new_note', note)
+    
+    return jsonify(note), 201
+
+@app.route('/api/cashier-notes/<int:note_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_cashier_note(note_id):
+    """Mark note as read or delete"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    notes = load_data(NOTES_FILE)
+    note = next((n for n in notes if n['id'] == note_id), None)
+    
+    if not note:
+        return jsonify({'error': 'Note not found'}), 404
+    
+    if request.method == 'DELETE':
+        notes = [n for n in notes if n['id'] != note_id]
+        save_data(NOTES_FILE, notes)
+        return jsonify({'message': 'Note deleted'}), 200
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        note['read'] = data.get('read', note.get('read'))
+        save_data(NOTES_FILE, notes)
+        return jsonify(note)
 
 # 404 Error Handler
 @app.errorhandler(404)
