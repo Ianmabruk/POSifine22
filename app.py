@@ -147,57 +147,83 @@ def home():
 def signup():
     if request.method == 'OPTIONS':
         return '', 200
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid request body', 'message': 'Request body must be JSON'}), 400
         
-    data = request.get_json()
-    users = load_data(USERS_FILE)
-    
-    # Check if user exists
-    if any(u['email'] == data['email'] for u in users):
-        return jsonify({'error': 'User exists'}), 400
-    
-    # Create user
-    user = {
-        'id': get_next_id(users),
-        'email': data['email'],
-        'password': data['password'],
-        'name': data['name'],
-        'role': 'admin' if data.get('plan') == 'ultra' else 'cashier',
-        'plan': data.get('plan', 'basic'),
-        'accountId': get_next_id(users),
-        'active': True,
-        'createdAt': datetime.now().isoformat()
-    }
-    
-    users.append(user)
-    save_data(USERS_FILE, users)
-    
-    token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
-                      app.config['SECRET_KEY'], algorithm='HS256')
-    
-    return jsonify({
-        'token': token,
-        'user': {k: v for k, v in user.items() if k != 'password'}
-    })
+        # Validate required fields
+        required_fields = ['email', 'password', 'name']
+        for field in required_fields:
+            if field not in data or not data[field]:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+        
+        users = load_data(USERS_FILE)
+        
+        # Check if user exists
+        if any(u['email'] == data['email'] for u in users):
+            return jsonify({'error': 'User already exists'}), 400
+        
+        # Create user
+        user = {
+            'id': get_next_id(users),
+            'email': data['email'],
+            'password': data['password'],
+            'name': data['name'],
+            'role': 'admin' if data.get('plan') == 'ultra' else 'cashier',
+            'plan': data.get('plan', 'basic'),
+            'accountId': get_next_id(users),
+            'active': True,
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        users.append(user)
+        save_data(USERS_FILE, users)
+        
+        token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
+                          app.config['SECRET_KEY'], algorithm='HS256')
+        
+        return jsonify({
+            'token': token,
+            'user': {k: v for k, v in user.items() if k != 'password'}
+        })
+    except Exception as e:
+        print(f"Signup error: {str(e)}")
+        return jsonify({'error': 'Signup failed', 'message': str(e)}), 500
 
 @app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
 def login():
     if request.method == 'OPTIONS':
         return '', 200
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid request body', 'message': 'Request body must be JSON'}), 400
         
-    data = request.get_json()
-    users = load_data(USERS_FILE)
-    
-    user = next((u for u in users if u['email'] == data['email'] and u['password'] == data['password']), None)
-    if not user:
-        return jsonify({'error': 'Invalid credentials'}), 401
-    
-    token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
-                      app.config['SECRET_KEY'], algorithm='HS256')
-    
-    return jsonify({
-        'token': token,
-        'user': {k: v for k, v in user.items() if k != 'password'}
-    })
+        # Validate required fields
+        if 'email' not in data or not data['email']:
+            return jsonify({'error': 'Missing required field: email'}), 400
+        if 'password' not in data or not data['password']:
+            return jsonify({'error': 'Missing required field: password'}), 400
+        
+        users = load_data(USERS_FILE)
+        
+        user = next((u for u in users if u['email'] == data['email'] and u['password'] == data['password']), None)
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
+        
+        token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
+                          app.config['SECRET_KEY'], algorithm='HS256')
+        
+        return jsonify({
+            'token': token,
+            'user': {k: v for k, v in user.items() if k != 'password'}
+        })
+    except Exception as e:
+        print(f"Login error: {str(e)}")
+        return jsonify({'error': 'Login failed', 'message': str(e)}), 500
 
 @app.route('/api/products', methods=['GET', 'POST'])
 @token_required
