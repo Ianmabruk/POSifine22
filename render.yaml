@@ -1,13 +1,13 @@
 services:
   - type: web
-    name: universal-pos-backend
-    env: node
-    buildCommand: npm install
-    startCommand: npm start
+    name: posifine-backend
+    env: python
+    buildCommand: pip install -r requirements.txt && gunicorn --version
+    startCommand: gunicorn -w 4 -b 0.0.0.0:5000 app:app
     envVars:
-      - key: MONGO_URI
-        value: mongodb+srv://username:password@cluster.mongodb.net/pos_db
       - key: JWT_SECRET
         generateValue: true
-      - key: NODE_ENV
+      - key: FLASK_ENV
         value: production
+      - key: PYTHONUNBUFFERED
+        value: "1"
