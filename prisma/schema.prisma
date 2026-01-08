@@ -1,0 +1,197 @@
+// Dual datasource schema: sqlite (local) and mysql (central)
+
+generator clientSqlite {
+  provider   = "prisma-client-js"
+  output     = "../src/database/sqlite/generated"
+  datasource = "sqlite"
+}
+
+generator clientMysql {
+  provider   = "prisma-client-js"
+  output     = "../src/database/mysql/generated"
+  datasource = "mysql"
+}
+
+datasource sqlite {
+  provider = "sqlite"
+  url      = env("SQLITE_URL")
+}
+
+datasource mysql {
+  provider = "mysql"
+  url      = env("MYSQL_URL")
+}
+
+enum Role {
+  MAIN_ADMIN
+  ADMIN
+  CASHIER
+}
+
+enum UserStatus {
+  ACTIVE
+  LOCKED
+}
+
+enum Plan {
+  BASIC
+  ULTRA
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELED
+  PAST_DUE
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+  CONFLICT
+}
+
+enum Operation {
+  UPSERT
+  DELETE
+}
+
+enum ActivityType {
+  LOGIN
+  SALE
+  STOCK_UPDATE
+  ADMIN_ACTION
+  CONFLICT
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  role         Role
+  status       UserStatus @default(ACTIVE)
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  version      Int        @default(1)
+  syncStatus   SyncStatus @default(PENDING)
+  origin       String     @default("LOCAL")
+  sessions     Session[]
+}
+
+model Session {
+  id                String     @id @default(uuid())
+  userId            String
+  deviceId          String
+  refreshTokenHash  String
+  ip                String?
+  userAgent         String?
+  expiresAt         DateTime
+  revokedAt         DateTime?
+  createdAt         DateTime   @default(now())
+  version           Int        @default(1)
+  syncStatus        SyncStatus @default(PENDING)
+  origin            String     @default("LOCAL")
+  user              User       @relation(fields: [userId], references: [id])
+}
+
+model Subscription {
+  id         String              @id @default(uuid())
+  plan       Plan
+  status     SubscriptionStatus
+  validUntil DateTime
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+  version    Int                 @default(1)
+  syncStatus SyncStatus          @default(PENDING)
+  origin     String              @default("LOCAL")
+}
+
+model Product {
+  id           String       @id @default(uuid())
+  sku          String       @unique
+  name         String
+  category     String?
+  costPrice    Decimal      @db.Decimal(10,2)
+  sellingPrice Decimal      @db.Decimal(10,2)
+  quantity     Int          @default(0)
+  status       ProductStatus @default(ACTIVE)
+  version      Int          @default(1)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  syncStatus   SyncStatus   @default(PENDING)
+  origin       String       @default("LOCAL")
+  priceHistory PriceHistory[]
+}
+
+model PriceHistory {
+  id              String   @id @default(uuid())
+  productId       String
+  oldPrice        Decimal  @db.Decimal(10,2)
+  newPrice        Decimal  @db.Decimal(10,2)
+  changedByUserId String?
+  reason          String?
+  createdAt       DateTime @default(now())
+  product         Product  @relation(fields: [productId], references: [id])
+}
+
+model Sale {
+  id            String     @id @default(uuid())
+  transactionId String     @unique
+  cashierId     String
+  subtotal      Decimal    @db.Decimal(10,2)
+  total         Decimal    @db.Decimal(10,2)
+  committed     Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  version       Int        @default(1)
+  syncStatus    SyncStatus @default(PENDING)
+  origin        String     @default("LOCAL")
+  items         SaleItem[]
+}
+
+model SaleItem {
+  id         String  @id @default(uuid())
+  saleId     String
+  productId  String
+  quantity   Int
+  unitPrice  Decimal @db.Decimal(10,2)
+  lineTotal  Decimal @db.Decimal(10,2)
+  sale       Sale    @relation(fields: [saleId], references: [id])
+}
+
+model Activity {
+  id          String       @id @default(uuid())
+  type        ActivityType
+  actorUserId String?
+  entityType  String?
+  entityId    String?
+  metadata    Json?
+  createdAt   DateTime     @default(now())
+}
+
+model SyncQueue {
+  id           String     @id @default(uuid())
+  entityType   String
+  entityId     String
+  operation    Operation
+  attemptCount Int        @default(0)
+  lastAttemptAt DateTime?
+  error        String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+model DeviceState {
+  id             String   @id @default(uuid())
+  deviceId       String   @unique
+  lastSyncCursor BigInt   @default(0)
+  lastSeenAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}

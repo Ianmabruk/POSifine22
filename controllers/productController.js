@@ -1,45 +1,107 @@
 import Product from "../models/Product.js";
-import { verifyToken } from "./userController.js";
+import { getIO } from "../socket.js";
 
-// Get all products
+/**
+ * GET PRODUCTS (Admin + Cashier)
+ */
 export const getProducts = async (req, res) => {
   try {
-    const products = await Product.find({ accountId: req.user.accountId });
-    res.json(products);
+    const products = await Product.find({
+      accountId: req.user.accountId
+    }).sort({ createdAt: -1 });
+
+    res.json({ success: true, data: products });
   } catch (err) {
-    console.error("Get products error:", err);
-    res.status(500).json({ error: "Failed to get products" });
+    res.status(500).json({ error: "Failed to fetch products" });
   }
 };
 
-// Create product
+/**
+ * CREATE PRODUCT (ADMIN ONLY)
+ */
 export const createProduct = async (req, res) => {
   try {
-    const { name, price, cost, quantity, image, category, unit, recipe } = req.body;
+    const {
+      name,
+      price,
+      cost = 0,
+      quantity = 0,
+      image = "",
+      category = "general",
+      unit = "pcs",
+      recipe = []
+    } = req.body;
 
-    if (!name || !price) {
-      return res.status(400).json({ error: 'Name and price are required' });
+    if (!name || price == null) {
+      return res.status(400).json({ error: "Name and price required" });
     }
 
     const product = await Product.create({
       name,
-      price: parseFloat(price),
-      cost: parseFloat(cost) || 0,
-      quantity: parseInt(quantity) || 0,
-      image: image || '',
-      category: category || 'general',
-      unit: unit || 'pcs',
-      recipe: recipe || [],
-      isComposite: Boolean(recipe && recipe.length > 0),
+      price,
+      cost,
+      quantity,
+      image,
+      category,
+      unit,
+      recipe,
+      isComposite: recipe.length > 0,
       accountId: req.user.accountId,
       createdBy: req.user.id
     });
 
-    res.status(201).json(product);
+    // 🔥 REAL-TIME PUSH
+    getIO().to(req.user.accountId).emit("productCreated", product);
+
+    res.status(201).json({ success: true, data: product });
   } catch (err) {
-    console.error("Create product error:", err);
     res.status(500).json({ error: "Failed to create product" });
   }
 };
 
-export { verifyToken };
+/**
+ * UPDATE PRODUCT (ADMIN ONLY)
+ */
+export const updateProduct = async (req, res) => {
+  try {
+    const updated = await Product.findOneAndUpdate(
+      { _id: req.params.id, accountId: req.user.accountId },
+      req.body,
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    // 🔥 REAL-TIME PUSH
+    getIO().to(req.user.accountId).emit("productUpdated", updated);
+
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    res.status(500).json({ error: "Update failed" });
+  }
+};
+
+/**
+ * DELETE PRODUCT (ADMIN ONLY)
+ */
+export const deleteProduct = async (req, res) => {
+  try {
+    const deleted = await Product.findOneAndDelete({
+      _id: req.params.id,
+      accountId: req.user.accountId
+    });
+
+    if (!deleted) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    // 🔥 REAL-TIME PUSH
+    getIO().to(req.user.accountId).emit("productDeleted", deleted._id);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Delete failed" });
+  }
+};

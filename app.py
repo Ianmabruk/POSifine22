@@ -3,13 +3,18 @@ from flask_cors import CORS
 import jwt
 import json
 import os
+import time
 from datetime import datetime, timedelta
 from functools import wraps
+from flask_sock import Sock
 
 app = Flask(__name__)
 
 # Complete CORS fix
 CORS(app, origins=['*'], methods=['*'], allow_headers=['*'])
+
+# WebSocket (flask-sock)
+sock = Sock(app)
 
 @app.after_request
 def after_request(response):
@@ -18,18 +23,37 @@ def after_request(response):
     response.headers['Access-Control-Allow-Methods'] = '*'
     return response
 
-app.config['SECRET_KEY'] = 'ultra-pos-secret-2024'
+app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'ultra-pos-secret-2024')
 
 # File-based storage - NO DATABASE REQUIRED
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 USERS_FILE = f'{DATA_DIR}/users.json'
 PRODUCTS_FILE = f'{DATA_DIR}/products.json'
 SALES_FILE = f'{DATA_DIR}/sales.json'
+EXPENSES_FILE = f'{DATA_DIR}/expenses.json'
+BATCHES_FILE = f'{DATA_DIR}/batches.json'
+DISCOUNTS_FILE = f'{DATA_DIR}/discounts.json'
+CREDIT_REQUESTS_FILE = f'{DATA_DIR}/credit_requests.json'
+SETTINGS_FILE = f'{DATA_DIR}/settings.json'
+REMINDERS_FILE = f'{DATA_DIR}/reminders.json'
 
-# Ensure data directory exists
+# Ensure data directory exists and initialize empty JSON files
 os.makedirs(DATA_DIR, exist_ok=True)
 
+def init_json_file(filepath):
+    """Initialize JSON file with empty array if it doesn't exist"""
+    if not os.path.exists(filepath):
+        with open(filepath, 'w') as f:
+            json.dump([], f)
+
+# Initialize all data files on startup
+for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
+                 BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
+                 SETTINGS_FILE, REMINDERS_FILE]:
+    init_json_file(filepath)
+
 print(f"✅ Using file storage at: {DATA_DIR}")
+print(f"✅ Data files initialized")
 
 def load_data(filename):
     try:
@@ -48,6 +72,10 @@ def get_next_id(data):
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Allow OPTIONS preflight requests without token
+        if request.method == 'OPTIONS':
+            return '', 200
+        
         token = request.headers.get('Authorization', '').replace('Bearer ', '')
         if not token:
             return jsonify({'error': 'Token missing'}), 401
@@ -58,6 +86,53 @@ def token_required(f):
             return jsonify({'error': 'Invalid token'}), 401
         return f(*args, **kwargs)
     return decorated
+
+
+@app.route('/api/auth/me', methods=['GET'])
+@token_required
+def me():
+    """Return current user (without password)"""
+    users = load_data(USERS_FILE)
+    uid = request.user.get('id')
+    user = next((u for u in users if u.get('id') == uid), None)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    return jsonify({k: v for k, v in user.items() if k != 'password'})
+
+
+# Simple WebSocket endpoint for products updates
+@sock.route('/api/ws/products')
+def products_ws(ws):
+    # Accept token as query param: ?token=...
+    token = request.args.get('token', '')
+    if not token:
+        try:
+            ws.send(json.dumps({'error': 'No token provided'}))
+        except Exception:
+            pass
+        return
+
+    try:
+        jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+    except Exception:
+        try:
+            ws.send(json.dumps({'error': 'Invalid token'}))
+        except Exception:
+            pass
+        return
+
+    # Send current products on connect, then send periodic heartbeats
+    products = load_data(PRODUCTS_FILE)
+    try:
+        ws.send(json.dumps({'type': 'initial', 'products': products}))
+        while True:
+            time.sleep(10)
+            try:
+                ws.send(json.dumps({'type': 'heartbeat'}))
+            except Exception:
+                break
+    except Exception:
+        pass
 
 @app.route('/')
 def home():
@@ -218,9 +293,12 @@ def handle_sales():
     
     return jsonify(sale)
 
-@app.route('/api/stats')
+@app.route('/api/stats', methods=['GET', 'OPTIONS'])
 @token_required
 def stats():
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     sales = load_data(SALES_FILE)
     products = load_data(PRODUCTS_FILE)
     
@@ -233,5 +311,74 @@ def stats():
         'productCount': len(products)
     })
 
+@app.route('/api/reminders/today', methods=['GET', 'OPTIONS'])
+@token_required
+def reminders_today():
+    if request.method == 'OPTIONS':
+        return '', 200
+    return jsonify([])
+
+@app.route('/api/settings', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def settings():
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    if request.method == 'GET':
+        return jsonify({
+            'screenLockPassword': '2005',
+            'businessName': 'My Business',
+            'timezone': 'UTC'
+        })
+    
+    data = request.get_json()
+    return jsonify(data)
+
+@app.route('/api/expenses', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def expenses():
+    if request.method == 'OPTIONS':
+        return '', 200
+    return jsonify([])
+
+@app.route('/api/batches', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def batches():
+    if request.method == 'OPTIONS':
+        return '', 200
+    return jsonify([])
+
+@app.route('/api/credit-requests', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def credit_requests():
+    if request.method == 'OPTIONS':
+        return '', 200
+    return jsonify([])
+
+@app.route('/api/discounts', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def discounts_endpoint():
+    if request.method == 'OPTIONS':
+        return '', 200
+    return jsonify([])
+
+# 404 Error Handler
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        'error': 'Endpoint not found',
+        'path': request.path,
+        'method': request.method,
+        'message': 'Please check the endpoint URL'
+    }), 404
+
+# 500 Error Handler
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        'error': 'Internal server error',
+        'message': str(error)
+    }), 500
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False, use_reloader=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

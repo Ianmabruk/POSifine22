@@ -1,0 +1,11 @@
+import { Router } from "express";
+import { ProductsController } from "./products.controller";
+import { validate } from "../../middlewares/validate";
+import { createProductSchema, updateProductSchema } from "./products.schemas";
+import { authenticateJWT, authorize } from "../../middlewares/auth";
+const router = Router();
+router.get("/", authenticateJWT, ProductsController.list);
+router.get("/:id", authenticateJWT, ProductsController.get);
+router.post("/", authenticateJWT, authorize(["ADMIN", "MAIN_ADMIN"]), validate(createProductSchema), ProductsController.create);
+router.patch("/:id", authenticateJWT, authorize(["ADMIN", "MAIN_ADMIN"]), validate(updateProductSchema), ProductsController.update);
+export default router;

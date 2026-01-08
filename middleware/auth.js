@@ -1,50 +1,20 @@
-const jwt = require('jsonwebtoken');
+import jwt from "jsonwebtoken";
 
-// Enhanced authentication middleware with role-based access control
-const authenticateToken = (requiredRole = null) => {
-  return (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+export const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
 
-    if (!token) {
-      return res.status(401).json({ error: 'Access token required' });
-    }
-
-    jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
-      if (err) {
-        return res.status(403).json({ error: 'Invalid or expired token' });
-      }
-
-      req.user = { ...user, userType: user.type || 'user' };
-      next();
-    });
-  };
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
+  }
 };
 
-// Rate limiting middleware for main admin routes
-const rateLimitMainAdmin = (req, res, next) => {
-  const key = `main_admin_${req.ip}`;
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000; // 15 minutes
-  const maxRequests = 100;
-
-  if (!global.rateLimitStore) {
-    global.rateLimitStore = new Map();
+export const requireAdmin = (req, res, next) => {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Admin access only" });
   }
-
-  const requests = global.rateLimitStore.get(key) || [];
-  const validRequests = requests.filter(time => now - time < windowMs);
-
-  if (validRequests.length >= maxRequests) {
-    return res.status(429).json({ error: 'Too many requests' });
-  }
-
-  validRequests.push(now);
-  global.rateLimitStore.set(key, validRequests);
   next();
-};
-
-module.exports = {
-  authenticateToken,
-  rateLimitMainAdmin
 };

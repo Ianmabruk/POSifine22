@@ -1,12 +1,32 @@
 import User from "../models/User.js";
 import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
 
-// Signup
+// Utility function to generate JWT
+const generateToken = (user) => {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error("JWT_SECRET not configured");
+
+  return jwt.sign(
+    {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      plan: user.plan,
+      accountId: user.accountId || null,
+    },
+    secret,
+    { expiresIn: "7d" }
+  );
+};
+
+// ===== Signup =====
 export const signup = async (req, res) => {
   try {
     const { name, email, password, plan = "basic" } = req.body || {};
 
-    // Basic validation
+    // Validation
     if (!name || !email || !password) {
       return res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Name, email, and password are required" } });
     }
@@ -17,40 +37,34 @@ export const signup = async (req, res) => {
       return res.status(400).json({ success: false, error: { code: "WEAK_PASSWORD", message: "Password must be at least 6 characters" } });
     }
 
-    // Check duplicate
+    // Check if email exists
     const existing = await User.findOne({ email: email.toLowerCase() });
-    if (existing) {
-      return res.status(409).json({ success: false, error: { code: "EMAIL_TAKEN", message: "Email already registered" } });
-    }
+    if (existing) return res.status(409).json({ success: false, error: { code: "EMAIL_TAKEN", message: "Email already registered" } });
 
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Generate 4-digit PIN
+    const pin = Math.floor(1000 + Math.random() * 9000);
+    const hashedPin = await bcrypt.hash(pin.toString(), 10);
+
+    // Assign role based on plan
     const role = plan === "ultra" ? "admin" : "cashier";
 
     // Create user
     const user = await User.create({
       name,
       email: email.toLowerCase(),
-      password,
+      password: hashedPassword,
+      pin: hashedPin,
       plan,
       package: plan,
-      role
+      role,
+      active: true,
     });
 
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      return res.status(500).json({ success: false, error: { code: "SERVER_MISCONFIG", message: "JWT secret not configured" } });
-    }
-
-    const token = jwt.sign(
-      {
-        id: user._id,
-        role: user.role,
-        plan: user.plan,
-        package: user.package,
-        accountId: user.accountId
-      },
-      secret,
-      { expiresIn: "7d" }
-    );
+    // Generate JWT
+    const token = generateToken(user);
 
     return res.status(201).json({
       success: true,
@@ -62,22 +76,20 @@ export const signup = async (req, res) => {
           email: user.email,
           role: user.role,
           plan: user.plan,
-          accountId: user.accountId,
-          active: user.active
-        }
-      }
+          accountId: user.accountId || null,
+          active: user.active,
+          pin, // optionally send PIN to display once or via email
+        },
+      },
     });
   } catch (err) {
     console.error("Signup error:", err);
-    // Handle Mongo duplicate key error fallback
-    if (err && err.code === 11000) {
-      return res.status(409).json({ success: false, error: { code: "EMAIL_TAKEN", message: "Email already registered" } });
-    }
+    if (err.code === 11000) return res.status(409).json({ success: false, error: { code: "EMAIL_TAKEN", message: "Email already registered" } });
     return res.status(500).json({ success: false, error: { code: "INTERNAL_SERVER_ERROR", message: "Signup failed" } });
   }
 };
 
-// Login
+// ===== Login =====
 export const login = async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -89,25 +101,10 @@ export const login = async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) return res.status(401).json({ success: false, error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } });
 
-    const match = await user.comparePassword(password);
+    const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(401).json({ success: false, error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } });
 
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      return res.status(500).json({ success: false, error: { code: "SERVER_MISCONFIG", message: "JWT secret not configured" } });
-    }
-
-    const token = jwt.sign(
-      {
-        id: user._id,
-        role: user.role,
-        plan: user.plan,
-        package: user.package,
-        accountId: user.accountId
-      },
-      secret,
-      { expiresIn: "7d" }
-    );
+    const token = generateToken(user);
 
     return res.status(200).json({
       success: true,
@@ -119,10 +116,10 @@ export const login = async (req, res) => {
           email: user.email,
           role: user.role,
           plan: user.plan,
-          accountId: user.accountId,
-          active: user.active
-        }
-      }
+          accountId: user.accountId || null,
+          active: user.active,
+        },
+      },
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -130,7 +127,7 @@ export const login = async (req, res) => {
   }
 };
 
-// PIN Login
+// ===== PIN Login =====
 export const pinLogin = async (req, res) => {
   try {
     const { email, pin } = req.body || {};
@@ -140,26 +137,14 @@ export const pinLogin = async (req, res) => {
     }
 
     const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user || !user.pin || user.pin !== pin) {
+    if (!user || !user.pin) {
       return res.status(401).json({ success: false, error: { code: "INVALID_PIN", message: "Invalid PIN" } });
     }
 
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      return res.status(500).json({ success: false, error: { code: "SERVER_MISCONFIG", message: "JWT secret not configured" } });
-    }
+    const matchPin = await bcrypt.compare(pin.toString(), user.pin);
+    if (!matchPin) return res.status(401).json({ success: false, error: { code: "INVALID_PIN", message: "Invalid PIN" } });
 
-    const token = jwt.sign(
-      {
-        id: user._id,
-        role: user.role,
-        plan: user.plan,
-        package: user.package,
-        accountId: user.accountId
-      },
-      secret,
-      { expiresIn: "7d" }
-    );
+    const token = generateToken(user);
 
     return res.status(200).json({
       success: true,
@@ -171,10 +156,10 @@ export const pinLogin = async (req, res) => {
           email: user.email,
           role: user.role,
           plan: user.plan,
-          accountId: user.accountId,
-          active: user.active
-        }
-      }
+          accountId: user.accountId || null,
+          active: user.active,
+        },
+      },
     });
   } catch (err) {
     console.error("PIN login error:", err);
