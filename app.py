@@ -60,7 +60,7 @@ SETTINGS_FILE = f'{DATA_DIR}/settings.json'
 REMINDERS_FILE = f'{DATA_DIR}/reminders.json'
 RECIPES_FILE = f'{DATA_DIR}/recipes.json'
 NOTES_FILE = f'{DATA_DIR}/cashier_notes.json'
-DISCOUNTS_FILE = f'{DATA_DIR}/discounts.json'
+TIME_ENTRIES_FILE = f'{DATA_DIR}/time_entries.json'
 
 # Ensure data directory exists and initialize empty JSON files
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -80,16 +80,6 @@ def init_json_file(filepath):
     except Exception as e:
         print(f"Error initializing {filepath}: {e}")
 
-# Initialize all data files on startup
-for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
-                 BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
-                 SETTINGS_FILE, REMINDERS_FILE]:
-    init_json_file(filepath)
-
-print(f"✅ Using file storage at: {DATA_DIR}")
-print(f"✅ Data directory exists: {os.path.exists(DATA_DIR)}")
-print(f"✅ Data files initialized")
-
 def load_data(filename):
     try:
         with open(filename, 'r') as f:
@@ -103,6 +93,45 @@ def save_data(filename, data):
 
 def get_next_id(data):
     return max([item.get('id', 0) for item in data] + [0]) + 1
+
+# Initialize all data files on startup
+for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
+                 BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
+                 SETTINGS_FILE, REMINDERS_FILE, TIME_ENTRIES_FILE]:
+    init_json_file(filepath)
+
+print(f"✅ Using file storage at: {DATA_DIR}")
+print(f"✅ Data directory exists: {os.path.exists(DATA_DIR)}")
+print(f"✅ Data files initialized")
+
+# Initialize main admin user if not exists
+def init_main_admin():
+    users = load_data(USERS_FILE)
+    admin_email = 'ianmabruk3@gmail.com'
+    
+    # Check if admin already exists
+    if any(u.get('email') == admin_email for u in users):
+        return
+    
+    # Create main admin user
+    main_admin_user = {
+        'id': get_next_id(users),
+        'email': admin_email,
+        'password': 'mabruk2004',
+        'name': 'Ian Mabruk',
+        'role': 'owner',
+        'plan': 'ultra',
+        'accountId': 'main',
+        'active': True,
+        'isMainAdmin': True,
+        'createdAt': datetime.now().isoformat()
+    }
+    
+    users.append(main_admin_user)
+    save_data(USERS_FILE, users)
+    print(f"✅ Main admin user created: {admin_email}")
+
+init_main_admin()
 
 def token_required(f):
     @wraps(f)
@@ -315,7 +344,7 @@ def pin_login():
 
 @app.route('/api/main-admin/auth/login', methods=['POST', 'OPTIONS'])
 def main_admin_login():
-    """Main admin (owner) login"""
+    """Main admin (owner) login - RESTRICTED TO OWNER ROLE ONLY"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -330,17 +359,20 @@ def main_admin_login():
         if not email or not password:
             return jsonify({'error': 'Email and password required'}), 400
         
+        # Main admin password must be 'mabruk2004'
+        if password != 'mabruk2004':
+            return jsonify({'error': 'Invalid password'}), 401
+        
         # Check if user is the main admin/owner
-        # Main admin should have role 'owner' or 'admin' with special flag
         users = load_data(USERS_FILE)
-        user = next((u for u in users if u.get('email', '').lower() == email and u.get('password') == password), None)
+        user = next((u for u in users if u.get('email', '').lower() == email), None)
         
         if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
+            return jsonify({'error': 'User not found'}), 401
         
-        # Check if user has admin/owner privileges
-        if user.get('role') not in ['owner', 'admin']:
-            return jsonify({'error': 'Access denied. Admin privileges required'}), 403
+        # STRICT: Only OWNER role can access main admin dashboard
+        if user.get('role') != 'owner':
+            return jsonify({'error': 'Access denied. Only owner can access main admin dashboard'}), 403
         
         token = jwt.encode({
             'id': user['id'],
@@ -358,6 +390,180 @@ def main_admin_login():
         import traceback
         print(f"Main admin login error: {str(e)} | {traceback.format_exc()}")
         return jsonify({'error': 'Login failed', 'message': str(e)}), 500
+
+@app.route('/api/main-admin/users', methods=['GET'])
+@token_required
+def main_admin_get_users():
+    """Get ALL users in the system - accessible to owner only"""
+    try:
+        # Verify owner access
+        current_user_id = request.headers.get('X-User-Id')
+        users = load_data(USERS_FILE)
+        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        
+        if not current_user or current_user.get('role') != 'owner':
+            return jsonify({'error': 'Access denied. Owner access required'}), 403
+        
+        # Return ALL users with their data
+        all_users = load_data(USERS_FILE)
+        return jsonify([
+            {k: v for k, v in user.items() if k not in ['password', 'pin']}
+            for user in all_users
+        ])
+    except Exception as e:
+        print(f"Get users error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/main-admin/sales-all', methods=['GET'])
+@token_required
+def main_admin_get_all_sales():
+    """Get ALL sales from ALL users/accounts"""
+    try:
+        # Verify owner access
+        current_user_id = request.headers.get('X-User-Id')
+        users = load_data(USERS_FILE)
+        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        
+        if not current_user or current_user.get('role') != 'owner':
+            return jsonify({'error': 'Access denied. Owner access required'}), 403
+        
+        # Load all sales
+        sales = load_data(SALES_FILE)
+        
+        # Aggregate statistics
+        total_sales = sum(s.get('total', 0) for s in sales)
+        total_items = sum(len(s.get('items', [])) for s in sales)
+        
+        return jsonify({
+            'sales': sales,
+            'total': total_sales,
+            'count': len(sales),
+            'itemsCount': total_items
+        })
+    except Exception as e:
+        print(f"Get all sales error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/main-admin/stats', methods=['GET'])
+@token_required
+def main_admin_get_stats():
+    """Get system-wide statistics from ALL users"""
+    try:
+        # Verify owner access
+        current_user_id = request.headers.get('X-User-Id')
+        users = load_data(USERS_FILE)
+        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        
+        if not current_user or current_user.get('role') != 'owner':
+            return jsonify({'error': 'Access denied. Owner access required'}), 403
+        
+        # Load all data
+        sales = load_data(SALES_FILE)
+        expenses = load_data(EXPENSES_FILE)
+        products = load_data(PRODUCTS_FILE)
+        all_users = load_data(USERS_FILE)
+        
+        # Calculate totals
+        total_sales = sum(s.get('total', 0) for s in sales)
+        total_expenses = sum(e.get('amount', 0) for e in expenses)
+        profit = total_sales - total_expenses
+        
+        return jsonify({
+            'totalSales': total_sales,
+            'totalExpenses': total_expenses,
+            'profit': profit,
+            'salesCount': len(sales),
+            'expensesCount': len(expenses),
+            'productsCount': len(products),
+            'usersCount': len(all_users),
+            'activeUsers': len([u for u in all_users if u.get('active', True)]),
+            'lockedUsers': len([u for u in all_users if u.get('locked', False)])
+        })
+    except Exception as e:
+        print(f"Get stats error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/main-admin/activities', methods=['GET'])
+@token_required
+def main_admin_get_activities():
+    """Get ALL activities/events from ALL users"""
+    try:
+        # Verify owner access
+        current_user_id = request.headers.get('X-User-Id')
+        users = load_data(USERS_FILE)
+        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        
+        if not current_user or current_user.get('role') != 'owner':
+            return jsonify({'error': 'Access denied. Owner access required'}), 403
+        
+        # Get all sales as activities (each sale is an activity)
+        sales = load_data(SALES_FILE)
+        activities = []
+        
+        for sale in sales:
+            activities.append({
+                'type': 'sale',
+                'description': f"Sale of {len(sale.get('items', []))} items",
+                'amount': sale.get('total', 0),
+                'timestamp': sale.get('createdAt', ''),
+                'user': sale.get('soldBy', 'Unknown'),
+                'accountId': sale.get('accountId', 'main'),
+                'sale': sale
+            })
+        
+        # Add expense activities
+        expenses = load_data(EXPENSES_FILE)
+        for expense in expenses:
+            activities.append({
+                'type': 'expense',
+                'description': expense.get('description', 'Expense'),
+                'amount': expense.get('amount', 0),
+                'timestamp': expense.get('createdAt', ''),
+                'user': expense.get('addedBy', 'Unknown'),
+                'accountId': expense.get('accountId', 'main'),
+                'expense': expense
+            })
+        
+        # Sort by timestamp (most recent first)
+        activities.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        return jsonify(activities[:100])  # Return last 100 activities
+    except Exception as e:
+        print(f"Get activities error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/main-admin/time-entries-all', methods=['GET'])
+@token_required
+def main_admin_get_all_time_entries():
+    """Get ALL clock in/out time entries from ALL users"""
+    try:
+        # Verify owner access
+        current_user_id = request.headers.get('X-User-Id')
+        users = load_data(USERS_FILE)
+        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        
+        if not current_user or current_user.get('role') != 'owner':
+            return jsonify({'error': 'Access denied. Owner access required'}), 403
+        
+        # Load all time entries
+        time_entries = load_data(TIME_ENTRIES_FILE) if os.path.exists(TIME_ENTRIES_FILE) else []
+        
+        # Group by user
+        entries_by_user = {}
+        for entry in time_entries:
+            user_id = entry.get('userId')
+            if user_id not in entries_by_user:
+                entries_by_user[user_id] = []
+            entries_by_user[user_id].append(entry)
+        
+        return jsonify({
+            'timeEntries': time_entries,
+            'entriesByUser': entries_by_user,
+            'totalEntries': len(time_entries)
+        })
+    except Exception as e:
+        print(f"Get time entries error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/products', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
@@ -382,7 +588,9 @@ def handle_products():
         'id': get_next_id(products),
         'name': data['name'],
         'price': float(data['price']),
-        'quantity': int(data.get('quantity', 0)),
+        'quantity': float(data.get('quantity', 0)),  # Changed to float for weight support
+        'unit': data.get('unit', 'pcs'),  # 'pcs', 'kg', 'liters', 'grams', etc.
+        'unitPrice': float(data.get('unitPrice', data['price'])),  # Price per unit/kg
         'category': data.get('category', 'general'),
         'image': data.get('image', None),  # Base64 image or URL
         'isComposite': data.get('isComposite', False),
@@ -393,6 +601,12 @@ def handle_products():
     
     products.append(product)
     save_data(PRODUCTS_FILE, products)
+    
+    # Broadcast product creation to all connected clients
+    broadcast_update('product_created', {
+        'product': product,
+        'allProducts': products
+    })
     
     return jsonify(product)
 
@@ -412,11 +626,25 @@ def handle_product(product_id):
         data = request.get_json()
         product.update(data)
         save_data(PRODUCTS_FILE, products)
+        
+        # Broadcast product update to all connected clients
+        broadcast_update('product_updated', {
+            'product': product,
+            'allProducts': products
+        })
+        
         return jsonify(product)
     
     if request.method == 'DELETE':
         products = [p for p in products if p['id'] != product_id]
         save_data(PRODUCTS_FILE, products)
+        
+        # Broadcast product deletion to all connected clients
+        broadcast_update('product_deleted', {
+            'deletedId': product_id,
+            'allProducts': products
+        })
+        
         return jsonify({'message': 'Product deleted'})
 
 @app.route('/api/products/<int:product_id>/stock', methods=['PUT', 'OPTIONS'])
@@ -623,15 +851,17 @@ def handle_sales():
     for item in data.get('items', []):
         product = next((p for p in products if p['id'] == item['productId']), None)
         if product:
-            # Deduct sold quantity
-            product['quantity'] = product.get('quantity', 0) - item['quantity']
+            # Support both quantity and weight (quantity can be fractional for weight-based products)
+            sold_amount = float(item.get('quantity', item.get('weight', 0)))
+            product['quantity'] = float(product.get('quantity', 0)) - sold_amount
             
             # If composite product, deduct ingredients
             if product.get('isComposite'):
                 for ingredient in product.get('ingredients', []):
                     ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
                     if ingredient_product:
-                        ingredient_product['quantity'] = ingredient_product.get('quantity', 0) - (ingredient['quantity'] * item['quantity'])
+                        ingredient_quantity = float(ingredient.get('quantity', 0))
+                        ingredient_product['quantity'] = float(ingredient_product.get('quantity', 0)) - (ingredient_quantity * sold_amount)
     
     save_data(PRODUCTS_FILE, products)
     
@@ -922,6 +1152,150 @@ def handle_cashier_note(note_id):
         note['read'] = data.get('read', note.get('read'))
         save_data(NOTES_FILE, notes)
         return jsonify(note)
+
+# Time Tracking Endpoints for Clock In/Out
+@app.route('/api/time-entries', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_time_entries():
+    """Get all time entries or create a new one"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    time_entries = load_data(TIME_ENTRIES_FILE)
+    
+    if request.method == 'GET':
+        return jsonify(time_entries)
+    
+    # POST - Clock in/out
+    data = request.get_json()
+    action = data.get('action', 'clock_in')  # 'clock_in' or 'clock_out'
+    
+    cashier_id = request.user.get('id')
+    cashier_name = request.user.get('name', 'Unknown')
+    
+    if action == 'clock_in':
+        # Create new time entry
+        entry = {
+            'id': get_next_id(time_entries),
+            'cashierId': cashier_id,
+            'cashierName': cashier_name,
+            'cashierEmail': request.user.get('email'),
+            'clockInTime': datetime.now().isoformat(),
+            'clockOutTime': None,
+            'duration': None,  # In minutes
+            'status': 'clocked_in',
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        time_entries.append(entry)
+        save_data(TIME_ENTRIES_FILE, time_entries)
+        
+        # Broadcast clock in to all connected clients
+        broadcast_update('cashier_clocked_in', {
+            'entry': entry,
+            'allTimeEntries': time_entries
+        })
+        
+        return jsonify(entry), 201
+    
+    elif action == 'clock_out':
+        # Find the latest open time entry for this cashier
+        open_entry = next(
+            (e for e in reversed(time_entries) if e.get('cashierId') == cashier_id and e.get('status') == 'clocked_in'),
+            None
+        )
+        
+        if not open_entry:
+            return jsonify({'error': 'No active clock in found'}), 404
+        
+        # Calculate duration
+        clock_in = datetime.fromisoformat(open_entry['clockInTime'])
+        clock_out = datetime.now()
+        duration = int((clock_out - clock_in).total_seconds() / 60)  # Duration in minutes
+        
+        open_entry['clockOutTime'] = clock_out.isoformat()
+        open_entry['duration'] = duration
+        open_entry['status'] = 'clocked_out'
+        
+        save_data(TIME_ENTRIES_FILE, time_entries)
+        
+        # Broadcast clock out to all connected clients
+        broadcast_update('cashier_clocked_out', {
+            'entry': open_entry,
+            'allTimeEntries': time_entries
+        })
+        
+        return jsonify(open_entry)
+    
+    else:
+        return jsonify({'error': 'Invalid action. Use clock_in or clock_out'}), 400
+
+@app.route('/api/time-entries/<int:entry_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_time_entry(entry_id):
+    """Get, update, or delete a specific time entry"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    time_entries = load_data(TIME_ENTRIES_FILE)
+    entry = next((e for e in time_entries if e['id'] == entry_id), None)
+    
+    if not entry:
+        return jsonify({'error': 'Time entry not found'}), 404
+    
+    if request.method == 'GET':
+        return jsonify(entry)
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        entry.update(data)
+        save_data(TIME_ENTRIES_FILE, time_entries)
+        
+        # Broadcast time entry update
+        broadcast_update('time_entry_updated', {
+            'entry': entry,
+            'allTimeEntries': time_entries
+        })
+        
+        return jsonify(entry)
+    
+    if request.method == 'DELETE':
+        time_entries = [e for e in time_entries if e['id'] != entry_id]
+        save_data(TIME_ENTRIES_FILE, time_entries)
+        
+        # Broadcast time entry deletion
+        broadcast_update('time_entry_deleted', {
+            'deletedId': entry_id,
+            'allTimeEntries': time_entries
+        })
+        
+        return jsonify({'message': 'Time entry deleted'})
+
+@app.route('/api/time-entries/cashier/<int:cashier_id>', methods=['GET', 'OPTIONS'])
+@token_required
+def get_cashier_time_entries(cashier_id):
+    """Get all time entries for a specific cashier"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    time_entries = load_data(TIME_ENTRIES_FILE)
+    cashier_entries = [e for e in time_entries if e.get('cashierId') == cashier_id]
+    
+    return jsonify(cashier_entries)
+
+@app.route('/api/time-entries/today', methods=['GET', 'OPTIONS'])
+@token_required
+def get_today_time_entries():
+    """Get all time entries for today"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    time_entries = load_data(TIME_ENTRIES_FILE)
+    today = datetime.now().strftime('%Y-%m-%d')
+    today_entries = [e for e in time_entries if e.get('date') == today]
+    
+    return jsonify(today_entries)
 
 # 404 Error Handler
 @app.errorhandler(404)
