@@ -1305,7 +1305,7 @@ def get_today_time_entries():
 @app.route('/api/clear-data', methods=['POST', 'OPTIONS'])
 @token_required
 def clear_data():
-    """Clear sales and expenses data for the current user's account"""
+    """Clear sales and expenses data"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -1313,35 +1313,29 @@ def clear_data():
         data = request.get_json()
         clear_type = data.get('type', 'all')
         
-        # Get current user's account
-        token = request.headers.get('Authorization', '').replace('Bearer ', '')
-        user_data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-        account_id = user_data.get('accountId', 'default')
-        user_id = user_data.get('id')
-        
         files_cleared = []
         
-        # Clear sales for this account
+        # Clear sales - just delete ALL sales
         if clear_type in ['sales', 'all']:
-            sales = load_data(SALES_FILE)
-            # Keep sales from other accounts, delete this account's sales
-            updated_sales = [s for s in sales if s.get('accountId') != account_id]
-            save_data(SALES_FILE, updated_sales)
+            save_data(SALES_FILE, [])
             files_cleared.append('sales')
         
-        # Clear expenses for this account
+        # Clear expenses - just delete ALL expenses
         if clear_type in ['expenses', 'all']:
-            expenses = load_data(EXPENSES_FILE)
-            # Keep expenses from other accounts, delete this account's expenses
-            updated_expenses = [e for e in expenses if e.get('accountId') != account_id]
-            save_data(EXPENSES_FILE, updated_expenses)
+            save_data(EXPENSES_FILE, [])
             files_cleared.append('expenses')
+        
+        # Broadcast update to all clients
+        broadcast_update('data_cleared', {
+            'type': clear_type,
+            'filesCleared': files_cleared,
+            'timestamp': datetime.now().isoformat()
+        })
         
         return jsonify({
             'success': True,
             'message': f'{clear_type} data cleared successfully',
-            'filesCleared': files_cleared,
-            'accountId': account_id
+            'filesCleared': files_cleared
         })
     except Exception as e:
         print(f"Clear data error: {str(e)}")
