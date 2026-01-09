@@ -290,7 +290,7 @@ def main_admin_login():
         email = data.get('email', '').strip().lower()
         password = data.get('password', '')
         
-        if email == 'ianmabruk3@gmail.com' and password == 'admin123':
+        if email == 'ianmabruk3@gmail.com' and password == 'mabruk2004':
             token = jwt.encode({
                 'id': 'main_admin',
                 'email': email,

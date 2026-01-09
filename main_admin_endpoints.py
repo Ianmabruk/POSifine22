@@ -20,8 +20,8 @@ def create_main_admin_routes(app, safe_load_json, safe_save_json, token_required
             if not email or not password:
                 return jsonify({'error': 'Email and password are required'}), 400
             
-            # Only allow ianmabruk3@gmail.com with password admin123
-            if email == 'ianmabruk3@gmail.com' and password == 'admin123':
+            # Only allow ianmabruk3@gmail.com with password mabruk2004
+            if email == 'ianmabruk3@gmail.com' and password == 'mabruk2004':
                 token_data = {
                     'id': 'main_admin',
                     'email': email,

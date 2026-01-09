@@ -274,7 +274,7 @@ def main_admin_login():
     email = data.get('email', '').lower()
     password = data.get('password', '')
     
-    if email == 'ianmabruk3@gmail.com' and password == 'admin123':
+    if email == 'ianmabruk3@gmail.com' and password == 'mabruk2004':
         token = jwt.encode({'id': 'admin', 'email': email, 'type': 'main_admin'}, 
                           app.config['SECRET_KEY'], algorithm='HS256')
         return jsonify({
