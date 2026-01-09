@@ -409,15 +409,17 @@ def main_admin_login():
         print(f"Main admin login error: {str(e)} | {traceback.format_exc()}")
         return jsonify({'error': 'Login failed', 'message': str(e)}), 500
 
-@app.route('/api/main-admin/users', methods=['GET'])
+@app.route('/api/main-admin/users', methods=['GET', 'OPTIONS'])
 @token_required
 def main_admin_get_users():
     """Get ALL users in the system with analytics - accessible to owner only"""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
-        # Verify owner access
-        current_user_id = request.headers.get('X-User-Id')
+        # Verify owner access from token
         users = load_data(USERS_FILE)
-        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
+        current_user_id = request.user.get('id')
+        current_user = next((u for u in users if u.get('id') == current_user_id), None)
         
         if not current_user or current_user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
@@ -475,15 +477,17 @@ def main_admin_get_all_sales():
         print(f"Get all sales error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/main-admin/stats', methods=['GET'])
+@app.route('/api/main-admin/stats', methods=['GET', 'OPTIONS'])
 @token_required
 def main_admin_get_stats():
     """Get system-wide statistics from ALL users"""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
-        # Verify owner access
-        current_user_id = request.headers.get('X-User-Id')
+        # Verify owner access from token
         users = load_data(USERS_FILE)
-        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
+        current_user_id = request.user.get('id')
+        current_user = next((u for u in users if u.get('id') == current_user_id), None)
         
         if not current_user or current_user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
@@ -986,28 +990,42 @@ def send_admin_email():
         'type': email_type
     })
 
-@app.route('/api/main-admin/users/<int:user_id>/lock', methods=['POST'])
+@app.route('/api/main-admin/users/<int:user_id>/lock', methods=['POST', 'OPTIONS'])
 @token_required
 def toggle_user_lock(user_id):
     """Lock or unlock a user account"""
-    data = request.get_json()
-    locked = data.get('locked', False)
+    if request.method == 'OPTIONS':
+        return '', 200
     
-    users = load_data(USERS_FILE)
-    user = next((u for u in users if u.get('id') == user_id), None)
-    
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
-    
-    user['active'] = not locked
-    save_data(USERS_FILE, users)
-    
-    return jsonify({
-        'success': True,
-        'user_id': user_id,
-        'locked': locked,
-        'message': f'User {"locked" if locked else "unlocked"} successfully'
-    })
+    try:
+        data = request.get_json()
+        locked = data.get('locked', False)
+        
+        users = load_data(USERS_FILE)
+        user = next((u for u in users if u.get('id') == user_id), None)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        user['active'] = not locked
+        save_data(USERS_FILE, users)
+        
+        # Broadcast update
+        broadcast_update('user_lock_toggled', {
+            'userId': user_id,
+            'locked': locked,
+            'user': {k: v for k, v in user.items() if k not in ['password', 'pin']}
+        })
+        
+        return jsonify({
+            'success': True,
+            'user_id': user_id,
+            'locked': locked,
+            'message': f'User {"locked" if locked else "unlocked"} successfully'
+        })
+    except Exception as e:
+        print(f"Toggle user lock error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/sales', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
