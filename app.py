@@ -712,6 +712,90 @@ def update_stock(product_id):
     
     return jsonify(product)
 
+@app.route('/api/products/<int:product_id>/weight-pricing', methods=['GET', 'PUT', 'POST', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_weight_pricing(product_id):
+    """Manage weight-based pricing for products (0.1kg increments)"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    products = load_data(PRODUCTS_FILE)
+    product = next((p for p in products if p['id'] == product_id), None)
+    
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
+    
+    # Initialize weightPricing if it doesn't exist
+    if 'weightPricing' not in product:
+        product['weightPricing'] = {}
+    
+    if request.method == 'GET':
+        # Get all weight-based prices for this product
+        return jsonify({
+            'productId': product_id,
+            'name': product.get('name'),
+            'basePrice': product.get('price'),
+            'weightPricing': product.get('weightPricing', {})
+        })
+    
+    if request.method == 'POST' or request.method == 'PUT':
+        # Add or update weight-based pricing
+        data = request.get_json()
+        weight = data.get('weight')  # e.g., "0.1", "0.5", "1.0"
+        price = data.get('price')
+        
+        if not weight or price is None:
+            return jsonify({'error': 'Weight and price required'}), 400
+        
+        # Validate weight is valid increment (0.1kg increments)
+        try:
+            weight_val = float(weight)
+            if (weight_val * 10) % 1 != 0:
+                return jsonify({'error': 'Weight must be in 0.1kg increments (0.1, 0.2, 0.3, etc)'}), 400
+        except ValueError:
+            return jsonify({'error': 'Invalid weight value'}), 400
+        
+        product['weightPricing'][str(weight)] = float(price)
+        save_data(PRODUCTS_FILE, products)
+        
+        # Broadcast update
+        broadcast_update('weight_pricing_updated', {
+            'productId': product_id,
+            'product': product,
+            'allProducts': products
+        })
+        
+        return jsonify({
+            'message': 'Weight pricing updated',
+            'weight': str(weight),
+            'price': float(price),
+            'allPrices': product['weightPricing']
+        })
+    
+    if request.method == 'DELETE':
+        # Delete weight-based pricing
+        data = request.get_json()
+        weight = data.get('weight')
+        
+        if not weight:
+            return jsonify({'error': 'Weight required'}), 400
+        
+        if str(weight) in product['weightPricing']:
+            del product['weightPricing'][str(weight)]
+            save_data(PRODUCTS_FILE, products)
+            
+            # Broadcast update
+            broadcast_update('weight_pricing_deleted', {
+                'productId': product_id,
+                'product': product,
+                'allProducts': products
+            })
+        
+        return jsonify({
+            'message': 'Weight pricing deleted',
+            'remainingPrices': product['weightPricing']
+        })
+
 @app.route('/api/users', methods=['GET', 'POST'])
 @token_required
 def handle_users():
