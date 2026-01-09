@@ -359,6 +359,11 @@ def main_admin_login():
         if not email or not password:
             return jsonify({'error': 'Email and password required'}), 400
         
+        # STRICT: Only ianmabruk3@gmail.com can access main admin
+        OWNER_EMAIL = 'ianmabruk3@gmail.com'
+        if email != OWNER_EMAIL:
+            return jsonify({'error': f'Access denied. Only {OWNER_EMAIL} can access main admin'}), 403
+        
         # Main admin password must be 'mabruk2004'
         if password != 'mabruk2004':
             return jsonify({'error': 'Invalid password'}), 401
@@ -1296,6 +1301,51 @@ def get_today_time_entries():
     today_entries = [e for e in time_entries if e.get('date') == today]
     
     return jsonify(today_entries)
+
+@app.route('/api/clear-data', methods=['POST', 'OPTIONS'])
+@token_required
+def clear_data():
+    """Clear sales and expenses data for the current user's account"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        clear_type = data.get('type', 'all')
+        
+        # Get current user's account
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        user_data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        account_id = user_data.get('accountId', 'default')
+        user_id = user_data.get('id')
+        
+        files_cleared = []
+        
+        # Clear sales for this account
+        if clear_type in ['sales', 'all']:
+            sales = load_data(SALES_FILE)
+            # Keep sales from other accounts, delete this account's sales
+            updated_sales = [s for s in sales if s.get('accountId') != account_id]
+            save_data(SALES_FILE, updated_sales)
+            files_cleared.append('sales')
+        
+        # Clear expenses for this account
+        if clear_type in ['expenses', 'all']:
+            expenses = load_data(EXPENSES_FILE)
+            # Keep expenses from other accounts, delete this account's expenses
+            updated_expenses = [e for e in expenses if e.get('accountId') != account_id]
+            save_data(EXPENSES_FILE, updated_expenses)
+            files_cleared.append('expenses')
+        
+        return jsonify({
+            'success': True,
+            'message': f'{clear_type} data cleared successfully',
+            'filesCleared': files_cleared,
+            'accountId': account_id
+        })
+    except Exception as e:
+        print(f"Clear data error: {str(e)}")
+        return jsonify({'error': 'Failed to clear data', 'message': str(e)}), 500
 
 # 404 Error Handler
 @app.errorhandler(404)
