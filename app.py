@@ -399,7 +399,7 @@ def main_admin_get_users():
         # Verify owner access
         current_user_id = request.headers.get('X-User-Id')
         users = load_data(USERS_FILE)
-        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
         
         if not current_user or current_user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
@@ -422,7 +422,7 @@ def main_admin_get_all_sales():
         # Verify owner access
         current_user_id = request.headers.get('X-User-Id')
         users = load_data(USERS_FILE)
-        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
         
         if not current_user or current_user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
@@ -452,7 +452,7 @@ def main_admin_get_stats():
         # Verify owner access
         current_user_id = request.headers.get('X-User-Id')
         users = load_data(USERS_FILE)
-        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
         
         if not current_user or current_user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
@@ -491,7 +491,7 @@ def main_admin_get_activities():
         # Verify owner access
         current_user_id = request.headers.get('X-User-Id')
         users = load_data(USERS_FILE)
-        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
         
         if not current_user or current_user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
@@ -540,7 +540,7 @@ def main_admin_get_all_time_entries():
         # Verify owner access
         current_user_id = request.headers.get('X-User-Id')
         users = load_data(USERS_FILE)
-        current_user = next((u for u in users if u.get('id') == int(current_user_id) if current_user_id else False), None)
+        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
         
         if not current_user or current_user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
