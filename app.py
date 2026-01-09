@@ -113,7 +113,7 @@ def init_main_admin():
     if any(u.get('email') == admin_email for u in users):
         return
     
-    # Create main admin user
+    # Create main admin user with complete tracking fields
     main_admin_user = {
         'id': get_next_id(users),
         'email': admin_email,
@@ -121,10 +121,16 @@ def init_main_admin():
         'name': 'Ian Mabruk',
         'role': 'owner',
         'plan': 'ultra',
+        'planType': 'paid',
         'accountId': 'main',
         'active': True,
+        'locked': False,
         'isMainAdmin': True,
-        'createdAt': datetime.now().isoformat()
+        'createdAt': datetime.now().isoformat(),
+        'serviceStartDate': datetime.now().isoformat(),
+        'lastActivityDate': datetime.now().isoformat(),
+        'daysUsed': 0,
+        'requestedTrial': False
     }
     
     users.append(main_admin_user)
@@ -237,16 +243,23 @@ def signup():
             return jsonify({'error': 'User already exists'}), 400
         
         # Create user
+        plan_type = data.get('plan', 'free_demo')
         user = {
             'id': get_next_id(users),
             'email': data['email'],
             'password': data['password'],
             'name': data['name'],
-            'role': 'admin' if data.get('plan') in ['1600', 'ultra'] else 'cashier',
-            'plan': data.get('plan', 'basic'),
+            'role': 'admin' if plan_type in ['1600', 'ultra', 'paid'] else 'cashier',
+            'plan': plan_type,
+            'planType': data.get('planType', 'free_demo'),  # free_demo, trial, paid
             'accountId': get_next_id(users),
             'active': True,
-            'createdAt': datetime.now().isoformat()
+            'locked': False,
+            'createdAt': datetime.now().isoformat(),
+            'serviceStartDate': datetime.now().isoformat(),
+            'lastActivityDate': datetime.now().isoformat(),
+            'daysUsed': 0,
+            'requestedTrial': data.get('requestedTrial', False)
         }
         
         users.append(user)
@@ -399,7 +412,7 @@ def main_admin_login():
 @app.route('/api/main-admin/users', methods=['GET'])
 @token_required
 def main_admin_get_users():
-    """Get ALL users in the system - accessible to owner only"""
+    """Get ALL users in the system with analytics - accessible to owner only"""
     try:
         # Verify owner access
         current_user_id = request.headers.get('X-User-Id')
@@ -409,12 +422,25 @@ def main_admin_get_users():
         if not current_user or current_user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
         
-        # Return ALL users with their data
-        all_users = load_data(USERS_FILE)
-        return jsonify([
-            {k: v for k, v in user.items() if k not in ['password', 'pin']}
-            for user in all_users
-        ])
+        # Return ALL users with enhanced analytics
+        all_users = []
+        for user in load_data(USERS_FILE):
+            # Calculate days used
+            if user.get('serviceStartDate'):
+                start_date = datetime.fromisoformat(user['serviceStartDate'])
+                days_used = (datetime.now() - start_date).days + 1
+            else:
+                days_used = 0
+            
+            # Create enhanced user object
+            enhanced_user = {k: v for k, v in user.items() if k not in ['password', 'pin']}
+            enhanced_user['daysUsed'] = days_used
+            enhanced_user['planType'] = user.get('planType', 'free_demo')
+            enhanced_user['requestedTrial'] = user.get('requestedTrial', False)
+            enhanced_user['serviceStartDate'] = user.get('serviceStartDate', user.get('createdAt'))
+            all_users.append(enhanced_user)
+        
+        return jsonify(all_users)
     except Exception as e:
         print(f"Get users error: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -713,6 +739,67 @@ def handle_users():
     
     return jsonify({k: v for k, v in user.items() if k != 'password'})
 
+@app.route('/api/users/<int:user_id>', methods=['DELETE', 'OPTIONS'])
+@token_required
+def delete_user(user_id):
+    """Delete a single user"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        users = load_data(USERS_FILE)
+        user_to_delete = next((u for u in users if u['id'] == user_id), None)
+        
+        if not user_to_delete:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Prevent deleting owner/admin (only non-owner can delete)
+        if user_to_delete.get('role') == 'owner':
+            return jsonify({'error': 'Cannot delete owner account'}), 403
+        
+        # Remove the user
+        users = [u for u in users if u['id'] != user_id]
+        save_data(USERS_FILE, users)
+        
+        # Broadcast update
+        broadcast_update('user_deleted', {'userId': user_id})
+        
+        return jsonify({'success': True, 'message': 'User deleted successfully'})
+    except Exception as e:
+        print(f"Delete user error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/bulk-delete', methods=['POST', 'OPTIONS'])
+@token_required
+def bulk_delete_users():
+    """Delete multiple users (except owner)"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        user_ids = data.get('userIds', [])
+        
+        if not user_ids:
+            return jsonify({'error': 'No users to delete'}), 400
+        
+        users = load_data(USERS_FILE)
+        original_count = len(users)
+        
+        # Filter out the users to delete (but keep owner)
+        users = [u for u in users if u['id'] not in user_ids or u.get('role') == 'owner']
+        deleted_count = original_count - len(users)
+        
+        save_data(USERS_FILE, users)
+        
+        # Broadcast update
+        broadcast_update('users_bulk_deleted', {'deletedCount': deleted_count, 'userIds': user_ids})
+        
+        return jsonify({'success': True, 'message': f'{deleted_count} users deleted', 'deletedCount': deleted_count})
+    except Exception as e:
+        print(f"Bulk delete users error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/main-admin/users-with-subscriptions', methods=['GET'])
 @token_required
 def get_users_with_subscriptions():
@@ -894,6 +981,63 @@ def handle_sales():
     })
     
     return jsonify(sale)
+
+@app.route('/api/sales/<int:sale_id>', methods=['DELETE', 'OPTIONS'])
+@token_required
+def delete_sale(sale_id):
+    """Delete a single sale"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        sales = load_data(SALES_FILE)
+        sale_to_delete = next((s for s in sales if s['id'] == sale_id), None)
+        
+        if not sale_to_delete:
+            return jsonify({'error': 'Sale not found'}), 404
+        
+        # Remove the sale
+        sales = [s for s in sales if s['id'] != sale_id]
+        save_data(SALES_FILE, sales)
+        
+        # Broadcast update
+        broadcast_update('sale_deleted', {'saleId': sale_id})
+        
+        return jsonify({'success': True, 'message': 'Sale deleted successfully'})
+    except Exception as e:
+        print(f"Delete sale error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/sales/bulk-delete', methods=['POST', 'OPTIONS'])
+@token_required
+def bulk_delete_sales():
+    """Delete multiple sales"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        sale_ids = data.get('saleIds', [])
+        
+        if not sale_ids:
+            return jsonify({'error': 'No sales to delete'}), 400
+        
+        sales = load_data(SALES_FILE)
+        original_count = len(sales)
+        
+        # Filter out the sales to delete
+        sales = [s for s in sales if s['id'] not in sale_ids]
+        deleted_count = original_count - len(sales)
+        
+        save_data(SALES_FILE, sales)
+        
+        # Broadcast update
+        broadcast_update('sales_bulk_deleted', {'deletedCount': deleted_count, 'saleIds': sale_ids})
+        
+        return jsonify({'success': True, 'message': f'{deleted_count} sales deleted', 'deletedCount': deleted_count})
+    except Exception as e:
+        print(f"Bulk delete sales error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/stats', methods=['GET', 'OPTIONS'])
 @token_required
@@ -1305,7 +1449,7 @@ def get_today_time_entries():
 @app.route('/api/clear-data', methods=['POST', 'OPTIONS'])
 @token_required
 def clear_data():
-    """Clear sales and expenses data"""
+    """Clear sales, expenses, and users data"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -1324,6 +1468,11 @@ def clear_data():
         if clear_type in ['expenses', 'all']:
             save_data(EXPENSES_FILE, [])
             files_cleared.append('expenses')
+        
+        # Clear users - just delete ALL users (except this should be careful!)
+        if clear_type in ['users', 'all']:
+            save_data(USERS_FILE, [])
+            files_cleared.append('users')
         
         # Broadcast update to all clients
         broadcast_update('data_cleared', {
