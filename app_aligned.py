@@ -84,6 +84,8 @@ def signup():
     else:
         role = 'cashier'  # Default to cashier
     
+    print(f"DEBUG: Signup - email={email}, plan={plan}, role={role}")
+    
     user = {
         'id': len(users) + 1,
         'email': email,
@@ -112,9 +114,12 @@ def signup():
     token = jwt.encode({'id': user['id'], 'email': email, 'role': user['role'], 'accountId': user['accountId']}, 
                       app.config['SECRET_KEY'], algorithm='HS256')
     
+    response_user = {k: v for k, v in user.items() if k != 'password'}
+    print(f"DEBUG Signup Response: {response_user}")
+    
     return jsonify({
         'token': token,
-        'user': {k: v for k, v in user.items() if k != 'password'}
+        'user': response_user
     })
 
 @app.route('/api/auth/login', methods=['POST'])
