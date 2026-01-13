@@ -1027,6 +1027,42 @@ def toggle_user_lock(user_id):
         print(f"Toggle user lock error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/main-admin/users/<int:user_id>', methods=['DELETE', 'OPTIONS'])
+@token_required
+def main_admin_delete_user(user_id):
+    """Main admin delete user endpoint"""
+    try:
+        users = load_data(USERS_FILE)
+        
+        # Find user to delete
+        user_to_delete = next((u for u in users if u.get('id') == user_id), None)
+        if not user_to_delete:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Prevent deleting the main admin user
+        if user_to_delete.get('isMainAdmin'):
+            return jsonify({'error': 'Cannot delete main admin user'}), 403
+        
+        # Remove user from list
+        users = [u for u in users if u.get('id') != user_id]
+        save_data(USERS_FILE, users)
+        
+        # Broadcast deletion event
+        broadcast_update('user_deleted_by_admin', {
+            'userId': user_id,
+            'userName': user_to_delete.get('name', 'Unknown'),
+            'email': user_to_delete.get('email')
+        })
+        
+        return jsonify({
+            'success': True,
+            'message': f'User {user_to_delete.get("name")} deleted successfully',
+            'deletedUser': {k: v for k, v in user_to_delete.items() if k not in ['password', 'pin']}
+        })
+    except Exception as e:
+        print(f"Main admin delete user error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/sales', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_sales():

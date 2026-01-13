@@ -242,9 +242,9 @@ def create_main_admin_routes(app, safe_load_json, safe_save_json, token_required
             
             # Update price based on plan
             if new_plan == 'basic':
-                user['price'] = 1000
+                user['price'] = 1500
             elif new_plan == 'ultra':
-                user['price'] = 2400
+                user['price'] = 3000
             else:  # trial
                 user['price'] = 0
             

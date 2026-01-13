@@ -80,7 +80,7 @@ def signup():
     if plan == 'ultra':
         role = 'admin'  # Ultra users get admin dashboard
     elif plan == 'basic':
-        role = 'cashier'  # Basic users get cashier dashboard only
+        role = 'admin'  # Basic users also get admin dashboard (with limited features)
     else:
         role = 'cashier'  # Default to cashier
     
@@ -93,7 +93,8 @@ def signup():
         'plan': plan,
         'accountId': account['id'],  # Link to account
         'active': True,
-        'locked': False
+        'locked': False,
+        'usersCount': 1  # Track number of users in account
     }
     users.append(user)
     
@@ -308,10 +309,19 @@ def handle_users():
         account_users = [u for u in users if u.get('accountId') == account_id]
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in account_users])
     
-    # Only Ultra admins can create users
+    # Both Basic and Ultra admins can create users, but with different limits
     current_user = next((u for u in users if u['id'] == request.user['id']), None)
-    if not current_user or current_user.get('role') != 'admin' or current_user.get('plan') != 'ultra':
-        return jsonify({'error': 'Ultra admin required'}), 403
+    if not current_user or current_user.get('role') != 'admin':
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    # Check user limit based on plan
+    account_id = current_user['accountId']
+    existing_users = len([u for u in users if u.get('accountId') == account_id])
+    
+    if current_user.get('plan') == 'basic' and existing_users >= 2:
+        return jsonify({'error': 'Basic plan limited to 2 users. Upgrade to Ultra for unlimited users.'}), 403
+    elif current_user.get('plan') != 'ultra' and current_user.get('plan') != 'basic':
+        return jsonify({'error': 'User creation not allowed for this plan'}), 403
     
     data = request.get_json()
     new_user = {
@@ -320,7 +330,7 @@ def handle_users():
         'password': data.get('password', 'changeme123'),
         'name': data.get('name', ''),
         'role': 'cashier',  # Created users are always cashiers
-        'plan': 'ultra',    # Inherit Ultra plan from creator
+        'plan': current_user.get('plan'),  # Inherit plan from creator
         'accountId': current_user['accountId'],  # CRITICAL: Same account as creator
         'active': True,
         'locked': False,
