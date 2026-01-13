@@ -318,8 +318,8 @@ def handle_users():
     account_id = current_user['accountId']
     existing_users = len([u for u in users if u.get('accountId') == account_id])
     
-    if current_user.get('plan') == 'basic' and existing_users >= 2:
-        return jsonify({'error': 'Basic plan limited to 2 users. Upgrade to Ultra for unlimited users.'}), 403
+    if current_user.get('plan') == 'basic' and existing_users >= 3:
+        return jsonify({'error': 'Basic plan limited to 3 users. Upgrade to Ultra for unlimited users.'}), 403
     elif current_user.get('plan') != 'ultra' and current_user.get('plan') != 'basic':
         return jsonify({'error': 'User creation not allowed for this plan'}), 403
     
