@@ -245,8 +245,13 @@ def signup():
         if any(u.get('email', '').lower() == email for u in users):
             return jsonify({'error': 'User already exists'}), 400
         
-        # Create user
+        # Create user with comprehensive tracking
         plan_type = data.get('plan', 'free_demo')
+        trial_days = 14  # Default trial period
+        account_id = get_next_id(users)
+        creation_time = datetime.now()
+        trial_expiry = creation_time + timedelta(days=trial_days)
+        
         user = {
             'id': get_next_id(users),
             'email': email,
@@ -255,14 +260,24 @@ def signup():
             'role': 'admin' if plan_type in ['1600', 'ultra', 'paid'] else 'cashier',
             'plan': plan_type,
             'planType': data.get('planType', 'free_demo'),  # free_demo, trial, paid
-            'accountId': get_next_id(users),
+            'accountId': account_id,
             'active': True,
             'locked': False,
-            'createdAt': datetime.now().isoformat(),
-            'serviceStartDate': datetime.now().isoformat(),
-            'lastActivityDate': datetime.now().isoformat(),
+            'createdAt': creation_time.isoformat(),
+            'serviceStartDate': creation_time.isoformat(),
+            'lastActivityDate': creation_time.isoformat(),
+            'lastLoginDate': None,
             'daysUsed': 0,
-            'requestedTrial': data.get('requestedTrial', False)
+            'requestedTrial': data.get('requestedTrial', False),
+            'trialDaysLeft': trial_days if plan_type in ['trial', 'free_demo'] else None,
+            'trialExpiry': trial_expiry.isoformat() if plan_type in ['trial', 'free_demo'] else None,
+            'signupSource': data.get('signupSource', 'direct'),
+            'signupDetails': {
+                'company': data.get('company'),
+                'phone': data.get('phone'),
+                'country': data.get('country'),
+                'industry': data.get('industry')
+            }
         }
         
         users.append(user)
