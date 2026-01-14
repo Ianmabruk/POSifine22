@@ -1841,7 +1841,7 @@ def get_today_time_entries():
 @app.route('/api/clear-data', methods=['POST', 'OPTIONS'])
 @token_required
 def clear_data():
-    """Clear sales, expenses, products and users data"""
+    """Clear all system data: products, sales, expenses, users, history, batches, time entries, etc."""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -1851,30 +1851,57 @@ def clear_data():
         
         files_cleared = []
         
-        # Clear products - just delete ALL products
+        # Clear products
         if clear_type in ['products', 'all']:
-            save_data(PRODUCTS_FILE, {})
+            save_data(PRODUCTS_FILE, [])
             files_cleared.append('products')
         
-        # Clear sales - just delete ALL sales
+        # Clear sales (main transaction history)
         if clear_type in ['sales', 'all']:
             save_data(SALES_FILE, [])
             files_cleared.append('sales')
         
-        # Clear expenses - just delete ALL expenses
+        # Clear expenses
         if clear_type in ['expenses', 'all']:
             save_data(EXPENSES_FILE, [])
             files_cleared.append('expenses')
         
-        # Clear activities
-        if clear_type in ['activities', 'all']:
-            save_data(ACTIVITIES_FILE, [])
-            files_cleared.append('activities')
-        
-        # Clear users - just delete ALL users (except this should be careful!)
+        # Clear users
         if clear_type in ['users', 'all']:
             save_data(USERS_FILE, [])
             files_cleared.append('users')
+        
+        # Clear batches (inventory history)
+        if clear_type in ['history', 'all']:
+            save_data(BATCHES_FILE, [])
+            files_cleared.append('batches')
+        
+        # Clear time entries (employee time tracking history)
+        if clear_type in ['history', 'all']:
+            save_data(TIME_ENTRIES_FILE, [])
+            files_cleared.append('time_entries')
+        
+        # Clear discounts
+        if clear_type in ['all']:
+            save_data(DISCOUNTS_FILE, [])
+            files_cleared.append('discounts')
+        
+        # Clear credit requests
+        if clear_type in ['all']:
+            save_data(CREDIT_REQUESTS_FILE, [])
+            files_cleared.append('credit_requests')
+        
+        # Clear reminders
+        if clear_type in ['all']:
+            save_data(REMINDERS_FILE, [])
+            files_cleared.append('reminders')
+        
+        # Clear notes/activities
+        if clear_type in ['all']:
+            save_data(NOTES_FILE, [])
+            files_cleared.append('notes')
+        
+        print(f"🗑️ Cleared data: {files_cleared}")
         
         # Broadcast update to all clients
         broadcast_update('data_cleared', {
@@ -1883,9 +1910,16 @@ def clear_data():
             'timestamp': datetime.now().isoformat()
         })
         
+        # Also broadcast empty products update so clients refetch
+        if clear_type in ['products', 'all']:
+            broadcast_update('products_cleared', {
+                'allProducts': [],
+                'timestamp': datetime.now().isoformat()
+            })
+        
         return jsonify({
             'success': True,
-            'message': f'{clear_type} data cleared successfully',
+            'message': f'All data cleared successfully! {len(files_cleared)} data sources cleared.',
             'filesCleared': files_cleared
         })
     except Exception as e:
