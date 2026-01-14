@@ -615,7 +615,10 @@ def handle_products():
     products = load_data(PRODUCTS_FILE)
     
     if request.method == 'GET':
-        return jsonify(products)
+        # Filter products by accountId for data isolation
+        account_id = request.user.get('accountId')
+        filtered_products = [p for p in products if p.get('accountId') == account_id]
+        return jsonify(filtered_products)
     
     data = request.get_json()
     
@@ -812,7 +815,10 @@ def handle_users():
     users = load_data(USERS_FILE)
     
     if request.method == 'GET':
-        return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
+        # Filter users by accountId for data isolation
+        account_id = request.user.get('accountId')
+        filtered_users = [u for u in users if u.get('accountId') == account_id]
+        return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in filtered_users])
     
     data = request.get_json()
     # Normalize email to lowercase and ensure password is provided
@@ -821,6 +827,10 @@ def handle_users():
     
     if not email or not password:
         return jsonify({'error': 'Email and password are required'}), 400
+    
+    # Check if user already exists (case-insensitive)
+    if any(u.get('email', '').lower() == email for u in users):
+        return jsonify({'error': 'User with this email already exists'}), 400
     
     user = {
         'id': get_next_id(users),
@@ -1085,7 +1095,10 @@ def handle_sales():
     sales = load_data(SALES_FILE)
     
     if request.method == 'GET':
-        return jsonify(sales)
+        # Filter sales by accountId for data isolation
+        account_id = request.user.get('accountId')
+        filtered_sales = [s for s in sales if s.get('accountId') == account_id]
+        return jsonify(filtered_sales)
     
     data = request.get_json()
     products = load_data(PRODUCTS_FILE)
@@ -1198,14 +1211,22 @@ def stats():
     
     sales = load_data(SALES_FILE)
     products = load_data(PRODUCTS_FILE)
+    expenses_data = load_data(EXPENSES_FILE)
     
-    total_sales = sum(s.get('total', 0) for s in sales)
+    # Filter by accountId for data isolation
+    account_id = request.user.get('accountId')
+    filtered_sales = [s for s in sales if s.get('accountId') == account_id]
+    filtered_products = [p for p in products if p.get('accountId') == account_id]
+    filtered_expenses = [e for e in expenses_data if e.get('accountId') == account_id]
+    
+    total_sales = sum(s.get('total', 0) for s in filtered_sales)
+    total_expenses = sum(e.get('amount', 0) for e in filtered_expenses)
     
     return jsonify({
         'totalSales': total_sales,
-        'totalExpenses': 0,
-        'profit': total_sales,
-        'productCount': len(products)
+        'totalExpenses': total_expenses,
+        'profit': total_sales - total_expenses,
+        'productCount': len(filtered_products)
     })
 
 @app.route('/api/reminders/today', methods=['GET', 'OPTIONS'])
@@ -1236,7 +1257,29 @@ def settings():
 def expenses():
     if request.method == 'OPTIONS':
         return '', 200
-    return jsonify([])
+    
+    expenses_data = load_data(EXPENSES_FILE)
+    
+    if request.method == 'GET':
+        # Filter expenses by accountId for data isolation
+        account_id = request.user.get('accountId')
+        filtered_expenses = [e for e in expenses_data if e.get('accountId') == account_id]
+        return jsonify(filtered_expenses)
+    
+    # POST - Create new expense
+    data = request.get_json()
+    expense = {
+        'id': get_next_id(expenses_data),
+        'description': data.get('description', ''),
+        'amount': float(data.get('amount', 0)),
+        'accountId': request.user['accountId'],
+        'createdAt': datetime.now().isoformat()
+    }
+    
+    expenses_data.append(expense)
+    save_data(EXPENSES_FILE, expenses_data)
+    
+    return jsonify(expense)
 
 @app.route('/api/batches', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
