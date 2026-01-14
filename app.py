@@ -632,11 +632,14 @@ def handle_products():
         'id': get_next_id(products),
         'name': data['name'],
         'price': float(data['price']),
+        'cost': float(data.get('cost', 0)),  # Cost price for inventory tracking
         'quantity': float(data.get('quantity', 0)),  # Changed to float for weight support
         'unit': data.get('unit', 'pcs'),  # 'pcs', 'kg', 'liters', 'grams', etc.
         'unitPrice': float(data.get('unitPrice', data['price'])),  # Price per unit/kg
         'category': data.get('category', 'general'),
         'image': data.get('image', None),  # Base64 image or URL
+        'expenseOnly': data.get('expenseOnly', False),  # Hide from cashier
+        'visibleToCashier': data.get('visibleToCashier', True),  # Show to cashier
         'isComposite': data.get('isComposite', False),
         'ingredients': data.get('ingredients', []),  # List of {productId, quantity}
         'accountId': request.user['accountId'],
