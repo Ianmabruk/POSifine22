@@ -1841,7 +1841,7 @@ def get_today_time_entries():
 @app.route('/api/clear-data', methods=['POST', 'OPTIONS'])
 @token_required
 def clear_data():
-    """Clear sales, expenses, and users data"""
+    """Clear sales, expenses, products and users data"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -1850,6 +1850,11 @@ def clear_data():
         clear_type = data.get('type', 'all')
         
         files_cleared = []
+        
+        # Clear products - just delete ALL products
+        if clear_type in ['products', 'all']:
+            save_data(PRODUCTS_FILE, {})
+            files_cleared.append('products')
         
         # Clear sales - just delete ALL sales
         if clear_type in ['sales', 'all']:
@@ -1860,6 +1865,11 @@ def clear_data():
         if clear_type in ['expenses', 'all']:
             save_data(EXPENSES_FILE, [])
             files_cleared.append('expenses')
+        
+        # Clear activities
+        if clear_type in ['activities', 'all']:
+            save_data(ACTIVITIES_FILE, [])
+            files_cleared.append('activities')
         
         # Clear users - just delete ALL users (except this should be careful!)
         if clear_type in ['users', 'all']:
