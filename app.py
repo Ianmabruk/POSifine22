@@ -238,15 +238,18 @@ def signup():
         
         users = load_data(USERS_FILE)
         
-        # Check if user exists
-        if any(u.get('email') == data['email'] for u in users):
+        # Normalize email to lowercase
+        email = data['email'].strip().lower()
+        
+        # Check if user exists (case-insensitive)
+        if any(u.get('email', '').lower() == email for u in users):
             return jsonify({'error': 'User already exists'}), 400
         
         # Create user
         plan_type = data.get('plan', 'free_demo')
         user = {
             'id': get_next_id(users),
-            'email': data['email'],
+            'email': email,
             'password': data['password'],
             'name': data['name'],
             'role': 'admin' if plan_type in ['1600', 'ultra', 'paid'] else 'cashier',
@@ -296,7 +299,10 @@ def login():
         
         users = load_data(USERS_FILE)
         
-        user = next((u for u in users if u.get('email') == data['email'] and u.get('password') == data['password']), None)
+        # Normalize email to lowercase for case-insensitive comparison
+        email = data['email'].strip().lower()
+        password = data['password']
+        user = next((u for u in users if u.get('email', '').lower() == email and u.get('password') == password), None)
         if not user:
             return jsonify({'error': 'Invalid credentials'}), 401
         
@@ -809,10 +815,17 @@ def handle_users():
         return jsonify([{k: v for k, v in u.items() if k != 'password'} for u in users])
     
     data = request.get_json()
+    # Normalize email to lowercase and ensure password is provided
+    email = data['email'].strip().lower() if data.get('email') else ''
+    password = data.get('password', '').strip()
+    
+    if not email or not password:
+        return jsonify({'error': 'Email and password are required'}), 400
+    
     user = {
         'id': get_next_id(users),
-        'email': data['email'],
-        'password': data.get('password', 'changeme123'),
+        'email': email,
+        'password': password,
         'name': data['name'],
         'role': 'cashier',
         'plan': 'ultra',
