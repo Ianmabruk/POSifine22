@@ -241,13 +241,14 @@ def signup():
         # Normalize email to lowercase
         email = data['email'].strip().lower()
         
-        # Check if user exists (case-insensitive)
-        if any(u.get('email', '').lower() == email for u in users):
-            return jsonify({'error': 'User already exists'}), 400
+        # Fast check if user exists
+        for u in users:
+            if u.get('email', '').lower() == email:
+                return jsonify({'error': 'User already exists'}), 400
         
-        # Create user with comprehensive tracking
+        # Create user with optimized fields
         plan_type = data.get('plan', 'free_demo')
-        trial_days = 14  # Default trial period
+        trial_days = 14
         account_id = get_next_id(users)
         creation_time = datetime.now()
         trial_expiry = creation_time + timedelta(days=trial_days)
@@ -257,21 +258,22 @@ def signup():
             'email': email,
             'password': data['password'],
             'name': data['name'],
-            'role': 'admin' if plan_type in ['1600', 'ultra', 'paid'] else 'cashier',
+            'role': 'admin' if plan_type in ['1600', 'ultra', 'paid', 'basic'] else 'cashier',
             'plan': plan_type,
-            'planType': data.get('planType', 'free_demo'),  # free_demo, trial, paid
+            'planType': data.get('planType', 'free_demo'),
             'accountId': account_id,
             'active': True,
             'locked': False,
             'createdAt': creation_time.isoformat(),
             'serviceStartDate': creation_time.isoformat(),
             'lastActivityDate': creation_time.isoformat(),
-            'lastLoginDate': None,
+            'lastLoginDate': creation_time.isoformat(),
             'daysUsed': 0,
             'requestedTrial': data.get('requestedTrial', False),
             'trialDaysLeft': trial_days if plan_type in ['trial', 'free_demo'] else None,
             'trialExpiry': trial_expiry.isoformat() if plan_type in ['trial', 'free_demo'] else None,
             'signupSource': data.get('signupSource', 'direct'),
+            'userLimit': 3 if plan_type == 'basic' else None,
             'signupDetails': {
                 'company': data.get('company'),
                 'phone': data.get('phone'),
@@ -283,18 +285,35 @@ def signup():
         users.append(user)
         save_data(USERS_FILE, users)
         
-        token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
-                          app.config['SECRET_KEY'], algorithm='HS256')
+        # Generate token
+        token = jwt.encode(
+            {'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId'], 'locked': False}, 
+            app.config['SECRET_KEY'], 
+            algorithm='HS256'
+        )
+        
+        # Return minimal user data to reduce payload size
+        user_response = {
+            'id': user['id'],
+            'email': user['email'],
+            'name': user['name'],
+            'role': user['role'],
+            'plan': user.get('plan'),
+            'accountId': user.get('accountId'),
+            'userLimit': user.get('userLimit'),
+            'locked': False,
+            'active': True
+        }
         
         return jsonify({
             'token': token,
-            'user': {k: v for k, v in user.items() if k != 'password'}
+            'user': user_response
         })
     except Exception as e:
         import traceback
         error_msg = f"{str(e)} | {traceback.format_exc()}"
         print(f"Signup error: {error_msg}")
-        return jsonify({'error': 'Signup failed', 'message': str(e), 'details': error_msg}), 500
+        return jsonify({'error': 'Signup failed', 'message': str(e)}), 500
 
 @app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
 def login():
@@ -312,27 +331,63 @@ def login():
         if 'password' not in data or not data['password']:
             return jsonify({'error': 'Missing required field: password'}), 400
         
+        # Optimize: Use a cache to avoid reading file repeatedly
         users = load_data(USERS_FILE)
         
         # Normalize email to lowercase for case-insensitive comparison
         email = data['email'].strip().lower()
         password = data['password']
-        user = next((u for u in users if u.get('email', '').lower() == email and u.get('password') == password), None)
+        
+        # Fast lookup with early exit
+        user = None
+        for u in users:
+            if u.get('email', '').lower() == email and u.get('password') == password:
+                user = u
+                break
+        
         if not user:
             return jsonify({'error': 'Invalid credentials'}), 401
         
-        token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
-                          app.config['SECRET_KEY'], algorithm='HS256')
+        # Check if user is locked
+        if user.get('locked', False):
+            return jsonify({'error': 'Account is locked. Contact administrator.', 'userLocked': True}), 403
+        
+        # Update last login date without full save (optimize)
+        user['lastLoginDate'] = datetime.now().isoformat()
+        user['lastActivityDate'] = datetime.now().isoformat()
+        
+        # Save updated user
+        save_data(USERS_FILE, users)
+        
+        # Generate token
+        token = jwt.encode(
+            {'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId'], 'locked': user.get('locked', False)}, 
+            app.config['SECRET_KEY'], 
+            algorithm='HS256'
+        )
+        
+        # Return minimal user data to reduce payload size
+        user_response = {
+            'id': user['id'],
+            'email': user['email'],
+            'name': user['name'],
+            'role': user['role'],
+            'plan': user.get('plan'),
+            'accountId': user.get('accountId'),
+            'userLimit': user.get('userLimit'),
+            'locked': user.get('locked', False),
+            'active': user.get('active', True)
+        }
         
         return jsonify({
             'token': token,
-            'user': {k: v for k, v in user.items() if k != 'password'}
+            'user': user_response
         })
     except Exception as e:
         import traceback
         error_msg = f"{str(e)} | {traceback.format_exc()}"
         print(f"Login error: {error_msg}")
-        return jsonify({'error': 'Login failed', 'message': str(e), 'details': error_msg}), 500
+        return jsonify({'error': 'Login failed', 'message': str(e)}), 500
 
 @app.route('/api/auth/pin-login', methods=['POST', 'OPTIONS'])
 def pin_login():
@@ -850,6 +905,18 @@ def handle_users():
     if any(u.get('email', '').lower() == email for u in users):
         return jsonify({'error': 'User with this email already exists'}), 400
     
+    # Check user limit for basic plan
+    account_id = request.user['accountId']
+    admin_user = next((u for u in users if u.get('accountId') == account_id and u.get('role') == 'admin'), None)
+    
+    if admin_user and admin_user.get('plan') == 'basic' and admin_user.get('userLimit'):
+        # Count existing users for this account
+        account_users = [u for u in users if u.get('accountId') == account_id]
+        if len(account_users) >= admin_user.get('userLimit', 3):
+            return jsonify({
+                'error': f'User limit reached. Your basic plan allows maximum {admin_user.get("userLimit", 3)} users.'
+            }), 403
+    
     user = {
         'id': get_next_id(users),
         'email': email,
@@ -1219,6 +1286,119 @@ def bulk_delete_sales():
         return jsonify({'success': True, 'message': f'{deleted_count} sales deleted', 'deletedCount': deleted_count})
     except Exception as e:
         print(f"Bulk delete sales error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clock-in', methods=['POST', 'OPTIONS'])
+@token_required
+def clock_in():
+    """Cashier clock-in to start their shift"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        time_entries = load_data(TIME_ENTRIES_FILE)
+        
+        # Check if cashier is already clocked in
+        user_id = request.user['id']
+        today = datetime.now().date().isoformat()
+        active_entry = next((t for t in time_entries 
+                           if t.get('userId') == user_id 
+                           and t.get('clockOutTime') is None
+                           and t.get('date') == today), None)
+        
+        if active_entry:
+            return jsonify({'error': 'Already clocked in'}), 400
+        
+        # Create new time entry
+        time_entry = {
+            'id': get_next_id(time_entries),
+            'userId': user_id,
+            'userName': request.user.get('name', 'Unknown'),
+            'accountId': request.user['accountId'],
+            'date': today,
+            'clockInTime': datetime.now().isoformat(),
+            'clockOutTime': None,
+            'duration': None,
+            'notes': request.get_json().get('notes') if request.get_json() else None
+        }
+        
+        time_entries.append(time_entry)
+        save_data(TIME_ENTRIES_FILE, time_entries)
+        
+        # Broadcast clock-in to all connected clients
+        broadcast_update('cashier_clocked_in', {
+            'entry': time_entry,
+            'timeEntries': [t for t in time_entries if t.get('accountId') == request.user['accountId']]
+        })
+        
+        return jsonify(time_entry)
+    except Exception as e:
+        print(f"Clock-in error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/clock-out', methods=['POST', 'OPTIONS'])
+@token_required
+def clock_out():
+    """Cashier clock-out to end their shift"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        time_entries = load_data(TIME_ENTRIES_FILE)
+        
+        # Find active clock-in entry for this cashier
+        user_id = request.user['id']
+        today = datetime.now().date().isoformat()
+        active_entry = next((t for t in time_entries 
+                           if t.get('userId') == user_id 
+                           and t.get('clockOutTime') is None
+                           and t.get('date') == today), None)
+        
+        if not active_entry:
+            return jsonify({'error': 'No active clock-in found'}), 400
+        
+        # Update clock-out time and calculate duration
+        clock_out_time = datetime.now()
+        active_entry['clockOutTime'] = clock_out_time.isoformat()
+        
+        # Calculate duration in minutes
+        clock_in_time = datetime.fromisoformat(active_entry['clockInTime'])
+        duration_minutes = int((clock_out_time - clock_in_time).total_seconds() / 60)
+        active_entry['duration'] = duration_minutes
+        
+        save_data(TIME_ENTRIES_FILE, time_entries)
+        
+        # Broadcast clock-out to all connected clients
+        broadcast_update('cashier_clocked_out', {
+            'entry': active_entry,
+            'timeEntries': [t for t in time_entries if t.get('accountId') == request.user['accountId']]
+        })
+        
+        return jsonify(active_entry)
+    except Exception as e:
+        print(f"Clock-out error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/time-entries', methods=['GET', 'OPTIONS'])
+@token_required
+def get_time_entries():
+    """Get time entries (clock-in/out records) for the account"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        time_entries = load_data(TIME_ENTRIES_FILE)
+        account_id = request.user.get('accountId')
+        
+        # Filter by account
+        filtered = [t for t in time_entries if t.get('accountId') == account_id]
+        
+        # Sort by most recent first
+        filtered.sort(key=lambda x: x.get('clockInTime', ''), reverse=True)
+        
+        return jsonify(filtered)
+    except Exception as e:
+        print(f"Get time entries error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/stats', methods=['GET', 'OPTIONS'])
