@@ -148,12 +148,14 @@ def token_required(f):
         
         token = request.headers.get('Authorization', '').replace('Bearer ', '')
         if not token:
+            print(f"❌ Token missing for {request.path}")
             return jsonify({'error': 'Token missing'}), 401
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
             request.user = data
-        except:
-            return jsonify({'error': 'Invalid token'}), 401
+        except Exception as e:
+            print(f"❌ Invalid token: {str(e)}")
+            return jsonify({'error': f'Invalid token: {str(e)}'}), 401
         return f(*args, **kwargs)
     return decorated
 
