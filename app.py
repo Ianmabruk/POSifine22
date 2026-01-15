@@ -61,6 +61,7 @@ REMINDERS_FILE = f'{DATA_DIR}/reminders.json'
 RECIPES_FILE = f'{DATA_DIR}/recipes.json'
 NOTES_FILE = f'{DATA_DIR}/cashier_notes.json'
 TIME_ENTRIES_FILE = f'{DATA_DIR}/time_entries.json'
+RAW_MATERIALS_FILE = f'{DATA_DIR}/raw_materials.json'
 
 # Ensure data directory exists and initialize empty JSON files
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -97,7 +98,7 @@ def get_next_id(data):
 # Initialize all data files on startup
 for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
                  BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
-                 SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE]:
+                 SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE, RAW_MATERIALS_FILE]:
     init_json_file(filepath)
 
 print(f"✅ Using file storage at: {DATA_DIR}")
@@ -1620,6 +1621,74 @@ def discounts_endpoint():
         broadcast_update('discount_updated', {'discounts': discounts})
         return jsonify({'status': 'deleted'})
 
+@app.route('/api/raw-materials', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_raw_materials():
+    """Manage raw materials for composite products with decimal precision"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    materials = load_data(RAW_MATERIALS_FILE)
+    
+    if request.method == 'GET':
+        return jsonify(materials)
+    
+    # POST - Create new raw material
+    data = request.get_json()
+    material = {
+        'id': get_next_id(materials),
+        'name': data.get('name'),
+        'quantity': float(data.get('quantity', 0)),  # Decimal precision
+        'unit': data.get('unit', 'kg'),  # kg, g, L, ml, pcs
+        'cost_per_unit': float(data.get('cost_per_unit', 0)),  # For COGS calculation
+        'reorder_level': float(data.get('reorder_level', 0)),
+        'category': data.get('category', 'ingredient'),
+        'createdAt': datetime.now().isoformat(),
+        'updatedAt': datetime.now().isoformat()
+    }
+    materials.append(material)
+    save_data(RAW_MATERIALS_FILE, materials)
+    
+    broadcast_update('raw_material_created', {'materials': materials})
+    return jsonify(material), 201
+
+@app.route('/api/raw-materials/<int:material_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_raw_material(material_id):
+    """Update or delete a raw material"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    materials = load_data(RAW_MATERIALS_FILE)
+    material = next((m for m in materials if m['id'] == material_id), None)
+    
+    if not material:
+        return jsonify({'error': 'Raw material not found'}), 404
+    
+    if request.method == 'GET':
+        return jsonify(material)
+    
+    if request.method == 'DELETE':
+        materials = [m for m in materials if m['id'] != material_id]
+        save_data(RAW_MATERIALS_FILE, materials)
+        broadcast_update('raw_material_deleted', {'materials': materials})
+        return jsonify({'message': 'Raw material deleted'}), 200
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        material.update({
+            'name': data.get('name', material.get('name')),
+            'quantity': float(data.get('quantity', material.get('quantity', 0))),
+            'unit': data.get('unit', material.get('unit')),
+            'cost_per_unit': float(data.get('cost_per_unit', material.get('cost_per_unit', 0))),
+            'reorder_level': float(data.get('reorder_level', material.get('reorder_level', 0))),
+            'category': data.get('category', material.get('category')),
+            'updatedAt': datetime.now().isoformat()
+        })
+        save_data(RAW_MATERIALS_FILE, materials)
+        broadcast_update('raw_material_updated', {'materials': materials})
+        return jsonify(material)
+
 @app.route('/api/recipes', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_recipes():
@@ -1939,6 +2008,11 @@ def clear_data():
         if clear_type in ['products', 'all']:
             save_data(RECIPES_FILE, [])
             files_cleared.append('recipes')
+        
+        # Clear raw materials
+        if clear_type in ['products', 'all']:
+            save_data(RAW_MATERIALS_FILE, [])
+            files_cleared.append('raw_materials')
         
         # Clear notes/activities
         if clear_type in ['all']:
