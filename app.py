@@ -13,8 +13,64 @@ from collections import defaultdict
 
 app = Flask(__name__)
 
-# Complete CORS fix
-CORS(app, origins=['*'], methods=['*'], allow_headers=['*'])
+# ============================================================
+# COMPREHENSIVE CORS CONFIGURATION - PRODUCTION READY
+# ============================================================
+
+# 1. Configure Flask-CORS with explicit settings
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": ["*"],
+            "methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "expose_headers": ["Content-Type", "Authorization"],
+            "max_age": 86400,
+            "supports_credentials": False
+        }
+    },
+    send_wildcard=True,
+    vary_header=True,
+    automatic_options=True
+)
+
+# 2. Explicit preflight handler - catches all OPTIONS requests
+@app.before_request
+def handle_preflight_request():
+    """
+    Explicitly handle CORS preflight (OPTIONS) requests
+    This ensures the preflight gets proper headers BEFORE reaching any route
+    """
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.status_code = 204
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
+        response.headers['Access-Control-Max-Age'] = '86400'
+        response.headers['Access-Control-Allow-Credentials'] = 'false'
+        return response
+
+# 3. Ensure all responses include CORS headers
+@app.after_request
+def set_cors_headers(response):
+    """
+    Add CORS headers to ALL responses (success, error, 404, 500, etc.)
+    This is the final safety net to ensure no response slips through without headers
+    """
+    # Always add these headers
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
+    response.headers['Access-Control-Max-Age'] = '86400'
+    response.headers['Access-Control-Expose-Headers'] = 'Content-Type, Authorization'
+    
+    # Ensure proper Content-Type for API responses
+    if not response.headers.get('Content-Type'):
+        response.headers['Content-Type'] = 'application/json'
+    
+    return response
 
 # WebSocket (flask-sock)
 sock = Sock(app)
@@ -35,25 +91,6 @@ def broadcast_update(message_type, data):
     for client in disconnected:
         if client in connected_clients:
             connected_clients.remove(client)
-
-@app.before_request
-def handle_preflight():
-    """Handle CORS preflight requests"""
-    if request.method == 'OPTIONS':
-        response = request.app.make_response(('', 204))
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
-        response.headers['Access-Control-Max-Age'] = '86400'
-        return response
-
-@app.after_request
-def after_request(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
-    response.headers['Access-Control-Max-Age'] = '86400'
-    return response
 
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'ultra-pos-secret-2024')
 
