@@ -7,6 +7,9 @@ import time
 from datetime import datetime, timedelta
 from functools import wraps
 from flask_sock import Sock
+import bcrypt
+import hashlib
+from collections import defaultdict
 
 app = Flask(__name__)
 
@@ -62,6 +65,8 @@ RECIPES_FILE = f'{DATA_DIR}/recipes.json'
 NOTES_FILE = f'{DATA_DIR}/cashier_notes.json'
 TIME_ENTRIES_FILE = f'{DATA_DIR}/time_entries.json'
 RAW_MATERIALS_FILE = f'{DATA_DIR}/raw_materials.json'
+SUBSCRIPTIONS_FILE = f'{DATA_DIR}/subscriptions.json'
+SUBSCRIPTION_PLANS_FILE = f'{DATA_DIR}/subscription_plans.json'
 
 # Ensure data directory exists and initialize empty JSON files
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -140,6 +145,154 @@ def init_main_admin():
 
 init_main_admin()
 
+# PIN Rate Limiting Tracker (in-memory, resets on server restart)
+pin_attempts = defaultdict(lambda: {'count': 0, 'locked_until': None})
+
+def check_pin_rate_limit(user_id):
+    """Check if user is rate limited for PIN attempts"""
+    tracker = pin_attempts[user_id]
+    if tracker['locked_until']:
+        if datetime.now() < tracker['locked_until']:
+            return False, f"Account locked. Try again after {tracker['locked_until'].strftime('%H:%M')}"
+        else:
+            # Lockout expired
+            tracker['count'] = 0
+            tracker['locked_until'] = None
+    return True, None
+
+def increment_pin_attempts(user_id):
+    """Increment PIN attempt counter. Lock if threshold exceeded."""
+    tracker = pin_attempts[user_id]
+    tracker['count'] += 1
+    
+    if tracker['count'] >= 3:
+        tracker['locked_until'] = datetime.now() + timedelta(minutes=15)
+        return f"Account locked after 3 failed attempts. Try again in 15 minutes."
+    return None
+
+def reset_pin_attempts(user_id):
+    """Reset PIN attempts after successful unlock"""
+    pin_attempts[user_id] = {'count': 0, 'locked_until': None}
+
+def hash_pin(pin):
+    """Hash PIN using bcrypt"""
+    try:
+        salt = bcrypt.gensalt(rounds=12)
+        return bcrypt.hashpw(pin.encode('utf-8'), salt).decode('utf-8')
+    except Exception as e:
+        print(f"❌ PIN hashing error: {e}")
+        return None
+
+def verify_pin(pin, hashed_pin):
+    """Verify PIN against hash using bcrypt"""
+    try:
+        if not hashed_pin:
+            return False
+        return bcrypt.checkpw(pin.encode('utf-8'), hashed_pin.encode('utf-8'))
+    except Exception as e:
+        print(f"❌ PIN verification error: {e}")
+        return False
+
+# ============================================================
+# SUBSCRIPTION MANAGEMENT FUNCTIONS
+# ============================================================
+
+def get_subscription_status(user):
+    """Calculate subscription status for a user"""
+    try:
+        service_start = datetime.fromisoformat(user.get('serviceStartDate', datetime.now().isoformat()))
+        
+        # Get subscription duration in days (default 30 for monthly)
+        duration_days = user.get('subscriptionDurationDays', 30)
+        
+        subscription_end = service_start + timedelta(days=duration_days)
+        now = datetime.now()
+        
+        days_used = (now - service_start).days + 1
+        days_remaining = max(0, (subscription_end - now).days)
+        
+        # Determine status
+        if days_remaining <= 0:
+            status = 'expired'
+        elif days_remaining == 1:
+            status = 'expiring_soon'
+        elif days_remaining <= 7:
+            status = 'expiring'
+        else:
+            status = 'active'
+        
+        return {
+            'status': status,
+            'days_used': max(0, days_used),
+            'days_remaining': days_remaining,
+            'subscription_start': service_start.isoformat(),
+            'subscription_end': subscription_end.isoformat(),
+            'is_active': status != 'expired' and user.get('active', True),
+            'reminder_needed': days_remaining == 1 and not user.get('subscription_reminder_sent', False)
+        }
+    except Exception as e:
+        print(f"Error calculating subscription status: {e}")
+        return {
+            'status': 'unknown',
+            'days_used': 0,
+            'days_remaining': 30,
+            'is_active': False
+        }
+
+def init_subscription_plans():
+    """Initialize subscription plans if not exists"""
+    try:
+        plans = load_data(SUBSCRIPTION_PLANS_FILE)
+        if not plans:
+            plans = [
+                {
+                    'id': 'basic',
+                    'name': 'Professional Package',
+                    'price': 1500,
+                    'currency': 'KSH',
+                    'duration_days': 30,
+                    'features': [
+                        'Admin Dashboard + Cashier POS',
+                        'Basic Inventory Management',
+                        'Sales Tracking',
+                        'Daily/Weekly Sales Summaries',
+                        'Basic Profit/Loss View',
+                        'Limited Email Notifications',
+                        'Record Products Sold',
+                        'Up to 2 Users',
+                        'Vendor Management',
+                        'Basic Expense Tracking',
+                        'Limited Analytics'
+                    ]
+                },
+                {
+                    'id': 'ultra',
+                    'name': 'Ultra Package (Enterprise)',
+                    'price': 3000,
+                    'currency': 'KSH',
+                    'duration_days': 30,
+                    'features': [
+                        'Admin Dashboard + Cashier POS',
+                        'Full Inventory Management',
+                        'Recipe/BOM Builder',
+                        'Composite Products Support',
+                        'Automatic Stock Deduction',
+                        'COGS Calculation',
+                        'User Management',
+                        'Permission Controls',
+                        'Expense Tracking',
+                        'Advanced Analytics',
+                        'Unlimited Users',
+                        'Vendor Management',
+                        'Advanced Reporting',
+                        'Priority Support'
+                    ]
+                }
+            ]
+            save_data(SUBSCRIPTION_PLANS_FILE, plans)
+    except Exception as e:
+        print(f"Error initializing subscription plans: {e}")
+
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -154,6 +307,11 @@ def token_required(f):
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
             request.user = data
+            
+            # NEW: Check screen lock state - block API calls if locked (except unlock endpoint)
+            if data.get('screen_locked') and request.path != '/api/auth/unlock-screen':
+                return jsonify({'error': 'Screen is locked', 'screen_locked': True}), 423
+            
         except Exception as e:
             print(f"❌ Invalid token: {str(e)}")
             return jsonify({'error': f'Invalid token: {str(e)}'}), 401
@@ -362,9 +520,18 @@ def login():
         # Save updated user
         save_data(USERS_FILE, users)
         
-        # Generate token
+        # Generate token with screen lock information
         token = jwt.encode(
-            {'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId'], 'locked': user.get('locked', False)}, 
+            {
+                'id': user['id'],
+                'email': user['email'],
+                'role': user['role'],
+                'accountId': user['accountId'],
+                'locked': user.get('locked', False),
+                'screen_locked': False,           # New: lock state
+                'locked_at': None,                # New: when locked
+                'lock_requires_pin': user.get('screen_lock_enabled', True)  # New: needs PIN
+            }, 
             app.config['SECRET_KEY'], 
             algorithm='HS256'
         )
@@ -487,6 +654,446 @@ def main_admin_login():
         import traceback
         print(f"Main admin login error: {str(e)} | {traceback.format_exc()}")
         return jsonify({'error': 'Login failed', 'message': str(e)}), 500
+
+# ==================== NEW SECURITY ENDPOINTS ====================
+
+@app.route('/api/auth/set-pin', methods=['POST', 'OPTIONS'])
+@token_required
+def set_pin():
+    """Set or update user PIN - admin only for other users"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        new_pin = data.get('new_pin', '').strip()
+        user_id = data.get('user_id')  # If admin setting PIN for another user
+        
+        if not new_pin or len(new_pin) < 4:
+            return jsonify({'error': 'PIN must be at least 4 digits'}), 400
+        
+        # Non-numeric validation
+        if not new_pin.isdigit():
+            return jsonify({'error': 'PIN must contain only digits'}), 400
+        
+        users = load_data(USERS_FILE)
+        
+        # Determine whose PIN we're setting
+        if user_id:
+            # Admin setting PIN for another user
+            if request.user['role'] != 'admin':
+                return jsonify({'error': 'Only admins can set PIN for other users'}), 403
+            target_user = next((u for u in users if u['id'] == user_id and u['accountId'] == request.user['accountId']), None)
+        else:
+            # User setting own PIN
+            target_user = next((u for u in users if u['id'] == request.user['id']), None)
+        
+        if not target_user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Hash PIN using bcrypt
+        hashed_pin = hash_pin(new_pin)
+        if not hashed_pin:
+            return jsonify({'error': 'Failed to hash PIN'}), 500
+        
+        target_user['hashed_pin'] = hashed_pin
+        target_user['pin_attempts'] = 0
+        target_user['pin_locked_until'] = None
+        target_user['screen_lock_enabled'] = True
+        
+        save_data(USERS_FILE, users)
+        reset_pin_attempts(target_user['id'])
+        
+        print(f"✅ PIN updated for user {target_user['id']}")
+        return jsonify({'success': True, 'message': 'PIN set successfully'})
+    
+    except Exception as e:
+        print(f"❌ Set PIN error: {str(e)}")
+        return jsonify({'error': 'Failed to set PIN', 'message': str(e)}), 500
+
+@app.route('/api/auth/lock-screen', methods=['POST', 'OPTIONS'])
+@token_required
+def lock_screen():
+    """Lock screen - ADMIN ONLY"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    # AUTHORIZATION: Only admin can lock screen
+    if request.user['role'] != 'admin':
+        return jsonify({'error': 'Only admins can lock the screen'}), 403
+    
+    try:
+        # Generate new token with screen_locked: true
+        new_token = jwt.encode(
+            {
+                'id': request.user['id'],
+                'email': request.user['email'],
+                'role': request.user['role'],
+                'accountId': request.user['accountId'],
+                'locked': request.user.get('locked', False),
+                'screen_locked': True,            # LOCKED
+                'locked_at': datetime.now().isoformat(),
+                'lock_requires_pin': True
+            },
+            app.config['SECRET_KEY'],
+            algorithm='HS256'
+        )
+        
+        # Broadcast to all clients
+        broadcast_update('screen_locked', {
+            'admin_id': request.user['id'],
+            'locked_at': datetime.now().isoformat(),
+            'message': 'Screen locked by admin'
+        })
+        
+        print(f"🔒 Screen locked by admin {request.user['id']}")
+        return jsonify({
+            'success': True,
+            'token': new_token,
+            'screen_locked': True,
+            'locked_at': datetime.now().isoformat()
+        })
+    
+    except Exception as e:
+        print(f"❌ Lock screen error: {str(e)}")
+        return jsonify({'error': 'Failed to lock screen', 'message': str(e)}), 500
+
+@app.route('/api/auth/unlock-screen', methods=['POST', 'OPTIONS'])
+@token_required
+def unlock_screen():
+    """Unlock screen by verifying PIN - SECURE BACKEND VALIDATION"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        submitted_pin = data.get('pin', '').strip()
+        
+        if not submitted_pin:
+            return jsonify({'error': 'PIN required'}), 400
+        
+        user_id = request.user['id']
+        
+        # Check rate limit
+        can_attempt, rate_limit_msg = check_pin_rate_limit(user_id)
+        if not can_attempt:
+            return jsonify({'error': 'Rate limited', 'message': rate_limit_msg}), 429
+        
+        # Load user
+        users = load_data(USERS_FILE)
+        user = next((u for u in users if u['id'] == user_id), None)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Verify PIN hash
+        hashed_pin = user.get('hashed_pin')
+        if not hashed_pin or not verify_pin(submitted_pin, hashed_pin):
+            # Wrong PIN - increment attempts
+            lockout_msg = increment_pin_attempts(user_id)
+            print(f"❌ Failed unlock attempt for user {user_id}")
+            
+            if lockout_msg:
+                return jsonify({'error': 'Invalid PIN', 'message': lockout_msg, 'locked': True}), 429
+            else:
+                remaining = 3 - pin_attempts[user_id]['count']
+                return jsonify({'error': 'Invalid PIN', 'message': f'{remaining} attempts remaining'}), 401
+        
+        # Correct PIN - generate new token with screen_locked: false
+        reset_pin_attempts(user_id)
+        
+        new_token = jwt.encode(
+            {
+                'id': request.user['id'],
+                'email': request.user['email'],
+                'role': request.user['role'],
+                'accountId': request.user['accountId'],
+                'locked': request.user.get('locked', False),
+                'screen_locked': False,           # UNLOCKED
+                'locked_at': None,
+                'lock_requires_pin': True
+            },
+            app.config['SECRET_KEY'],
+            algorithm='HS256'
+        )
+        
+        print(f"🔓 Screen unlocked by user {user_id}")
+        return jsonify({
+            'success': True,
+            'token': new_token,
+            'screen_locked': False,
+            'message': 'Screen unlocked successfully'
+        })
+    
+    except Exception as e:
+        print(f"❌ Unlock screen error: {str(e)}")
+        return jsonify({'error': 'Failed to unlock screen', 'message': str(e)}), 500
+
+@app.route('/api/admin/lock-user-screen/<user_id>', methods=['POST', 'OPTIONS'])
+@token_required
+def lock_user_screen_admin(user_id):
+    """Admin endpoint to lock a specific user's screen remotely"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        # AUTHORIZATION: Only owner (main admin) can lock other users' screens
+        if request.user.get('role') != 'owner':
+            return jsonify({'error': 'Only owner/admin can lock other users\' screens'}), 403
+        
+        # Load target user
+        users = load_data(USERS_FILE)
+        target_user = next((u for u in users if u['id'] == user_id), None)
+        
+        if not target_user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Generate locked token for the target user (they'll get it on next request/refresh)
+        locked_token = jwt.encode(
+            {
+                'id': target_user['id'],
+                'email': target_user['email'],
+                'role': target_user['role'],
+                'accountId': target_user.get('accountId'),
+                'locked': target_user.get('locked', False),
+                'screen_locked': True,  # LOCKED BY ADMIN
+                'locked_at': datetime.now().isoformat(),
+                'lock_requires_pin': True,
+                'locked_by_admin': True
+            },
+            app.config['SECRET_KEY'],
+            algorithm='HS256'
+        )
+        
+        # Store lock notification for user
+        target_user['screen_locked'] = True
+        target_user['locked_at'] = datetime.now().isoformat()
+        target_user['locked_by_admin'] = True
+        save_data(USERS_FILE, users)
+        
+        # Broadcast to all clients that user's screen is locked
+        broadcast_update('admin_locked_user_screen', {
+            'admin_id': request.user['id'],
+            'target_user_id': user_id,
+            'target_user_name': target_user.get('name'),
+            'locked_at': datetime.now().isoformat(),
+            'message': f'Screen locked for {target_user.get("name")} by admin'
+        })
+        
+        print(f"🔒 Admin {request.user['id']} locked screen for user {user_id}")
+        return jsonify({
+            'success': True,
+            'message': f'Screen locked for {target_user.get("name")}',
+            'token': locked_token,
+            'target_user_id': user_id
+        })
+    
+    except Exception as e:
+        print(f"❌ Admin lock user screen error: {str(e)}")
+        return jsonify({'error': 'Failed to lock screen', 'message': str(e)}), 500
+
+# ============================================================
+# SUBSCRIPTION MANAGEMENT ENDPOINTS
+# ============================================================
+
+@app.route('/api/subscriptions/plans', methods=['GET', 'OPTIONS'])
+def get_subscription_plans():
+    """Get all available subscription plans"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        init_subscription_plans()
+        plans = load_data(SUBSCRIPTION_PLANS_FILE)
+        return jsonify(plans)
+    except Exception as e:
+        print(f"Error fetching plans: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/subscriptions/overview', methods=['GET'])
+@token_required
+def get_subscription_overview():
+    """Get complete subscription overview for Main Admin"""
+    try:
+        # Verify owner access
+        if request.user.get('role') != 'owner':
+            return jsonify({'error': 'Owner access required'}), 403
+        
+        init_subscription_plans()
+        plans = load_data(SUBSCRIPTION_PLANS_FILE)
+        users = load_data(USERS_FILE)
+        
+        # Build plan overview with subscribers
+        plan_overview = []
+        for plan in plans:
+            active_subs = []
+            expired_subs = []
+            total_revenue = 0
+            
+            for user in users:
+                if user.get('plan') == plan['id']:
+                    sub_status = get_subscription_status(user)
+                    
+                    if sub_status['is_active']:
+                        active_subs.append({
+                            'userId': user.get('id'),
+                            'userName': user.get('name'),
+                            'email': user.get('email'),
+                            'daysUsed': sub_status['days_used'],
+                            'daysRemaining': sub_status['days_remaining'],
+                            'startDate': sub_status['subscription_start'],
+                            'endDate': sub_status['subscription_end'],
+                            'status': sub_status['status']
+                        })
+                        total_revenue += plan['price']
+                    else:
+                        expired_subs.append({
+                            'userId': user.get('id'),
+                            'userName': user.get('name'),
+                            'email': user.get('email'),
+                            'expiredDate': sub_status['subscription_end']
+                        })
+            
+            plan_overview.append({
+                'planId': plan['id'],
+                'planName': plan['name'],
+                'price': plan['price'],
+                'currency': plan.get('currency', 'KSH'),
+                'durationDays': plan.get('duration_days', 30),
+                'features': plan.get('features', []),
+                'activeSubscribers': len(active_subs),
+                'expiredSubscribers': len(expired_subs),
+                'totalRevenue': total_revenue,
+                'activeSubscriptions': active_subs,
+                'expiredSubscriptions': expired_subs
+            })
+        
+        return jsonify({
+            'plans': plan_overview,
+            'totalSubscribers': len(users),
+            'totalActiveSubscriptions': sum(len(p['activeSubscriptions']) for p in plan_overview),
+            'totalRevenue': sum(p['totalRevenue'] for p in plan_overview)
+        })
+    
+    except Exception as e:
+        print(f"Error fetching subscription overview: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/subscription-status', methods=['GET'])
+@token_required
+def get_user_subscription_status():
+    """Get current user's subscription status"""
+    try:
+        users = load_data(USERS_FILE)
+        user_id = request.user.get('id')
+        user = next((u for u in users if u.get('id') == user_id), None)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        sub_status = get_subscription_status(user)
+        
+        return jsonify({
+            'userId': user_id,
+            'userName': user.get('name'),
+            'plan': user.get('plan'),
+            'planName': user.get('planName', ''),
+            **sub_status
+        })
+    
+    except Exception as e:
+        print(f"Error fetching user subscription status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/subscriptions/renew', methods=['POST'])
+@token_required
+def renew_subscription():
+    """Renew user's subscription"""
+    try:
+        data = request.get_json()
+        user_id = request.user.get('id')
+        
+        users = load_data(USERS_FILE)
+        user = next((u for u in users if u.get('id') == user_id), None)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Reset subscription
+        now = datetime.now()
+        duration_days = data.get('duration_days', 30)
+        
+        user['serviceStartDate'] = now.isoformat()
+        user['subscriptionDurationDays'] = duration_days
+        user['subscription_reminder_sent'] = False
+        user['active'] = True
+        
+        save_data(USERS_FILE, users)
+        
+        # Broadcast renewal event
+        broadcast_update('subscription_renewed', {
+            'userId': user_id,
+            'userName': user.get('name'),
+            'renewedAt': now.isoformat(),
+            'endDate': (now + timedelta(days=duration_days)).isoformat()
+        })
+        
+        print(f"✅ Subscription renewed for user {user_id}")
+        return jsonify({
+            'success': True,
+            'message': 'Subscription renewed successfully',
+            'newEndDate': (now + timedelta(days=duration_days)).isoformat()
+        })
+    
+    except Exception as e:
+        print(f"Error renewing subscription: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/subscriptions/check-expiry', methods=['GET'])
+def check_subscription_expiry():
+    """Check for subscriptions reaching day 29 (1 day remaining) and create reminders"""
+    try:
+        users = load_data(USERS_FILE)
+        reminders_created = []
+        
+        for user in users:
+            # Skip if already sent reminder
+            if user.get('subscription_reminder_sent', False):
+                continue
+            
+            # Skip if subscription already expired
+            sub_status = get_subscription_status(user)
+            if sub_status['days_remaining'] != 1:
+                continue
+            
+            # Mark reminder as sent
+            user['subscription_reminder_sent'] = True
+            reminders_created.append({
+                'userId': user.get('id'),
+                'userName': user.get('name'),
+                'email': user.get('email'),
+                'daysRemaining': sub_status['days_remaining'],
+                'expiryDate': sub_status['subscription_end'],
+                'createdAt': datetime.now().isoformat()
+            })
+        
+        # Save updated users
+        save_data(USERS_FILE, users)
+        
+        # Broadcast reminders
+        for reminder in reminders_created:
+            broadcast_update('subscription_reminder_day29', reminder)
+            print(f"🔔 Reminder created for user {reminder['userId']}: {reminder['daysRemaining']} day(s) remaining")
+        
+        return jsonify({
+            'success': True,
+            'reminders_created': len(reminders_created),
+            'reminders': reminders_created
+        })
+    
+    except Exception as e:
+        print(f"Error checking subscription expiry: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/main-admin/users', methods=['GET', 'OPTIONS'])
 @token_required
@@ -1175,9 +1782,178 @@ def main_admin_delete_user(user_id):
         print(f"Main admin delete user error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# ============================================================
+# STOCK MANAGEMENT FUNCTIONS
+# ============================================================
+
+def validate_and_deduct_stock(products, expenses, items, sale_items_deductions):
+    """
+    Atomically validate all items have sufficient stock and prepare deductions.
+    
+    Returns: (bool, error_message, deductions)
+    deductions = {
+        'products': [{id, before_qty, after_qty, deducted}],
+        'expenses': [{id, before_qty, after_qty, deducted}]
+    }
+    """
+    deductions = {'products': [], 'expenses': []}
+    
+    for item in items:
+        product = next((p for p in products if p['id'] == item['productId']), None)
+        if not product:
+            return False, f"Product {item['productId']} not found", None
+        
+        sold_amount = float(item.get('quantity', item.get('weight', 0)))
+        current_qty = float(product.get('quantity', 0))
+        
+        # Validate main product stock
+        if current_qty < sold_amount:
+            return False, f"Insufficient stock for {product['name']}: need {sold_amount}, have {current_qty}", None
+        
+        # Record deduction for product
+        deductions['products'].append({
+            'id': product['id'],
+            'name': product['name'],
+            'before_qty': current_qty,
+            'after_qty': current_qty - sold_amount,
+            'deducted': sold_amount,
+            'unit': product.get('unit', 'pcs')
+        })
+        
+        # Check and deduct ingredients (composite products)
+        ingredients = product.get('recipe', product.get('ingredients', []))
+        if ingredients and len(ingredients) > 0:
+            for ingredient in ingredients:
+                ingredient_id = ingredient.get('productId')
+                ingredient_product = None
+                
+                if ingredient_id:
+                    ingredient_product = next((p for p in products if p['id'] == ingredient_id), None)
+                elif ingredient.get('name'):
+                    ingredient_product = next((p for p in products if p['name'].lower() == ingredient['name'].lower()), None)
+                
+                if ingredient_product:
+                    ingredient_qty = float(ingredient.get('quantity', 0))
+                    total_needed = ingredient_qty * sold_amount
+                    ingredient_current = float(ingredient_product.get('quantity', 0))
+                    
+                    # Validate ingredient stock
+                    if ingredient_current < total_needed:
+                        return False, f"Insufficient ingredient stock for {ingredient_product['name']}: need {total_needed}, have {ingredient_current}", None
+                    
+                    # Check if this ingredient is an expense item
+                    if ingredient_product.get('expenseOnly', False):
+                        # Record as expense deduction
+                        deductions['expenses'].append({
+                            'id': ingredient_product['id'],
+                            'name': ingredient_product['name'],
+                            'before_qty': ingredient_current,
+                            'after_qty': ingredient_current - total_needed,
+                            'deducted': total_needed,
+                            'unit': ingredient_product.get('unit', 'pcs')
+                        })
+                    else:
+                        # Record as product deduction
+                        deductions['products'].append({
+                            'id': ingredient_product['id'],
+                            'name': ingredient_product['name'],
+                            'before_qty': ingredient_current,
+                            'after_qty': ingredient_current - total_needed,
+                            'deducted': total_needed,
+                            'unit': ingredient_product.get('unit', 'pcs'),
+                            'parent_product': product['name']
+                        })
+    
+    return True, None, deductions
+
+def apply_stock_deductions(products, expenses, deductions):
+    """Apply pre-validated deductions to products and expenses."""
+    try:
+        # Apply product deductions
+        for deduction in deductions.get('products', []):
+            product = next((p for p in products if p['id'] == deduction['id']), None)
+            if product:
+                product['quantity'] = deduction['after_qty']
+        
+        # Apply expense deductions
+        for deduction in deductions.get('expenses', []):
+            product = next((p for p in products if p['id'] == deduction['id']), None)
+            if product:
+                product['quantity'] = deduction['after_qty']
+        
+        return True
+    except Exception as e:
+        print(f"Error applying deductions: {e}")
+        return False
+
+@app.route('/api/products/stock-status', methods=['GET', 'OPTIONS'])
+@token_required
+def get_stock_status():
+    """Get detailed stock status for all products including composite deductions"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        products = load_data(PRODUCTS_FILE)
+        account_id = request.user.get('accountId')
+        
+        # Filter by account and build detailed stock view
+        stock_data = []
+        
+        for product in products:
+            if product.get('accountId') != account_id:
+                continue
+            
+            product_info = {
+                'id': product['id'],
+                'name': product['name'],
+                'quantity': float(product.get('quantity', 0)),
+                'unit': product.get('unit', 'pcs'),
+                'price': float(product.get('price', 0)),
+                'cost': float(product.get('cost', 0)),
+                'category': product.get('category', 'general'),
+                'isComposite': product.get('isComposite', False),
+                'expenseOnly': product.get('expenseOnly', False),
+                'visibleToCashier': product.get('visibleToCashier', True)
+            }
+            
+            # Add ingredient information for composite products
+            if product.get('isComposite'):
+                ingredients = product.get('recipe', product.get('ingredients', []))
+                product_info['ingredients'] = []
+                
+                for ingredient in ingredients:
+                    ingredient_id = ingredient.get('productId')
+                    ingredient_product = None
+                    
+                    if ingredient_id:
+                        ingredient_product = next((p for p in products if p['id'] == ingredient_id), None)
+                    elif ingredient.get('name'):
+                        ingredient_product = next((p for p in products if p['name'].lower() == ingredient['name'].lower()), None)
+                    
+                    if ingredient_product:
+                        ingredient_qty = float(ingredient.get('quantity', 0))
+                        product_info['ingredients'].append({
+                            'id': ingredient_product['id'],
+                            'name': ingredient_product['name'],
+                            'quantity_per_unit': ingredient_qty,
+                            'unit': ingredient_product.get('unit', 'pcs'),
+                            'current_stock': float(ingredient_product.get('quantity', 0)),
+                            'type': 'expense' if ingredient_product.get('expenseOnly') else 'raw_material'
+                        })
+            
+            stock_data.append(product_info)
+        
+        return jsonify(stock_data)
+    
+    except Exception as e:
+        print(f"Error fetching stock status: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/sales', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_sales():
+    """Handle sales - GET returns sales list, POST creates sale with atomic stock deduction"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -1189,87 +1965,79 @@ def handle_sales():
         filtered_sales = [s for s in sales if s.get('accountId') == account_id]
         return jsonify(filtered_sales)
     
-    data = request.get_json()
-    products = load_data(PRODUCTS_FILE)
+    # POST - Create new sale with atomic stock deduction
+    try:
+        data = request.get_json()
+        products = load_data(PRODUCTS_FILE)
+        expenses = load_data(EXPENSES_FILE)
+        
+        # Validate request
+        if not data.get('items') or len(data['items']) == 0:
+            return jsonify({'error': 'At least one item is required for a sale'}), 400
+        
+        # ATOMIC VALIDATION: Check all stock before making any changes
+        is_valid, error_msg, deductions = validate_and_deduct_stock(products, expenses, data.get('items', []), None)
+        
+        if not is_valid:
+            return jsonify({
+                'error': error_msg,
+                'message': 'Sale cannot be completed due to insufficient stock'
+            }), 400
+        
+        # ATOMIC DEDUCTION: Apply all deductions at once
+        if not apply_stock_deductions(products, expenses, deductions):
+            return jsonify({
+                'error': 'Failed to apply stock deductions',
+                'message': 'Please try again'
+            }), 500
+        
+        # Save updated products
+        save_data(PRODUCTS_FILE, products)
+        
+        # Create sale record
+        sale = {
+            'id': get_next_id(sales),
+            'items': data['items'],
+            'total': float(data['total']),
+            'discount': float(data.get('discount', 0)),
+            'tax': float(data.get('tax', 0)),
+            'taxType': data.get('taxType', 'exclusive'),
+            'paymentMethod': data.get('paymentMethod', 'cash'),
+            'accountId': request.user['accountId'],
+            'cashierId': request.user['id'],
+            'cashierName': request.user.get('name', 'Unknown'),
+            'stockDeductions': deductions,  # Log deductions for auditing
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        sales.append(sale)
+        save_data(SALES_FILE, sales)
+        
+        # BROADCAST: Notify all dashboards of stock update
+        broadcast_update('STOCK_UPDATED', {
+            'type': 'sale',
+            'sale_id': sale['id'],
+            'deductions': deductions,
+            'updatedProducts': [{
+                'id': p['id'],
+                'name': p['name'],
+                'quantity': p['quantity'],
+                'unit': p.get('unit', 'pcs')
+            } for p in products]
+        })
+        
+        print(f"✅ Sale #{sale['id']} created with {len(deductions['products'])} product deductions")
+        
+        return jsonify({
+            'success': True,
+            'sale': sale,
+            'deductions': deductions,
+            'message': f"Sale recorded successfully. {len(deductions['products'])} items deducted from stock."
+        })
     
-    # Validate that items exist and are valid
-    if not data.get('items') or len(data['items']) == 0:
-        return jsonify({'error': 'At least one item is required for a sale'}), 400
-    
-    # Process sale items - deduct inventory and handle composite products
-    for item in data.get('items', []):
-        product = next((p for p in products if p['id'] == item['productId']), None)
-        if product:
-            # Support both quantity and weight (quantity can be fractional for weight-based products)
-            sold_amount = float(item.get('quantity', item.get('weight', 0)))
-            current_quantity = float(product.get('quantity', 0))
-            
-            # Check for insufficient stock
-            if current_quantity < sold_amount:
-                return jsonify({
-                    'error': f'Insufficient stock for {product["name"]}',
-                    'product': product['name'],
-                    'required': sold_amount,
-                    'available': current_quantity
-                }), 400
-            
-            product['quantity'] = current_quantity - sold_amount
-            
-            # If composite product, deduct ingredients from main stock
-            # Check both 'recipe' (from Recipes.jsx) and 'ingredients' fields
-            ingredients = product.get('recipe', product.get('ingredients', []))
-            if ingredients and len(ingredients) > 0:
-                for ingredient in ingredients:
-                    # Handle both old format (productId) and new format (name)
-                    ingredient_id = ingredient.get('productId')
-                    ingredient_product = None
-                    
-                    if ingredient_id:
-                        ingredient_product = next((p for p in products if p['id'] == ingredient_id), None)
-                    elif ingredient.get('name'):
-                        # Try to find by name if no productId
-                        ingredient_product = next((p for p in products if p['name'].lower() == ingredient['name'].lower()), None)
-                    
-                    if ingredient_product:
-                        ingredient_quantity = float(ingredient.get('quantity', 0))
-                        total_ingredient_needed = ingredient_quantity * sold_amount
-                        ingredient_current = float(ingredient_product.get('quantity', 0))
-                        
-                        # Deduct from ingredient stock
-                        if ingredient_current >= total_ingredient_needed:
-                            ingredient_product['quantity'] = ingredient_current - total_ingredient_needed
-                        else:
-                            # Log warning but don't fail the sale - admin should manage stock
-                            print(f"⚠️  Warning: Insufficient ingredient stock for {ingredient_product['name']}: "
-                                  f"need {total_ingredient_needed}, have {ingredient_current}")
-                            ingredient_product['quantity'] = max(0, ingredient_current - total_ingredient_needed)
-    
-    save_data(PRODUCTS_FILE, products)
-    
-    sale = {
-        'id': get_next_id(sales),
-        'items': data['items'],
-        'total': float(data['total']),
-        'discount': float(data.get('discount', 0)),
-        'tax': float(data.get('tax', 0)),
-        'taxType': data.get('taxType', 'exclusive'),
-        'paymentMethod': data.get('paymentMethod', 'cash'),
-        'accountId': request.user['accountId'],
-        'cashierId': request.user['id'],
-        'cashierName': request.user.get('name', 'Unknown'),
-        'createdAt': datetime.now().isoformat()
-    }
-    
-    sales.append(sale)
-    save_data(SALES_FILE, sales)
-    
-    # Broadcast sale to all connected clients so admin sees it immediately
-    broadcast_update('sale_created', {
-        'sale': sale,
-        'allProducts': products
-    })
-    
-    return jsonify(sale)
+    except Exception as e:
+        print(f"❌ Sales creation error: {str(e)}")
+        return jsonify({'error': 'Failed to create sale', 'message': str(e)}), 500
 
 @app.route('/api/sales/<int:sale_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
