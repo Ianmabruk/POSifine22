@@ -438,8 +438,9 @@ def home():
 
 @app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
+    """Handle user signup"""
     if request.method == 'OPTIONS':
-        return '', 200
+        return jsonify({'status': 'ok'}), 204
     
     try:
         data = request.get_json()
@@ -524,17 +525,18 @@ def signup():
         return jsonify({
             'token': token,
             'user': user_response
-        })
+        }), 200
     except Exception as e:
         import traceback
         error_msg = f"{str(e)} | {traceback.format_exc()}"
-        print(f"Signup error: {error_msg}")
+        print(f"❌ Signup error: {error_msg}")
         return jsonify({'error': 'Signup failed', 'message': str(e)}), 500
 
 @app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
 def login():
+    """Handle user login"""
     if request.method == 'OPTIONS':
-        return '', 200
+        return jsonify({'status': 'ok'}), 204
     
     try:
         data = request.get_json()
@@ -607,11 +609,12 @@ def login():
         return jsonify({
             'token': token,
             'user': user_response
-        })
+        }), 200
     except Exception as e:
         import traceback
         error_msg = f"{str(e)} | {traceback.format_exc()}"
-        print(f"Login error: {error_msg}")
+        print(f"❌ Login error: {error_msg}")
+        return jsonify({'error': 'Login failed', 'message': str(e)}), 500
         return jsonify({'error': 'Login failed', 'message': str(e)}), 500
 
 @app.route('/api/auth/pin-login', methods=['POST', 'OPTIONS'])
