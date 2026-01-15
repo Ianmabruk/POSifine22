@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 # Copy application
 COPY app.py .
+COPY gunicorn.conf.py .
 COPY data/ ./data/
 
 # Create data directory if it doesn't exist
@@ -28,5 +29,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5000
 
-# Run with Gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--worker-class", "sync", "--timeout", "120", "app:app"]
+# Run with Gunicorn using config file
+CMD ["gunicorn", "--config", "gunicorn.conf.py", "app:app"]

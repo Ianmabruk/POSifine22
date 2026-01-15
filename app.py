@@ -112,38 +112,44 @@ print(f"✅ Data files initialized")
 
 # Initialize main admin user if not exists
 def init_main_admin():
-    users = load_data(USERS_FILE)
-    admin_email = 'ianmabruk3@gmail.com'
-    
-    # Check if admin already exists
-    if any(u.get('email') == admin_email for u in users):
-        return
-    
-    # Create main admin user with complete tracking fields
-    main_admin_user = {
-        'id': get_next_id(users),
-        'email': admin_email,
-        'password': 'mabruk2004',
-        'name': 'Ian Mabruk',
-        'role': 'owner',
-        'plan': 'ultra',
-        'planType': 'paid',
-        'accountId': 'main',
-        'active': True,
-        'locked': False,
-        'isMainAdmin': True,
-        'createdAt': datetime.now().isoformat(),
-        'serviceStartDate': datetime.now().isoformat(),
-        'lastActivityDate': datetime.now().isoformat(),
-        'daysUsed': 0,
-        'requestedTrial': False
-    }
-    
-    users.append(main_admin_user)
-    save_data(USERS_FILE, users)
-    print(f"✅ Main admin user created: {admin_email}")
+    try:
+        users = load_data(USERS_FILE)
+        admin_email = 'ianmabruk3@gmail.com'
+        
+        # Check if admin already exists
+        if any(u.get('email') == admin_email for u in users):
+            return
+        
+        # Create main admin user with complete tracking fields
+        main_admin_user = {
+            'id': get_next_id(users),
+            'email': admin_email,
+            'password': 'mabruk2004',
+            'name': 'Ian Mabruk',
+            'role': 'owner',
+            'plan': 'ultra',
+            'planType': 'paid',
+            'accountId': 'main',
+            'active': True,
+            'locked': False,
+            'isMainAdmin': True,
+            'createdAt': datetime.now().isoformat(),
+            'serviceStartDate': datetime.now().isoformat(),
+            'lastActivityDate': datetime.now().isoformat(),
+            'daysUsed': 0,
+            'requestedTrial': False
+        }
+        
+        users.append(main_admin_user)
+        save_data(USERS_FILE, users)
+        print(f"✅ Main admin user created: {admin_email}")
+    except Exception as e:
+        print(f"⚠️  Warning initializing main admin: {e}")
 
-init_main_admin()
+try:
+    init_main_admin()
+except Exception as e:
+    print(f"⚠️  Failed to initialize main admin on startup: {e}")
 
 # PIN Rate Limiting Tracker (in-memory, resets on server restart)
 pin_attempts = defaultdict(lambda: {'count': 0, 'locked_until': None})
