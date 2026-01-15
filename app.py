@@ -97,10 +97,35 @@ app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'ultra-pos-secret-2024')
 # File-based storage - NO DATABASE REQUIRED
 # Use /app/data on Render, or data/ locally
 DATA_DIR = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data'))
-# Fallback to /app/data if directory doesn't exist locally
-if not os.path.exists(DATA_DIR) and os.path.exists('/app'):
-    DATA_DIR = '/app/data'
 
+# Fallback logic: if in /app environment, use /app/data
+if '/app' in os.getcwd() or os.path.exists('/app'):
+    # On Render or similar platform
+    DATA_DIR = os.environ.get('DATA_DIR', '/app/data')
+
+# Ensure DATA_DIR is an absolute path
+DATA_DIR = os.path.abspath(DATA_DIR)
+
+# Create data directory with proper error handling
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    # Test if directory is writable
+    test_file = os.path.join(DATA_DIR, '.write_test')
+    with open(test_file, 'w') as f:
+        f.write('test')
+    os.remove(test_file)
+    print(f"✅ Data directory ready: {DATA_DIR}")
+except PermissionError:
+    # If /app/data not writable, fallback to ./data
+    DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'data'))
+    os.makedirs(DATA_DIR, exist_ok=True)
+    print(f"⚠️  Using fallback data directory: {DATA_DIR}")
+except Exception as e:
+    print(f"⚠️  Warning setting up data directory: {e}")
+    DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'data'))
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+# Define all data file paths
 USERS_FILE = f'{DATA_DIR}/users.json'
 PRODUCTS_FILE = f'{DATA_DIR}/products.json'
 SALES_FILE = f'{DATA_DIR}/sales.json'
@@ -123,6 +148,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 def init_json_file(filepath):
     """Initialize JSON file with empty array if it doesn't exist"""
     try:
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
         if not os.path.exists(filepath):
             with open(filepath, 'w') as f:
                 json.dump([], f)
@@ -132,8 +160,10 @@ def init_json_file(filepath):
             if not content:
                 with open(filepath, 'w') as fw:
                     json.dump([], fw)
+    except PermissionError as e:
+        print(f"⚠️  Permission error initializing {filepath}: {e}")
     except Exception as e:
-        print(f"Error initializing {filepath}: {e}")
+        print(f"⚠️  Error initializing {filepath}: {e}")
 
 def load_data(filename):
     try:
@@ -150,14 +180,18 @@ def get_next_id(data):
     return max([item.get('id', 0) for item in data] + [0]) + 1
 
 # Initialize all data files on startup
-for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
-                 BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
-                 SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE, RAW_MATERIALS_FILE]:
-    init_json_file(filepath)
-
-print(f"✅ Using file storage at: {DATA_DIR}")
-print(f"✅ Data directory exists: {os.path.exists(DATA_DIR)}")
-print(f"✅ Data files initialized")
+try:
+    for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
+                     BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
+                     SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE, RAW_MATERIALS_FILE]:
+        init_json_file(filepath)
+    
+    print(f"✅ Using file storage at: {DATA_DIR}")
+    print(f"✅ Data directory exists: {os.path.exists(DATA_DIR)}")
+    print(f"✅ Data files initialized")
+except Exception as e:
+    print(f"⚠️  Warning during file initialization: {e}")
+    print(f"✅ Using file storage at: {DATA_DIR}")
 
 # Initialize main admin user if not exists
 def init_main_admin():
