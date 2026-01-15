@@ -97,7 +97,7 @@ def get_next_id(data):
 # Initialize all data files on startup
 for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
                  BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
-                 SETTINGS_FILE, REMINDERS_FILE, TIME_ENTRIES_FILE]:
+                 SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE]:
     init_json_file(filepath)
 
 print(f"✅ Using file storage at: {DATA_DIR}")
@@ -710,8 +710,9 @@ def handle_products():
         'image': data.get('image', None),  # Base64 image or URL
         'expenseOnly': data.get('expenseOnly', False),  # Hide from cashier
         'visibleToCashier': data.get('visibleToCashier', True),  # Show to cashier
-        'isComposite': data.get('isComposite', False),
+        'isComposite': data.get('isComposite', False) or bool(data.get('recipe')),  # Auto-set if recipe exists
         'ingredients': data.get('ingredients', []),  # List of {productId, quantity}
+        'recipe': data.get('recipe', []),  # Used by Recipes.jsx - list of ingredients with names/productIds
         'accountId': request.user['accountId'],
         'createdAt': datetime.now().isoformat()
     }
@@ -779,13 +780,13 @@ def update_stock(product_id):
     
     data = request.get_json()
     
-    # Handle different stock update types
+    # Handle different stock update types (support floats for weight-based products)
     if 'quantity' in data:
-        product['quantity'] = int(data['quantity'])
+        product['quantity'] = float(data['quantity'])
     elif 'increment' in data:
-        product['quantity'] = product.get('quantity', 0) + int(data['increment'])
+        product['quantity'] = float(product.get('quantity', 0)) + float(data['increment'])
     elif 'decrement' in data:
-        product['quantity'] = max(0, product.get('quantity', 0) - int(data['decrement']))
+        product['quantity'] = max(0, float(product.get('quantity', 0)) - float(data['decrement']))
     
     save_data(PRODUCTS_FILE, products)
     
@@ -1188,21 +1189,57 @@ def handle_sales():
     data = request.get_json()
     products = load_data(PRODUCTS_FILE)
     
+    # Validate that items exist and are valid
+    if not data.get('items') or len(data['items']) == 0:
+        return jsonify({'error': 'At least one item is required for a sale'}), 400
+    
     # Process sale items - deduct inventory and handle composite products
     for item in data.get('items', []):
         product = next((p for p in products if p['id'] == item['productId']), None)
         if product:
             # Support both quantity and weight (quantity can be fractional for weight-based products)
             sold_amount = float(item.get('quantity', item.get('weight', 0)))
-            product['quantity'] = float(product.get('quantity', 0)) - sold_amount
+            current_quantity = float(product.get('quantity', 0))
             
-            # If composite product, deduct ingredients
-            if product.get('isComposite'):
-                for ingredient in product.get('ingredients', []):
-                    ingredient_product = next((p for p in products if p['id'] == ingredient['productId']), None)
+            # Check for insufficient stock
+            if current_quantity < sold_amount:
+                return jsonify({
+                    'error': f'Insufficient stock for {product["name"]}',
+                    'product': product['name'],
+                    'required': sold_amount,
+                    'available': current_quantity
+                }), 400
+            
+            product['quantity'] = current_quantity - sold_amount
+            
+            # If composite product, deduct ingredients from main stock
+            # Check both 'recipe' (from Recipes.jsx) and 'ingredients' fields
+            ingredients = product.get('recipe', product.get('ingredients', []))
+            if ingredients and len(ingredients) > 0:
+                for ingredient in ingredients:
+                    # Handle both old format (productId) and new format (name)
+                    ingredient_id = ingredient.get('productId')
+                    ingredient_product = None
+                    
+                    if ingredient_id:
+                        ingredient_product = next((p for p in products if p['id'] == ingredient_id), None)
+                    elif ingredient.get('name'):
+                        # Try to find by name if no productId
+                        ingredient_product = next((p for p in products if p['name'].lower() == ingredient['name'].lower()), None)
+                    
                     if ingredient_product:
                         ingredient_quantity = float(ingredient.get('quantity', 0))
-                        ingredient_product['quantity'] = float(ingredient_product.get('quantity', 0)) - (ingredient_quantity * sold_amount)
+                        total_ingredient_needed = ingredient_quantity * sold_amount
+                        ingredient_current = float(ingredient_product.get('quantity', 0))
+                        
+                        # Deduct from ingredient stock
+                        if ingredient_current >= total_ingredient_needed:
+                            ingredient_product['quantity'] = ingredient_current - total_ingredient_needed
+                        else:
+                            # Log warning but don't fail the sale - admin should manage stock
+                            print(f"⚠️  Warning: Insufficient ingredient stock for {ingredient_product['name']}: "
+                                  f"need {total_ingredient_needed}, have {ingredient_current}")
+                            ingredient_product['quantity'] = max(0, ingredient_current - total_ingredient_needed)
     
     save_data(PRODUCTS_FILE, products)
     
@@ -1895,6 +1932,11 @@ def clear_data():
         if clear_type in ['all']:
             save_data(REMINDERS_FILE, [])
             files_cleared.append('reminders')
+        
+        # Clear recipes/BOM data
+        if clear_type in ['products', 'all']:
+            save_data(RECIPES_FILE, [])
+            files_cleared.append('recipes')
         
         # Clear notes/activities
         if clear_type in ['all']:
