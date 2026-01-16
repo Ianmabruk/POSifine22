@@ -78,13 +78,15 @@ sock = Sock(app)
 # Track connected WebSocket clients for broadcasting
 connected_clients = []
 
-def broadcast_update(message_type, data):
-    """Broadcast updates to all connected WebSocket clients"""
+def broadcast_update(message_type, data, account_id=None):
+    """Broadcast updates to all connected WebSocket clients (optionally filtered by account)"""
     message = {'type': message_type, 'data': data, 'timestamp': datetime.now().isoformat()}
     disconnected = []
     for client in connected_clients:
         try:
-            client.send(json.dumps(message))
+            # If account_id specified, send to that account's dashboards only
+            if account_id is None or getattr(client, 'account_id', None) == account_id:
+                client.send(json.dumps(message))
         except Exception:
             disconnected.append(client)
     # Remove disconnected clients
@@ -1422,14 +1424,15 @@ def handle_products():
     products.append(product)
     save_data(PRODUCTS_FILE, products)
     
-    # OPTIMIZED BROADCAST: Lightweight product creation notification
+    # OPTIMIZED BROADCAST: Lightweight product creation notification to all dashboards in account
+    account_id = request.user['accountId']
     broadcast_update('PRODUCT_CREATED', {
         'id': product['id'],
         'name': product['name'],
         'quantity': product['quantity'],
         'unit': product['unit'],
         'price': product['price']
-    })
+    }, account_id=account_id)
     
     print(f"✅ Product created: {product['name']} (ID: {product['id']}, {product['quantity']}{product['unit']})")
     
@@ -1497,13 +1500,14 @@ def update_stock(product_id):
     
     save_data(PRODUCTS_FILE, products)
     
-    # OPTIMIZED BROADCAST: Minimal stock update payload
+    # OPTIMIZED BROADCAST: Minimal stock update payload to all dashboards in account
+    account_id = request.user['accountId']
     broadcast_update('INVENTORY_UPDATED', {
         'productId': product_id,
         'newQuantity': product['quantity'],
         'unit': product['unit'],
         'timestamp': datetime.now().isoformat()
-    })
+    }, account_id=account_id)
     
     print(f"✅ Stock updated: {product['name']} → {product['quantity']}{product['unit']}")
     
@@ -2115,13 +2119,15 @@ def handle_sales():
         sales.append(sale)
         save_data(SALES_FILE, sales)
         
-        # OPTIMIZED BROADCAST: Fast 3-tier notification to all dashboards
+        # OPTIMIZED BROADCAST: Fast 3-tier notification to all dashboards in account
+        account_id = request.user['accountId']
+        
         # Tier 1: Immediate deduction notification
         broadcast_update('SALE_COMPLETED', {
             'saleId': sale['id'],
             'deductions': deductions,
             'timestamp': datetime.now().isoformat()
-        })
+        }, account_id=account_id)
         
         # Tier 2: Stock sync for both dashboards
         broadcast_update('INVENTORY_SYNC', {
@@ -2131,7 +2137,7 @@ def handle_sales():
                 'quantity': p['quantity'],
                 'unit': p.get('unit', 'pcs')
             } for p in products]
-        })
+        }, account_id=account_id)
         
         print(f"✅ Sale #{sale['id']} recorded with {len(deductions['products'])} deductions (async broadcast)")
         
@@ -2145,6 +2151,109 @@ def handle_sales():
     except Exception as e:
         print(f"❌ Sales creation error: {str(e)}")
         return jsonify({'error': 'Failed to create sale', 'message': str(e)}), 500
+
+@app.route('/api/admin-complete-sale', methods=['POST', 'OPTIONS'])
+@token_required
+def admin_complete_sale():
+    """Admin dashboard - Complete sale with IMMEDIATE sharp stock deduction on all dashboards"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        start_time = time.time()
+        data = request.get_json()
+        products = load_data(PRODUCTS_FILE)
+        expenses = load_data(EXPENSES_FILE)
+        sales = load_data(SALES_FILE)
+        
+        # Validate request
+        if not data.get('items') or len(data['items']) == 0:
+            return jsonify({'error': 'At least one item is required for a sale'}), 400
+        
+        # ATOMIC VALIDATION: Check all stock before making any changes
+        is_valid, error_msg, deductions = validate_and_deduct_stock(products, expenses, data.get('items', []), None)
+        
+        if not is_valid:
+            return jsonify({
+                'error': error_msg,
+                'message': 'Sale cannot be completed due to insufficient stock'
+            }), 400
+        
+        # ATOMIC DEDUCTION: Apply all deductions at once
+        if not apply_stock_deductions(products, expenses, deductions):
+            return jsonify({
+                'error': 'Failed to apply stock deductions',
+                'message': 'Please try again'
+            }), 500
+        
+        # Save updated products IMMEDIATELY
+        save_data(PRODUCTS_FILE, products)
+        
+        # Create sale record
+        sale = {
+            'id': get_next_id(sales),
+            'items': data['items'],
+            'total': float(data['total']),
+            'discount': float(data.get('discount', 0)),
+            'tax': float(data.get('tax', 0)),
+            'taxType': data.get('taxType', 'exclusive'),
+            'paymentMethod': data.get('paymentMethod', 'cash'),
+            'accountId': request.user['accountId'],
+            'cashierId': request.user['id'],
+            'cashierName': request.user.get('name', 'Unknown'),
+            'completedBy': 'admin',  # Mark as admin-completed
+            'stockDeductions': deductions,
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        sales.append(sale)
+        save_data(SALES_FILE, sales)
+        
+        # SHARP BROADCAST: IMMEDIATE 4-tier account-wide notification for STRICT sync
+        account_id = request.user['accountId']
+        
+        # Tier 1: IMMEDIATE - Deduction alert to CASHIER dashboard
+        broadcast_update('SHARP_SALE_ALERT', {
+            'saleId': sale['id'],
+            'deductions': deductions,
+            'saleTotal': sale['total'],
+            'completedAt': datetime.now().isoformat(),
+            'source': 'admin'
+        }, account_id=account_id)
+        
+        # Tier 2: IMMEDIATE - Stock update for ADMIN dashboard
+        broadcast_update('SHARP_INVENTORY_UPDATE', {
+            'updatedProducts': [{
+                'id': p['id'],
+                'name': p['name'],
+                'quantity': p['quantity'],
+                'unit': p.get('unit', 'pcs'),
+                'deducted': next((d['deducted'] for d in deductions['products'] if d.get('id') == p['id']), 0)
+            } for p in products],
+            'timestamp': datetime.now().isoformat()
+        }, account_id=account_id)
+        
+        # Tier 3: IMMEDIATE - Dashboard notification
+        broadcast_update('SALE_COMPLETED_ADMIN', {
+            'saleId': sale['id'],
+            'totalItems': len(deductions['products']),
+            'totalAmount': sale['total']
+        }, account_id=account_id)
+        
+        elapsed = time.time() - start_time
+        print(f"✅ ADMIN Sale #{sale['id']} completed in {elapsed*1000:.0f}ms - SHARP deduction to all dashboards")
+        
+        return jsonify({
+            'success': True,
+            'sale': sale,
+            'deductions': deductions,
+            'processingTime': f"{elapsed*1000:.0f}ms",
+            'message': f"Sale #{sale['id']} completed and SHARP deducted on all dashboards!"
+        })
+    
+    except Exception as e:
+        print(f"❌ Admin sale error: {str(e)}")
+        return jsonify({'error': 'Failed to complete sale', 'message': str(e)}), 500
 
 @app.route('/api/sales/<int:sale_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
@@ -2241,7 +2350,8 @@ def clock_in():
         time_entries.append(time_entry)
         save_data(TIME_ENTRIES_FILE, time_entries)
         
-        # INSTANT BROADCAST: Notify admin time tracker immediately
+        # INSTANT BROADCAST: Notify admin time tracker immediately (account-wide)
+        account_id = request.user['accountId']
         broadcast_update('CASHIER_CLOCKED_IN', {
             'cashier': {
                 'id': user_id,
@@ -2250,7 +2360,7 @@ def clock_in():
                 'date': today
             },
             'timestamp': datetime.now().isoformat()
-        })
+        }, account_id=account_id)
         
         print(f"✅ {request.user.get('name')} clocked in at {time_entry['clockInTime']}")
         
@@ -2292,7 +2402,8 @@ def clock_out():
         
         save_data(TIME_ENTRIES_FILE, time_entries)
         
-        # INSTANT BROADCAST: Notify admin time tracker
+        # INSTANT BROADCAST: Notify admin time tracker (account-wide)
+        account_id = request.user['accountId']
         broadcast_update('CASHIER_CLOCKED_OUT', {
             'cashier': {
                 'id': user_id,
@@ -2301,7 +2412,7 @@ def clock_out():
                 'date': today
             },
             'timestamp': datetime.now().isoformat()
-        })
+        }, account_id=account_id)
         
         print(f"✅ {active_entry.get('userName')} clocked out after {duration_minutes} minutes")
         
@@ -2358,12 +2469,62 @@ def stats():
         'productCount': len(filtered_products)
     })
 
-@app.route('/api/reminders/today', methods=['GET', 'OPTIONS'])
+@app.route('/api/reminders/today', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def reminders_today():
+    """Get reminders or send a reminder message to all dashboards in account"""
     if request.method == 'OPTIONS':
         return '', 200
-    return jsonify([])
+    
+    reminders = load_data(REMINDERS_FILE)
+    account_id = request.user.get('accountId')
+    
+    if request.method == 'GET':
+        # Get today's reminders for this account
+        today = datetime.now().date().isoformat()
+        filtered_reminders = [r for r in reminders 
+                            if r.get('accountId') == account_id 
+                            and r.get('date', '').startswith(today)]
+        return jsonify(filtered_reminders)
+    
+    # POST - Send reminder message to all dashboards in account
+    try:
+        data = request.get_json()
+        reminder = {
+            'id': get_next_id(reminders),
+            'accountId': account_id,
+            'message': data.get('message', ''),
+            'priority': data.get('priority', 'normal'),  # 'low', 'normal', 'high', 'urgent'
+            'target': data.get('target', 'all'),  # 'all', 'cashiers', 'admins'
+            'sentBy': request.user.get('name', 'Unknown'),
+            'date': datetime.now().date().isoformat(),
+            'timestamp': datetime.now().isoformat(),
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        reminders.append(reminder)
+        save_data(REMINDERS_FILE, reminders)
+        
+        # BROADCAST: Send reminder to all dashboards in this account IMMEDIATELY
+        broadcast_update('REMINDER_ALERT', {
+            'id': reminder['id'],
+            'message': reminder['message'],
+            'priority': reminder['priority'],
+            'sentBy': reminder['sentBy'],
+            'timestamp': reminder['timestamp']
+        }, account_id=account_id)
+        
+        print(f"✅ Reminder sent to all dashboards in account {account_id}: {reminder['message']}")
+        
+        return jsonify({
+            'success': True,
+            'reminder': reminder,
+            'message': 'Reminder delivered to all dashboards'
+        })
+    
+    except Exception as e:
+        print(f"❌ Reminder error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
