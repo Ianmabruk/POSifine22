@@ -1422,11 +1422,16 @@ def handle_products():
     products.append(product)
     save_data(PRODUCTS_FILE, products)
     
-    # Broadcast product creation to all connected clients
-    broadcast_update('product_created', {
-        'product': product,
-        'allProducts': products
+    # OPTIMIZED BROADCAST: Lightweight product creation notification
+    broadcast_update('PRODUCT_CREATED', {
+        'id': product['id'],
+        'name': product['name'],
+        'quantity': product['quantity'],
+        'unit': product['unit'],
+        'price': product['price']
     })
+    
+    print(f"✅ Product created: {product['name']} (ID: {product['id']}, {product['quantity']}{product['unit']})")
     
     return jsonify(product)
 
@@ -1492,12 +1497,17 @@ def update_stock(product_id):
     
     save_data(PRODUCTS_FILE, products)
     
-    # Broadcast stock update to all connected clients
-    broadcast_update('stock_updated', {
-        'id': product_id,
-        'product': product,
-        'allProducts': products
+    # OPTIMIZED BROADCAST: Minimal stock update payload
+    broadcast_update('INVENTORY_UPDATED', {
+        'productId': product_id,
+        'newQuantity': product['quantity'],
+        'unit': product['unit'],
+        'timestamp': datetime.now().isoformat()
     })
+    
+    print(f"✅ Stock updated: {product['name']} → {product['quantity']}{product['unit']}")
+    
+    return jsonify(product)
     
     return jsonify(product)
 
@@ -2105,11 +2115,16 @@ def handle_sales():
         sales.append(sale)
         save_data(SALES_FILE, sales)
         
-        # BROADCAST: Notify all dashboards of stock update
-        broadcast_update('STOCK_UPDATED', {
-            'type': 'sale',
-            'sale_id': sale['id'],
+        # OPTIMIZED BROADCAST: Fast 3-tier notification to all dashboards
+        # Tier 1: Immediate deduction notification
+        broadcast_update('SALE_COMPLETED', {
+            'saleId': sale['id'],
             'deductions': deductions,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        # Tier 2: Stock sync for both dashboards
+        broadcast_update('INVENTORY_SYNC', {
             'updatedProducts': [{
                 'id': p['id'],
                 'name': p['name'],
@@ -2118,7 +2133,7 @@ def handle_sales():
             } for p in products]
         })
         
-        print(f"✅ Sale #{sale['id']} created with {len(deductions['products'])} product deductions")
+        print(f"✅ Sale #{sale['id']} recorded with {len(deductions['products'])} deductions (async broadcast)")
         
         return jsonify({
             'success': True,
@@ -2191,7 +2206,7 @@ def bulk_delete_sales():
 @app.route('/api/clock-in', methods=['POST', 'OPTIONS'])
 @token_required
 def clock_in():
-    """Cashier clock-in to start their shift"""
+    """Cashier clock-in to start their shift - INSTANT ADMIN VISIBILITY"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -2219,17 +2234,25 @@ def clock_in():
             'clockInTime': datetime.now().isoformat(),
             'clockOutTime': None,
             'duration': None,
+            'status': 'active',
             'notes': request.get_json().get('notes') if request.get_json() else None
         }
         
         time_entries.append(time_entry)
         save_data(TIME_ENTRIES_FILE, time_entries)
         
-        # Broadcast clock-in to all connected clients
-        broadcast_update('cashier_clocked_in', {
-            'entry': time_entry,
-            'timeEntries': [t for t in time_entries if t.get('accountId') == request.user['accountId']]
+        # INSTANT BROADCAST: Notify admin time tracker immediately
+        broadcast_update('CASHIER_CLOCKED_IN', {
+            'cashier': {
+                'id': user_id,
+                'name': request.user.get('name', 'Unknown'),
+                'clockInTime': time_entry['clockInTime'],
+                'date': today
+            },
+            'timestamp': datetime.now().isoformat()
         })
+        
+        print(f"✅ {request.user.get('name')} clocked in at {time_entry['clockInTime']}")
         
         return jsonify(time_entry)
     except Exception as e:
@@ -2239,7 +2262,7 @@ def clock_in():
 @app.route('/api/clock-out', methods=['POST', 'OPTIONS'])
 @token_required
 def clock_out():
-    """Cashier clock-out to end their shift"""
+    """Cashier clock-out to end their shift - INSTANT ADMIN UPDATE"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -2260,6 +2283,7 @@ def clock_out():
         # Update clock-out time and calculate duration
         clock_out_time = datetime.now()
         active_entry['clockOutTime'] = clock_out_time.isoformat()
+        active_entry['status'] = 'clocked_out'
         
         # Calculate duration in minutes
         clock_in_time = datetime.fromisoformat(active_entry['clockInTime'])
@@ -2268,11 +2292,18 @@ def clock_out():
         
         save_data(TIME_ENTRIES_FILE, time_entries)
         
-        # Broadcast clock-out to all connected clients
-        broadcast_update('cashier_clocked_out', {
-            'entry': active_entry,
-            'timeEntries': [t for t in time_entries if t.get('accountId') == request.user['accountId']]
+        # INSTANT BROADCAST: Notify admin time tracker
+        broadcast_update('CASHIER_CLOCKED_OUT', {
+            'cashier': {
+                'id': user_id,
+                'name': active_entry.get('userName', 'Unknown'),
+                'duration': duration_minutes,
+                'date': today
+            },
+            'timestamp': datetime.now().isoformat()
         })
+        
+        print(f"✅ {active_entry.get('userName')} clocked out after {duration_minutes} minutes")
         
         return jsonify(active_entry)
     except Exception as e:

@@ -3,6 +3,10 @@ set -e
 
 echo "🚀 Starting POSifine Backend..."
 
+# Get script directory
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+DATA_DIR="${SCRIPT_DIR}/data"
+
 # Kill any existing process on port 5000
 if lsof -Pi :5000 -sTCP:LISTEN -t >/dev/null 2>&1; then
     echo "⚠️  Port 5000 in use. Killing old process..."
@@ -19,29 +23,29 @@ echo "✅ Testing app import..."
 python3 -c "from app import app; print('✅ App imports OK')" 2>&1
 
 # Create data directory
-mkdir -p /app/data
+mkdir -p "${DATA_DIR}"
 
 # Initialize data files if they don't exist
-touch /app/data/users.json
-touch /app/data/products.json
-touch /app/data/sales.json
-touch /app/data/expenses.json
-touch /app/data/discounts.json
-touch /app/data/credit_requests.json
-touch /app/data/reminders.json
-touch /app/data/settings.json
-touch /app/data/batches.json
+touch "${DATA_DIR}/users.json"
+touch "${DATA_DIR}/products.json"
+touch "${DATA_DIR}/sales.json"
+touch "${DATA_DIR}/expenses.json"
+touch "${DATA_DIR}/discounts.json"
+touch "${DATA_DIR}/credit_requests.json"
+touch "${DATA_DIR}/reminders.json"
+touch "${DATA_DIR}/settings.json"
+touch "${DATA_DIR}/batches.json"
 
 # Initialize with empty arrays/objects if needed
 for file in users products sales expenses discounts credit_requests reminders batches; do
-    if [ ! -s /app/data/${file}.json ] || ! grep -q "^\[" /app/data/${file}.json; then
-        echo '[]' > /app/data/${file}.json
+    if [ ! -s "${DATA_DIR}/${file}.json" ] || ! grep -q "^\[" "${DATA_DIR}/${file}.json"; then
+        echo '[]' > "${DATA_DIR}/${file}.json"
     fi
 done
 
 # Settings file needs to be an object
-if [ ! -s /app/data/settings.json ] || ! grep -q "^{" /app/data/settings.json; then
-    echo '{}' > /app/data/settings.json
+if [ ! -s "${DATA_DIR}/settings.json" ] || ! grep -q "^{" "${DATA_DIR}/settings.json"; then
+    echo '{}' > "${DATA_DIR}/settings.json"
 fi
 
 # Get PORT from environment or default to 5000
