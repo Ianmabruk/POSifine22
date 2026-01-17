@@ -2133,6 +2133,11 @@ def handle_sales():
     try:
         start_time = time.time()
         data = request.get_json()
+        
+        if not data:
+            print("❌ No JSON data in request")
+            return jsonify({'error': 'No data provided', 'message': 'Request body is empty'}), 400
+        
         products = load_data(PRODUCTS_FILE)
         expenses = load_data(EXPENSES_FILE)
         
@@ -2215,6 +2220,7 @@ def handle_sales():
             'deductions': deductions,
             'processingTime': f"{elapsed_ms:.0f}ms",
             'lowStockWarnings': warnings,
+            'updatedProducts': updated_products,  # Include updated products in response
             'message': f"Sale completed in {elapsed_ms:.0f}ms ✓"
         })
     
@@ -2324,6 +2330,7 @@ def admin_complete_sale():
             'deductions': deductions,
             'processingTime': f"{elapsed_ms:.0f}ms",
             'lowStockWarnings': warnings,
+            'updatedProducts': [p for p in products if p.get('accountId') == request.user['accountId']],  # Include updated products
             'message': f"Sale #{sale['id']} completed in {elapsed_ms:.0f}ms ✓"
         })
     
