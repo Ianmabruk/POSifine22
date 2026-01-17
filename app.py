@@ -734,7 +734,6 @@ def login():
         error_msg = f"{str(e)} | {traceback.format_exc()}"
         print(f"❌ Login error: {error_msg}")
         return jsonify({'error': 'Login failed', 'message': str(e)}), 500
-        return jsonify({'error': 'Login failed', 'message': str(e)}), 500
 
 @app.route('/api/auth/pin-login', methods=['POST', 'OPTIONS'])
 def pin_login():
@@ -1509,7 +1508,7 @@ def handle_products():
     
     # OPTIMIZED BROADCAST: Lightweight product creation notification to all dashboards in account
     account_id = request.user['accountId']
-    broadcast_update('PRODUCT_CREATED', {
+    broadcast_update('product_created', {
         'id': product['id'],
         'name': product['name'],
         'quantity': product['quantity'],
@@ -1585,7 +1584,7 @@ def update_stock(product_id):
     
     # OPTIMIZED BROADCAST: Minimal stock update payload to all dashboards in account
     account_id = request.user['accountId']
-    broadcast_update('INVENTORY_UPDATED', {
+    broadcast_update('stock_updated', {
         'productId': product_id,
         'newQuantity': product['quantity'],
         'unit': product['unit'],
@@ -1593,8 +1592,6 @@ def update_stock(product_id):
     }, account_id=account_id)
     
     print(f"✅ Stock updated: {product['name']} → {product['quantity']}{product['unit']}")
-    
-    return jsonify(product)
     
     return jsonify(product)
 
@@ -2188,6 +2185,10 @@ def handle_sales():
         
         elapsed_ms = (time.time() - start_time) * 1000
         
+        # Warn if processing took too long
+        if elapsed_ms > 5000:
+            print(f"⚠️ WARNING: Sale processing took {elapsed_ms:.0f}ms (slow database?)")
+        
         # Check for low stock warnings
         warnings = check_low_stock_warnings(products, request.user['accountId'])
         
@@ -2197,7 +2198,7 @@ def handle_sales():
         # Get updated products to send to connected clients
         updated_products = [p for p in products if p.get('accountId') == account_id]
         
-        broadcast_update('SALE_COMPLETED', {
+        broadcast_update('sale_completed', {
             'saleId': sale['id'],
             'deductions': deductions,
             'timestamp': datetime.now().isoformat(),
@@ -2285,6 +2286,10 @@ def admin_complete_sale():
         
         elapsed_ms = (time.time() - start_time) * 1000
         
+        # Warn if processing took too long
+        if elapsed_ms > 5000:
+            print(f"⚠️ WARNING: Sale processing took {elapsed_ms:.0f}ms (slow database?)")
+        
         # Check for low stock warnings
         warnings = check_low_stock_warnings(products, request.user['accountId'])
         
@@ -2292,21 +2297,23 @@ def admin_complete_sale():
         account_id = request.user['accountId']
         
         # Notify cashier dashboard of immediate deduction
-        broadcast_update('SHARP_DEDUCTION_ALERT', {
+        broadcast_update('sale_completed', {
             'saleId': sale['id'],
             'deductions': deductions,
             'source': 'admin',
             'timestamp': datetime.now().isoformat(),
-            'lowStockWarnings': warnings if warnings else None
+            'lowStockWarnings': warnings if warnings else None,
+            'updatedProducts': [p for p in products if p.get('accountId') == account_id]
         }, account_id=account_id)
         
         # Notify admin dashboard of completed sale
-        broadcast_update('ADMIN_SALE_COMPLETED', {
+        broadcast_update('admin_sale_completed', {
             'saleId': sale['id'],
             'totalItems': len(deductions['products']),
             'totalAmount': sale['total'],
             'processingTime': f"{elapsed_ms:.0f}ms",
-            'lowStockWarnings': warnings if warnings else None
+            'lowStockWarnings': warnings if warnings else None,
+            'updatedProducts': [p for p in products if p.get('accountId') == account_id]
         }, account_id=account_id)
         
         print(f"✅ Admin Sale #{sale['id']} completed in {elapsed_ms:.0f}ms")
@@ -3147,7 +3154,7 @@ def clock_in():
         # Check if user already has an active clock-in
         active_entry = next((e for e in clock_entries 
                            if e.get('userId') == request.user['id'] 
-                           and e.get('status') == 'IN'
+                           and (e.get('status') == 'IN' or e.get('status') == 'clocked_in')
                            and not e.get('clockOut')), None)
         
         if active_entry:
@@ -3194,7 +3201,7 @@ def clock_out():
         # Find active clock entry for this user
         active_entry = next((e for e in clock_entries 
                            if e.get('userId') == request.user['id'] 
-                           and e.get('status') == 'IN'
+                           and (e.get('status') == 'IN' or e.get('status') == 'clocked_in')
                            and not e.get('clockOut')), None)
         
         if not active_entry:
