@@ -143,6 +143,7 @@ REMINDERS_FILE = f'{DATA_DIR}/reminders.json'
 RECIPES_FILE = f'{DATA_DIR}/recipes.json'
 NOTES_FILE = f'{DATA_DIR}/cashier_notes.json'
 TIME_ENTRIES_FILE = f'{DATA_DIR}/time_entries.json'
+VENDORS_FILE = f'{DATA_DIR}/vendors.json'
 RAW_MATERIALS_FILE = f'{DATA_DIR}/raw_materials.json'
 SUBSCRIPTIONS_FILE = f'{DATA_DIR}/subscriptions.json'
 SUBSCRIPTION_PLANS_FILE = f'{DATA_DIR}/subscription_plans.json'
@@ -244,7 +245,7 @@ def create_auto_expenses_for_sale(deductions, products, expenses, account_id):
 try:
     for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
                      BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
-                     SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE, RAW_MATERIALS_FILE, CLOCK_ENTRIES_FILE]:
+                     SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE, RAW_MATERIALS_FILE, CLOCK_ENTRIES_FILE, VENDORS_FILE]:
         init_json_file(filepath)
     
     print(f"✅ Using file storage at: {DATA_DIR}")
@@ -494,21 +495,30 @@ def products_ws(ws):
         return
 
     try:
-        jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-    except Exception:
+        decoded = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        # Extract accountId from token for message filtering
+        account_id = decoded.get('accountId')
+        if not account_id:
+            ws.send(json.dumps({'error': 'Invalid token - no accountId'}))
+            return
+    except Exception as e:
         try:
             ws.send(json.dumps({'error': 'Invalid token'}))
         except Exception:
             pass
         return
 
+    # Store account_id on the WebSocket object for filtering
+    ws.account_id = account_id
+    
     # Register this client for broadcasts
     connected_clients.append(ws)
     
-    # Send current products on connect
+    # Send current products on connect filtered by accountId
     products = load_data(PRODUCTS_FILE)
+    filtered_products = [p for p in products if p.get('accountId') == account_id]
     try:
-        ws.send(json.dumps({'type': 'initial', 'products': products}))
+        ws.send(json.dumps({'type': 'initial', 'products': filtered_products}))
         while True:
             time.sleep(10)
             try:
@@ -2181,15 +2191,19 @@ def handle_sales():
         # Check for low stock warnings
         warnings = check_low_stock_warnings(products, request.user['accountId'])
         
-        # EFFICIENT BROADCAST: Single notification with minimal payload
+        # EFFICIENT BROADCAST: Single notification with updated products list
         account_id = request.user['accountId']
+        
+        # Get updated products to send to connected clients
+        updated_products = [p for p in products if p.get('accountId') == account_id]
         
         broadcast_update('SALE_COMPLETED', {
             'saleId': sale['id'],
             'deductions': deductions,
             'timestamp': datetime.now().isoformat(),
             'processingTime': f"{elapsed_ms:.0f}ms",
-            'lowStockWarnings': warnings if warnings else None
+            'lowStockWarnings': warnings if warnings else None,
+            'updatedProducts': updated_products  # Send updated product list for UI refresh
         }, account_id=account_id)
         
         print(f"✅ Sale #{sale['id']} completed in {elapsed_ms:.0f}ms - stock auto-deducted")
@@ -2597,6 +2611,101 @@ def discounts_endpoint():
         save_data(DISCOUNTS_FILE, discounts)
         broadcast_update('discount_updated', {'discounts': discounts})
         return jsonify({'status': 'deleted'})
+
+@app.route('/api/vendors', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_vendors():
+    """Handle vendor management - GET returns vendors list, POST creates vendor"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    vendors = load_data(VENDORS_FILE)
+    
+    if request.method == 'GET':
+        # Filter vendors by accountId for data isolation
+        account_id = request.user.get('accountId')
+        filtered_vendors = [v for v in vendors if v.get('accountId') == account_id]
+        return jsonify(filtered_vendors)
+    
+    # POST - Create new vendor
+    try:
+        data = request.get_json()
+        
+        if not data.get('name'):
+            return jsonify({'error': 'Vendor name is required'}), 400
+        
+        vendor = {
+            'id': get_next_id(vendors),
+            'name': data.get('name'),
+            'email': data.get('email', ''),
+            'phone': data.get('phone', ''),
+            'address': data.get('address', ''),
+            'city': data.get('city', ''),
+            'country': data.get('country', ''),
+            'products': data.get('products', ''),
+            'accountId': request.user['accountId'],
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        vendors.append(vendor)
+        save_data(VENDORS_FILE, vendors)
+        
+        return jsonify(vendor), 201
+    
+    except Exception as e:
+        print(f"❌ Vendor creation error: {str(e)}")
+        return jsonify({'error': 'Failed to create vendor', 'message': str(e)}), 500
+
+@app.route('/api/vendors/<int:vendor_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_vendor(vendor_id):
+    """Handle individual vendor operations"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    vendors = load_data(VENDORS_FILE)
+    vendor = next((v for v in vendors if v['id'] == vendor_id), None)
+    
+    if not vendor:
+        return jsonify({'error': 'Vendor not found'}), 404
+    
+    # Check account isolation
+    if vendor.get('accountId') != request.user.get('accountId'):
+        return jsonify({'error': 'Access denied'}), 403
+    
+    if request.method == 'GET':
+        return jsonify(vendor)
+    
+    if request.method == 'PUT':
+        try:
+            data = request.get_json()
+            
+            # Update allowed fields
+            vendor['name'] = data.get('name', vendor['name'])
+            vendor['email'] = data.get('email', vendor['email'])
+            vendor['phone'] = data.get('phone', vendor['phone'])
+            vendor['address'] = data.get('address', vendor['address'])
+            vendor['city'] = data.get('city', vendor['city'])
+            vendor['country'] = data.get('country', vendor['country'])
+            vendor['products'] = data.get('products', vendor['products'])
+            vendor['updatedAt'] = datetime.now().isoformat()
+            
+            save_data(VENDORS_FILE, vendors)
+            return jsonify(vendor)
+        
+        except Exception as e:
+            print(f"❌ Vendor update error: {str(e)}")
+            return jsonify({'error': 'Failed to update vendor'}), 500
+    
+    if request.method == 'DELETE':
+        try:
+            vendors = [v for v in vendors if v['id'] != vendor_id]
+            save_data(VENDORS_FILE, vendors)
+            return jsonify({'status': 'deleted'})
+        
+        except Exception as e:
+            print(f"❌ Vendor deletion error: {str(e)}")
+            return jsonify({'error': 'Failed to delete vendor'}), 500
 
 @app.route('/api/raw-materials', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
