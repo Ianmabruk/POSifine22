@@ -2122,7 +2122,7 @@ def handle_sales():
             'sale': sale,
             'deductions': deductions,
             'processingTime': f"{elapsed_ms:.0f}ms",
-            'lowStockWarnings': warnings
+            'lowStockWarnings': warnings,
             'message': f"Sale completed in {elapsed_ms:.0f}ms ✓"
         })
     
