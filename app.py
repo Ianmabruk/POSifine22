@@ -146,6 +146,7 @@ TIME_ENTRIES_FILE = f'{DATA_DIR}/time_entries.json'
 RAW_MATERIALS_FILE = f'{DATA_DIR}/raw_materials.json'
 SUBSCRIPTIONS_FILE = f'{DATA_DIR}/subscriptions.json'
 SUBSCRIPTION_PLANS_FILE = f'{DATA_DIR}/subscription_plans.json'
+CLOCK_ENTRIES_FILE = f'{DATA_DIR}/clock_entries.json'
 
 # Ensure data directory exists and initialize empty JSON files
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -243,7 +244,7 @@ def create_auto_expenses_for_sale(deductions, products, expenses, account_id):
 try:
     for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
                      BATCHES_FILE, DISCOUNTS_FILE, CREDIT_REQUESTS_FILE, 
-                     SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE, RAW_MATERIALS_FILE]:
+                     SETTINGS_FILE, REMINDERS_FILE, RECIPES_FILE, TIME_ENTRIES_FILE, RAW_MATERIALS_FILE, CLOCK_ENTRIES_FILE]:
         init_json_file(filepath)
     
     print(f"✅ Using file storage at: {DATA_DIR}")
@@ -3150,6 +3151,171 @@ def clear_data():
     except Exception as e:
         print(f"Clear data error: {str(e)}")
         return jsonify({'error': 'Failed to clear data', 'message': str(e)}), 500
+
+# ============================================================
+# CLOCK-IN / CLOCK-OUT TRACKING
+# ============================================================
+
+@app.route('/api/clock-in', methods=['POST', 'OPTIONS'])
+@token_required
+def clock_in():
+    """User clocks in - create a new clock entry"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        clock_entries = load_data(CLOCK_ENTRIES_FILE)
+        
+        # Check if user already has an active clock-in
+        active_entry = next((e for e in clock_entries 
+                           if e.get('userId') == request.user['id'] 
+                           and e.get('status') == 'IN'
+                           and not e.get('clockOut')), None)
+        
+        if active_entry:
+            return jsonify({'error': 'Already clocked in', 'message': f'Clock-in time: {active_entry["clockIn"]}'}), 400
+        
+        # Create new clock entry
+        entry = {
+            'id': get_next_id(clock_entries),
+            'userId': request.user['id'],
+            'userName': request.user.get('name', 'Unknown'),
+            'accountId': request.user.get('accountId'),
+            'clockIn': datetime.now().isoformat(),
+            'clockOut': None,
+            'status': 'IN',
+            'duration': 0
+        }
+        
+        clock_entries.append(entry)
+        save_data(CLOCK_ENTRIES_FILE, clock_entries)
+        
+        print(f"✅ User {request.user['name']} clocked IN at {entry['clockIn']}")
+        
+        return jsonify({
+            'success': True,
+            'entry': entry,
+            'message': f"Clocked in at {entry['clockIn']}"
+        }), 200
+    
+    except Exception as e:
+        print(f"Clock-in error: {str(e)}")
+        return jsonify({'error': 'Clock-in failed', 'message': str(e)}), 500
+
+
+@app.route('/api/clock-out', methods=['POST', 'OPTIONS'])
+@token_required
+def clock_out():
+    """User clocks out - complete the clock entry"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        clock_entries = load_data(CLOCK_ENTRIES_FILE)
+        
+        # Find active clock entry for this user
+        active_entry = next((e for e in clock_entries 
+                           if e.get('userId') == request.user['id'] 
+                           and e.get('status') == 'IN'
+                           and not e.get('clockOut')), None)
+        
+        if not active_entry:
+            return jsonify({'error': 'Not clocked in', 'message': 'No active clock-in record found'}), 400
+        
+        # Calculate duration
+        clock_in_time = datetime.fromisoformat(active_entry['clockIn'])
+        clock_out_time = datetime.now()
+        duration_seconds = (clock_out_time - clock_in_time).total_seconds()
+        
+        # Update entry
+        active_entry['clockOut'] = clock_out_time.isoformat()
+        active_entry['status'] = 'OUT'
+        active_entry['duration'] = duration_seconds
+        
+        save_data(CLOCK_ENTRIES_FILE, clock_entries)
+        
+        # Calculate hours and minutes
+        hours = int(duration_seconds // 3600)
+        minutes = int((duration_seconds % 3600) // 60)
+        
+        print(f"✅ User {request.user['name']} clocked OUT after {hours}h {minutes}m")
+        
+        return jsonify({
+            'success': True,
+            'entry': active_entry,
+            'duration': duration_seconds,
+            'displayDuration': f"{hours}h {minutes}m",
+            'message': f"Clocked out. Total time: {hours}h {minutes}m"
+        }), 200
+    
+    except Exception as e:
+        print(f"Clock-out error: {str(e)}")
+        return jsonify({'error': 'Clock-out failed', 'message': str(e)}), 500
+
+
+@app.route('/api/clock-status', methods=['GET', 'OPTIONS'])
+@token_required
+def get_clock_status():
+    """Get current clock status for user"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        clock_entries = load_data(CLOCK_ENTRIES_FILE)
+        
+        # Find active clock entry
+        active_entry = next((e for e in clock_entries 
+                           if e.get('userId') == request.user['id'] 
+                           and e.get('status') == 'IN'
+                           and not e.get('clockOut')), None)
+        
+        if active_entry:
+            # Calculate elapsed time
+            clock_in_time = datetime.fromisoformat(active_entry['clockIn'])
+            elapsed_seconds = (datetime.now() - clock_in_time).total_seconds()
+            hours = int(elapsed_seconds // 3600)
+            minutes = int((elapsed_seconds % 3600) // 60)
+            
+            return jsonify({
+                'isClockedIn': True,
+                'clockInTime': active_entry['clockIn'],
+                'elapsedSeconds': elapsed_seconds,
+                'elapsedDisplay': f"{hours}h {minutes}m"
+            }), 200
+        else:
+            return jsonify({
+                'isClockedIn': False,
+                'message': 'Not currently clocked in'
+            }), 200
+    
+    except Exception as e:
+        print(f"Clock status error: {str(e)}")
+        return jsonify({'error': 'Failed to get clock status', 'message': str(e)}), 500
+
+
+@app.route('/api/clock-entries', methods=['GET', 'OPTIONS'])
+@token_required
+def get_clock_entries():
+    """Get all clock entries for current user"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        clock_entries = load_data(CLOCK_ENTRIES_FILE)
+        
+        # Filter by user and account
+        user_entries = [e for e in clock_entries 
+                       if e.get('userId') == request.user['id'] 
+                       and e.get('accountId') == request.user.get('accountId')]
+        
+        # Sort by date descending
+        user_entries.sort(key=lambda x: x.get('clockIn', ''), reverse=True)
+        
+        return jsonify(user_entries), 200
+    
+    except Exception as e:
+        print(f"Get clock entries error: {str(e)}")
+        return jsonify({'error': 'Failed to get clock entries', 'message': str(e)}), 500
 
 # 404 Error Handler
 @app.errorhandler(404)
