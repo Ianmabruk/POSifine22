@@ -184,6 +184,61 @@ def save_data(filename, data):
 def get_next_id(data):
     return max([item.get('id', 0) for item in data] + [0]) + 1
 
+def create_auto_expenses_for_sale(deductions, products, expenses, account_id):
+    """
+    Auto-create expense records when composite products consume ingredients.
+    
+    For each ingredient deducted from a composite product sale:
+    - Calculate cost used = quantity deducted * costPerUnit
+    - Create/update expense record
+    
+    Args:
+        deductions: From StockDeductionEngine.validate_and_prepare_deductions()
+        products: All products (includes expense-only items)
+        expenses: Current expenses list
+        account_id: For data isolation
+    
+    Returns:
+        Updated expenses list
+    """
+    try:
+        product_map = {p['id']: p for p in products}
+        
+        # Process each ingredient/expense deduction
+        for deduction in deductions.get('expenses', []):
+            product_id = deduction['id']
+            qty_deducted = deduction.get('qty_deducted', 0)
+            
+            product = product_map.get(product_id)
+            if not product:
+                continue
+            
+            # Calculate cost
+            cost_per_unit = float(product.get('cost_per_unit', product.get('costPerUnit', 0)))
+            total_cost = qty_deducted * cost_per_unit
+            
+            if total_cost > 0:
+                # Create auto-expense record
+                auto_expense = {
+                    'id': get_next_id(expenses),
+                    'name': f"Auto-deducted: {product['name']}",
+                    'amount': total_cost,
+                    'quantity': qty_deducted,
+                    'unit': product.get('unit', 'unit'),
+                    'category': 'ingredient',
+                    'accountId': account_id,
+                    'source': 'auto-deduction',
+                    'linkedProductId': product_id,
+                    'createdAt': datetime.now().isoformat(),
+                    'description': f"Auto-deducted from sale - {qty_deducted}{product.get('unit', 'unit')} @ {cost_per_unit} KES/{product.get('unit', 'unit')}"
+                }
+                expenses.append(auto_expense)
+        
+        return expenses
+    except Exception as e:
+        print(f"⚠️  Error creating auto-expenses: {str(e)}")
+        return expenses
+
 # Initialize all data files on startup
 try:
     for filepath in [USERS_FILE, PRODUCTS_FILE, SALES_FILE, EXPENSES_FILE, 
@@ -340,12 +395,31 @@ def init_subscription_plans():
         if not plans:
             plans = [
                 {
-                    'id': 'ultra',
-                    'name': 'Ultra Package (Unlimited)',
-                    'price': 1600,
+                    'id': 'basic',
+                    'name': 'Professional Package',
+                    'price': 1500,
                     'currency': 'KSH',
                     'duration_days': 30,
-                    'maxCashiers': None,  # Unlimited
+                    'features': [
+                        'Admin Dashboard + Cashier POS',
+                        'Basic Inventory Management',
+                        'Sales Tracking',
+                        'Daily/Weekly Sales Summaries',
+                        'Basic Profit/Loss View',
+                        'Limited Email Notifications',
+                        'Record Products Sold',
+                        'Up to 2 Users',
+                        'Vendor Management',
+                        'Basic Expense Tracking',
+                        'Limited Analytics'
+                    ]
+                },
+                {
+                    'id': 'ultra',
+                    'name': 'Ultra Package (Enterprise)',
+                    'price': 3000,
+                    'currency': 'KSH',
+                    'duration_days': 30,
                     'features': [
                         'Admin Dashboard + Cashier POS',
                         'Full Inventory Management',
@@ -357,31 +431,10 @@ def init_subscription_plans():
                         'Permission Controls',
                         'Expense Tracking',
                         'Advanced Analytics',
-                        'Unlimited Cashiers',
+                        'Unlimited Users',
                         'Vendor Management',
                         'Advanced Reporting',
                         'Priority Support'
-                    ]
-                },
-                {
-                    'id': 'basic',
-                    'name': 'Basic Package',
-                    'price': 3000,
-                    'currency': 'KSH',
-                    'duration_days': 30,
-                    'maxCashiers': 1,  # Only 1 cashier allowed
-                    'features': [
-                        'Admin Dashboard + Cashier POS',
-                        'Basic Inventory Management',
-                        'Sales Tracking',
-                        'Daily/Weekly Sales Summaries',
-                        'Basic Profit/Loss View',
-                        'Limited Email Notifications',
-                        'Record Products Sold',
-                        '1 Cashier Account',
-                        'Vendor Management',
-                        'Basic Expense Tracking',
-                        'Limited Analytics'
                     ]
                 }
             ]
@@ -479,7 +532,7 @@ def home():
 
 @app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
-    """Handle user signup - MUST include plan selection"""
+    """Handle user signup"""
     if request.method == 'OPTIONS':
         return jsonify({'status': 'ok'}), 204
     
@@ -489,18 +542,12 @@ def signup():
             return jsonify({'error': 'Invalid request body', 'message': 'Request body must be JSON'}), 400
         
         # Validate required fields
-        required_fields = ['email', 'password', 'name', 'planId']  # planId is REQUIRED
+        required_fields = ['email', 'password', 'name']
         for field in required_fields:
             if field not in data or not data[field]:
                 return jsonify({'error': f'Missing required field: {field}'}), 400
         
         users = load_data(USERS_FILE)
-        plans_data = load_data(SUBSCRIPTION_PLANS_FILE)
-        
-        # Find selected plan
-        selected_plan = next((p for p in plans_data if p['id'] == data.get('planId')), None)
-        if not selected_plan:
-            return jsonify({'error': 'Invalid plan selected'}), 400
         
         # Normalize email to lowercase
         email = data['email'].strip().lower()
@@ -510,21 +557,37 @@ def signup():
             if u.get('email', '').lower() == email:
                 return jsonify({'error': 'User already exists'}), 400
         
-        # Create user with correct plan settings
+        # Create user with optimized fields
+        plan_id = data.get('planId', data.get('plan', 'basic'))  # Support both planId and plan for backwards compatibility
+        
+        # Load plan configuration to get maxCashiers
+        plan_config = None
+        max_cashiers = None
+        try:
+            subscription_plans = load_data(SUBSCRIPTION_PLANS_FILE)
+            for plan in subscription_plans:
+                if plan.get('id') == plan_id:
+                    plan_config = plan
+                    max_cashiers = plan.get('maxCashiers')  # None for unlimited, or specific number
+                    break
+        except Exception as e:
+            print(f"⚠️ Could not load subscription plans: {e}")
+        
+        trial_days = 14
         account_id = get_next_id(users)
         creation_time = datetime.now()
+        trial_expiry = creation_time + timedelta(days=trial_days)
         
         user = {
             'id': get_next_id(users),
             'email': email,
             'password': data['password'],
             'name': data['name'],
-            'role': 'admin',  # First user is always admin
-            'plan': selected_plan['id'],  # 'ultra' or 'basic'
-            'planName': selected_plan['name'],
-            'planPrice': selected_plan['price'],
+            'role': 'admin' if plan_id in ['1600', 'ultra', 'paid', 'basic', 'ultra'] else 'cashier',
+            'plan': plan_id,
+            'planType': data.get('planType', plan_id),
             'accountId': account_id,
-            'maxCashiers': selected_plan.get('maxCashiers'),  # None for ultra, 1 for basic
+            'maxCashiers': max_cashiers,
             'active': True,
             'locked': False,
             'createdAt': creation_time.isoformat(),
@@ -532,6 +595,9 @@ def signup():
             'lastActivityDate': creation_time.isoformat(),
             'lastLoginDate': creation_time.isoformat(),
             'daysUsed': 0,
+            'requestedTrial': data.get('requestedTrial', False),
+            'trialDaysLeft': trial_days if plan_id in ['trial', 'free_demo'] else None,
+            'trialExpiry': trial_expiry.isoformat() if plan_id in ['trial', 'free_demo'] else None,
             'signupSource': data.get('signupSource', 'direct'),
             'signupDetails': {
                 'company': data.get('company'),
@@ -551,27 +617,22 @@ def signup():
             algorithm='HS256'
         )
         
-        # Return minimal user data
+        # Return minimal user data to reduce payload size
         user_response = {
             'id': user['id'],
             'email': user['email'],
             'name': user['name'],
             'role': user['role'],
             'plan': user.get('plan'),
-            'planName': user.get('planName'),
-            'planPrice': user.get('planPrice'),
             'accountId': user.get('accountId'),
-            'maxCashiers': user.get('maxCashiers'),
+            'userLimit': user.get('userLimit'),
             'locked': False,
             'active': True
         }
         
-        print(f"✅ New admin user created with {selected_plan['name']} plan (ID: {user['id']})")
-        
         return jsonify({
             'token': token,
-            'user': user_response,
-            'message': f"Welcome! You've been signed up for {selected_plan['name']}"
+            'user': user_response
         }), 200
     except Exception as e:
         import traceback
@@ -1633,20 +1694,19 @@ def handle_users():
     if any(u.get('email', '').lower() == email for u in users):
         return jsonify({'error': 'User with this email already exists'}), 400
     
-    # Check user limit based on plan
+    # Check cashier limit for basic plan
     account_id = request.user['accountId']
     admin_user = next((u for u in users if u.get('accountId') == account_id and u.get('role') == 'admin'), None)
     
     if admin_user:
-        max_cashiers = admin_user.get('maxCashiers')  # None for ultra, 1 for basic
-        if max_cashiers is not None:  # Basic plan has a limit
-            # Count existing CASHIERS for this account (not including admin)
-            account_cashiers = [u for u in users if u.get('accountId') == account_id and u.get('role') == 'cashier']
-            if len(account_cashiers) >= max_cashiers:
+        max_cashiers = admin_user.get('maxCashiers')
+        # If maxCashiers is set (not None), count existing cashiers and check limit
+        if max_cashiers is not None:
+            # Count existing cashiers (non-admin users) for this account
+            existing_cashiers = [u for u in users if u.get('accountId') == account_id and u.get('role') == 'cashier']
+            if len(existing_cashiers) >= max_cashiers:
                 return jsonify({
-                    'error': f'Cashier limit reached. Your {admin_user.get("plan")} plan allows maximum {max_cashiers} cashier(s).',
-                    'maxCashiers': max_cashiers,
-                    'currentCashiers': len(account_cashiers)
+                    'error': f'Cashier limit reached. Your plan allows maximum {max_cashiers} cashier(s). Current cashiers: {len(existing_cashiers)}'
                 }), 403
     
     user = {
@@ -1655,7 +1715,7 @@ def handle_users():
         'password': password,
         'name': data['name'],
         'role': 'cashier',
-        'plan': admin_user.get('plan') if admin_user else 'free_demo',
+        'plan': 'ultra',
         'accountId': request.user['accountId'],
         'pin': data.get('pin', '1234'),
         'active': True,
@@ -1664,8 +1724,6 @@ def handle_users():
     
     users.append(user)
     save_data(USERS_FILE, users)
-    
-    print(f"✅ New cashier created: {user['email']} for account {account_id}")
     
     return jsonify({k: v for k, v in user.items() if k != 'password'})
 
@@ -2094,6 +2152,10 @@ def handle_sales():
         # SINGLE FILE WRITE: Save updated products
         save_data(PRODUCTS_FILE, products)
         
+        # Auto-create expense entries for ingredient deductions (if any)
+        expenses = create_auto_expenses_for_sale(deductions, products, expenses, request.user['accountId'])
+        save_data(EXPENSES_FILE, expenses)
+        
         # Create sale record
         sale = {
             'id': get_next_id(sales),
@@ -2181,6 +2243,10 @@ def admin_complete_sale():
         
         # SINGLE FILE WRITE: Save updated products immediately
         save_data(PRODUCTS_FILE, products)
+        
+        # Auto-create expense entries for ingredient deductions (if any)
+        expenses = create_auto_expenses_for_sale(deductions, products, expenses, request.user['accountId'])
+        save_data(EXPENSES_FILE, expenses)
         
         # Create sale record
         sale = {

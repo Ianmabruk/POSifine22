@@ -1,0 +1,42 @@
+[
+  {
+    "id": "ultra",
+    "name": "Ultra Package (Unlimited)",
+    "price": 3000,
+    "currency": "KES",
+    "maxCashiers": null,
+    "features": [
+      "Admin Dashboard + Cashier POS",
+      "Full Inventory Management",
+      "Recipe/BOM Builder",
+      "Composite Products Support",
+      "Automatic Stock Deduction",
+      "COGS Calculation",
+      "User Management",
+      "Permission Controls",
+      "Expense Tracking",
+      "Advanced Analytics",
+      "Unlimited Cashiers",
+      "Priority Support"
+    ],
+    "popular": true
+  },
+  {
+    "id": "basic",
+    "name": "Basic Package",
+    "price": 1600,
+    "currency": "KES",
+    "maxCashiers": 1,
+    "features": [
+      "Admin Dashboard + Cashier POS",
+      "Basic Inventory Management",
+      "Sales Tracking",
+      "Daily/Weekly Sales Summaries",
+      "Basic Profit/Loss View",
+      "Email Notifications",
+      "Record Products Sold",
+      "1 Cashier Only"
+    ],
+    "popular": false
+  }
+]
