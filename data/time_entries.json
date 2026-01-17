@@ -1,1 +1,85 @@
-[{"id": 1, "userId": 1, "userName": "Unknown", "accountId": 1, "date": "2026-01-16", "clockInTime": "2026-01-16T11:41:43.192582", "clockOutTime": "2026-01-16T11:41:46.229211", "duration": 0, "status": "clocked_out", "notes": null}, {"id": 2, "userId": 1, "userName": "Unknown", "accountId": 1, "date": "2026-01-16", "clockInTime": "2026-01-16T11:45:28.361188", "clockOutTime": "2026-01-16T11:45:31.404901", "duration": 0, "status": "clocked_out", "notes": null}, {"id": 3, "userId": 1, "userName": "Unknown", "accountId": 1, "date": "2026-01-16", "clockInTime": "2026-01-16T11:47:00.814525", "clockOutTime": "2026-01-16T11:47:02.889724", "duration": 0, "status": "clocked_out", "notes": null}, {"id": 4, "userId": 1, "userName": "Unknown", "accountId": 1, "date": "2026-01-16", "clockInTime": "2026-01-16T11:47:18.338055", "clockOutTime": "2026-01-16T11:47:20.421029", "duration": 0, "status": "clocked_out", "notes": null}, {"id": 5, "userId": 4, "userName": "Unknown", "accountId": 3, "date": "2026-01-16", "clockInTime": "2026-01-16T12:52:36.338017", "clockOutTime": "2026-01-16T12:52:36.559282", "duration": 0, "status": "clocked_out", "notes": null}, {"id": 6, "userId": 4, "userName": "Unknown", "accountId": 3, "date": "2026-01-16", "clockInTime": "2026-01-16T12:54:07.808845", "clockOutTime": "2026-01-16T12:54:08.293121", "duration": 0, "status": "clocked_out", "notes": null}]
+[
+  {
+    "id": 1,
+    "userId": 1,
+    "userName": "Unknown",
+    "accountId": 1,
+    "date": "2026-01-16",
+    "clockInTime": "2026-01-16T11:41:43.192582",
+    "clockOutTime": "2026-01-16T11:41:46.229211",
+    "duration": 0,
+    "status": "clocked_out",
+    "notes": null
+  },
+  {
+    "id": 2,
+    "userId": 1,
+    "userName": "Unknown",
+    "accountId": 1,
+    "date": "2026-01-16",
+    "clockInTime": "2026-01-16T11:45:28.361188",
+    "clockOutTime": "2026-01-16T11:45:31.404901",
+    "duration": 0,
+    "status": "clocked_out",
+    "notes": null
+  },
+  {
+    "id": 3,
+    "userId": 1,
+    "userName": "Unknown",
+    "accountId": 1,
+    "date": "2026-01-16",
+    "clockInTime": "2026-01-16T11:47:00.814525",
+    "clockOutTime": "2026-01-16T11:47:02.889724",
+    "duration": 0,
+    "status": "clocked_out",
+    "notes": null
+  },
+  {
+    "id": 4,
+    "userId": 1,
+    "userName": "Unknown",
+    "accountId": 1,
+    "date": "2026-01-16",
+    "clockInTime": "2026-01-16T11:47:18.338055",
+    "clockOutTime": "2026-01-16T11:47:20.421029",
+    "duration": 0,
+    "status": "clocked_out",
+    "notes": null
+  },
+  {
+    "id": 5,
+    "userId": 4,
+    "userName": "Unknown",
+    "accountId": 3,
+    "date": "2026-01-16",
+    "clockInTime": "2026-01-16T12:52:36.338017",
+    "clockOutTime": "2026-01-16T12:52:36.559282",
+    "duration": 0,
+    "status": "clocked_out",
+    "notes": null
+  },
+  {
+    "id": 6,
+    "userId": 4,
+    "userName": "Unknown",
+    "accountId": 3,
+    "date": "2026-01-16",
+    "clockInTime": "2026-01-16T12:54:07.808845",
+    "clockOutTime": "2026-01-16T12:54:08.293121",
+    "duration": 0,
+    "status": "clocked_out",
+    "notes": null
+  },
+  {
+    "id": 7,
+    "userId": 999,
+    "userName": "Test Cashier",
+    "accountId": "main",
+    "date": "2026-01-17",
+    "clockInTime": "2026-01-17T12:39:48.121589",
+    "clockOutTime": "2026-01-17T15:09:48.121589",
+    "duration": 150,
+    "status": "clocked_out"
+  }
+]

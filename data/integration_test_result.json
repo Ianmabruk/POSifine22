@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-01-17T12:36:09.228880",
+  "test_name": "Deep Integration Test",
+  "status": "PASSED",
+  "steps_completed": 8,
+  "performance_ms": 0.07724761962890625,
+  "target_ms": 10,
+  "sales_created": 2,
+  "products_involved": 5,
+  "features_tested": [
+    "Raw product sales",
+    "Composite products",
+    "Multi-source deduction",
+    "Low stock warnings",
+    "Dashboard sync",
+    "Performance",
+    "Data integrity"
+  ]
+}

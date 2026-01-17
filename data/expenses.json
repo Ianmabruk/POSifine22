@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "id": 1,
+    "name": "Cooking Oil",
+    "quantity": 12.0,
+    "unit": "liters",
+    "price": 2.0,
+    "expenseOnly": true,
+    "accountId": "main",
+    "createdAt": "2026-01-17T12:36:09.216237"
+  },
+  {
+    "id": 2,
+    "name": "Salt",
+    "quantity": 3.0,
+    "unit": "kg",
+    "price": 0.5,
+    "expenseOnly": true,
+    "accountId": "main",
+    "createdAt": "2026-01-17T12:36:09.216272"
+  }
+]

@@ -11,6 +11,9 @@ import bcrypt
 import hashlib
 from collections import defaultdict
 
+# Import optimized stock engine
+from stock_engine import StockDeductionEngine, optimize_sale_completion
+
 app = Flask(__name__)
 
 # ============================================================
@@ -1889,108 +1892,83 @@ def main_admin_delete_user(user_id):
         return jsonify({'error': str(e)}), 500
 
 # ============================================================
-# STOCK MANAGEMENT FUNCTIONS
+# OPTIMIZED STOCK MANAGEMENT FUNCTIONS
 # ============================================================
+# Using StockDeductionEngine from stock_engine.py for <200ms performance
 
 def validate_and_deduct_stock(products, expenses, items, sale_items_deductions):
     """
-    Atomically validate all items have sufficient stock and prepare deductions.
+    Backward compatible wrapper for old code.
+    Uses optimized StockDeductionEngine internally.
     
     Returns: (bool, error_message, deductions)
-    deductions = {
-        'products': [{id, before_qty, after_qty, deducted}],
-        'expenses': [{id, before_qty, after_qty, deducted}]
-    }
     """
-    deductions = {'products': [], 'expenses': []}
+    engine = StockDeductionEngine(products, expenses)
+    is_valid, error_msg, deductions = engine.validate_and_prepare_deductions(items)
     
-    for item in items:
-        product = next((p for p in products if p['id'] == item['productId']), None)
-        if not product:
-            return False, f"Product {item['productId']} not found", None
-        
-        sold_amount = float(item.get('quantity', item.get('weight', 0)))
-        current_qty = float(product.get('quantity', 0))
-        
-        # Validate main product stock
-        if current_qty < sold_amount:
-            return False, f"Insufficient stock for {product['name']}: need {sold_amount}, have {current_qty}", None
-        
-        # Record deduction for product
-        deductions['products'].append({
-            'id': product['id'],
-            'name': product['name'],
-            'before_qty': current_qty,
-            'after_qty': current_qty - sold_amount,
-            'deducted': sold_amount,
-            'unit': product.get('unit', 'pcs')
-        })
-        
-        # Check and deduct ingredients (composite products)
-        ingredients = product.get('recipe', product.get('ingredients', []))
-        if ingredients and len(ingredients) > 0:
-            for ingredient in ingredients:
-                ingredient_id = ingredient.get('productId')
-                ingredient_product = None
-                
-                if ingredient_id:
-                    ingredient_product = next((p for p in products if p['id'] == ingredient_id), None)
-                elif ingredient.get('name'):
-                    ingredient_product = next((p for p in products if p['name'].lower() == ingredient['name'].lower()), None)
-                
-                if ingredient_product:
-                    ingredient_qty = float(ingredient.get('quantity', 0))
-                    total_needed = ingredient_qty * sold_amount
-                    ingredient_current = float(ingredient_product.get('quantity', 0))
-                    
-                    # Validate ingredient stock
-                    if ingredient_current < total_needed:
-                        return False, f"Insufficient ingredient stock for {ingredient_product['name']}: need {total_needed}, have {ingredient_current}", None
-                    
-                    # Check if this ingredient is an expense item
-                    if ingredient_product.get('expenseOnly', False):
-                        # Record as expense deduction
-                        deductions['expenses'].append({
-                            'id': ingredient_product['id'],
-                            'name': ingredient_product['name'],
-                            'before_qty': ingredient_current,
-                            'after_qty': ingredient_current - total_needed,
-                            'deducted': total_needed,
-                            'unit': ingredient_product.get('unit', 'pcs')
-                        })
-                    else:
-                        # Record as product deduction
-                        deductions['products'].append({
-                            'id': ingredient_product['id'],
-                            'name': ingredient_product['name'],
-                            'before_qty': ingredient_current,
-                            'after_qty': ingredient_current - total_needed,
-                            'deducted': total_needed,
-                            'unit': ingredient_product.get('unit', 'pcs'),
-                            'parent_product': product['name']
-                        })
+    if is_valid:
+        # Apply deductions to the products list
+        engine.apply_deductions(deductions)
     
-    return True, None, deductions
+    return is_valid, error_msg, deductions
 
 def apply_stock_deductions(products, expenses, deductions):
-    """Apply pre-validated deductions to products and expenses."""
+    """Backward compatible wrapper - deductions already applied in engine."""
+    # Since the optimized engine modifies products in-place during validate_and_deduct_stock,
+    # this is now a no-op. Kept for backward compatibility.
+    return True
+
+def check_low_stock_warnings(products, account_id=None, threshold=1.0):
+    """
+    Check for products with stock below threshold.
+    Returns list of warnings for admin/cashier alerts.
+    """
+    warnings = []
+    for product in products:
+        if account_id and product.get('accountId') != account_id:
+            continue
+        
+        quantity = float(product.get('quantity', 0))
+        # Only warn for non-zero stock below threshold
+        if 0 < quantity < threshold:
+            severity = 'CRITICAL' if quantity < 0.1 else 'WARNING'
+            warnings.append({
+                'productId': product['id'],
+                'productName': product['name'],
+                'currentStock': quantity,
+                'unit': product.get('unit', 'pcs'),
+                'threshold': threshold,
+                'severity': severity,
+                'timestamp': datetime.now().isoformat(),
+                'category': product.get('category', 'general')
+            })
+    
+    return warnings
+
+@app.route('/api/products/low-stock-warnings', methods=['GET', 'OPTIONS'])
+@token_required
+def get_low_stock_warnings():
+    """Get all low stock warnings for current account"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     try:
-        # Apply product deductions
-        for deduction in deductions.get('products', []):
-            product = next((p for p in products if p['id'] == deduction['id']), None)
-            if product:
-                product['quantity'] = deduction['after_qty']
+        products = load_data(PRODUCTS_FILE)
+        account_id = request.user.get('accountId')
+        threshold = request.args.get('threshold', 1.0, type=float)
         
-        # Apply expense deductions
-        for deduction in deductions.get('expenses', []):
-            product = next((p for p in products if p['id'] == deduction['id']), None)
-            if product:
-                product['quantity'] = deduction['after_qty']
+        warnings = check_low_stock_warnings(products, account_id, threshold)
         
-        return True
+        return jsonify({
+            'warnings': warnings,
+            'total_warnings': len(warnings),
+            'critical_count': sum(1 for w in warnings if w['severity'] == 'CRITICAL'),
+            'warning_count': sum(1 for w in warnings if w['severity'] == 'WARNING')
+        })
+    
     except Exception as e:
-        print(f"Error applying deductions: {e}")
-        return False
+        print(f"Error fetching low stock warnings: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/products/stock-status', methods=['GET', 'OPTIONS'])
 @token_required
@@ -2059,7 +2037,7 @@ def get_stock_status():
 @app.route('/api/sales', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_sales():
-    """Handle sales - GET returns sales list, POST creates sale with atomic stock deduction"""
+    """Handle sales - GET returns sales list, POST creates sale with OPTIMIZED atomic stock deduction"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -2071,8 +2049,9 @@ def handle_sales():
         filtered_sales = [s for s in sales if s.get('accountId') == account_id]
         return jsonify(filtered_sales)
     
-    # POST - Create new sale with atomic stock deduction
+    # POST - Create new sale with OPTIMIZED atomic stock deduction
     try:
+        start_time = time.time()
         data = request.get_json()
         products = load_data(PRODUCTS_FILE)
         expenses = load_data(EXPENSES_FILE)
@@ -2081,23 +2060,24 @@ def handle_sales():
         if not data.get('items') or len(data['items']) == 0:
             return jsonify({'error': 'At least one item is required for a sale'}), 400
         
-        # ATOMIC VALIDATION: Check all stock before making any changes
-        is_valid, error_msg, deductions = validate_and_deduct_stock(products, expenses, data.get('items', []), None)
+        # OPTIMIZED VALIDATION: Use stock engine for fast validation + deductions
+        engine = StockDeductionEngine(products, expenses)
+        is_valid, error_msg, deductions = engine.validate_and_prepare_deductions(data.get('items', []))
         
         if not is_valid:
             return jsonify({
                 'error': error_msg,
-                'message': 'Sale cannot be completed due to insufficient stock'
+                'message': 'Sale validation failed'
             }), 400
         
-        # ATOMIC DEDUCTION: Apply all deductions at once
-        if not apply_stock_deductions(products, expenses, deductions):
+        # Apply deductions to products (in-memory)
+        if not engine.apply_deductions(deductions):
             return jsonify({
-                'error': 'Failed to apply stock deductions',
+                'error': 'Failed to apply deductions',
                 'message': 'Please try again'
             }), 500
         
-        # Save updated products
+        # SINGLE FILE WRITE: Save updated products
         save_data(PRODUCTS_FILE, products)
         
         # Create sale record
@@ -2112,50 +2092,48 @@ def handle_sales():
             'accountId': request.user['accountId'],
             'cashierId': request.user['id'],
             'cashierName': request.user.get('name', 'Unknown'),
-            'stockDeductions': deductions,  # Log deductions for auditing
+            'stockDeductions': deductions,
             'createdAt': datetime.now().isoformat()
         }
         
         sales.append(sale)
         save_data(SALES_FILE, sales)
         
-        # OPTIMIZED BROADCAST: Fast 3-tier notification to all dashboards in account
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        # Check for low stock warnings
+        warnings = check_low_stock_warnings(products, request.user['accountId'])
+        
+        # EFFICIENT BROADCAST: Single notification with minimal payload
         account_id = request.user['accountId']
         
-        # Tier 1: Immediate deduction notification
         broadcast_update('SALE_COMPLETED', {
             'saleId': sale['id'],
             'deductions': deductions,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'processingTime': f"{elapsed_ms:.0f}ms",
+            'lowStockWarnings': warnings if warnings else None
         }, account_id=account_id)
         
-        # Tier 2: Stock sync for both dashboards
-        broadcast_update('INVENTORY_SYNC', {
-            'updatedProducts': [{
-                'id': p['id'],
-                'name': p['name'],
-                'quantity': p['quantity'],
-                'unit': p.get('unit', 'pcs')
-            } for p in products]
-        }, account_id=account_id)
-        
-        print(f"✅ Sale #{sale['id']} recorded with {len(deductions['products'])} deductions (async broadcast)")
+        print(f"✅ Sale #{sale['id']} completed in {elapsed_ms:.0f}ms - stock auto-deducted")
         
         return jsonify({
             'success': True,
             'sale': sale,
             'deductions': deductions,
-            'message': f"Sale recorded successfully. {len(deductions['products'])} items deducted from stock."
+            'processingTime': f"{elapsed_ms:.0f}ms",
+            'lowStockWarnings': warnings
+            'message': f"Sale completed in {elapsed_ms:.0f}ms ✓"
         })
     
     except Exception as e:
-        print(f"❌ Sales creation error: {str(e)}")
+        print(f"❌ Sale creation error: {str(e)}")
         return jsonify({'error': 'Failed to create sale', 'message': str(e)}), 500
 
 @app.route('/api/admin-complete-sale', methods=['POST', 'OPTIONS'])
 @token_required
 def admin_complete_sale():
-    """Admin dashboard - Complete sale with IMMEDIATE sharp stock deduction on all dashboards"""
+    """Admin dashboard - Complete sale with IMMEDIATE sharp stock deduction"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -2170,23 +2148,24 @@ def admin_complete_sale():
         if not data.get('items') or len(data['items']) == 0:
             return jsonify({'error': 'At least one item is required for a sale'}), 400
         
-        # ATOMIC VALIDATION: Check all stock before making any changes
-        is_valid, error_msg, deductions = validate_and_deduct_stock(products, expenses, data.get('items', []), None)
+        # OPTIMIZED VALIDATION: Use stock engine
+        engine = StockDeductionEngine(products, expenses)
+        is_valid, error_msg, deductions = engine.validate_and_prepare_deductions(data.get('items', []))
         
         if not is_valid:
             return jsonify({
                 'error': error_msg,
-                'message': 'Sale cannot be completed due to insufficient stock'
+                'message': 'Sale validation failed'
             }), 400
         
-        # ATOMIC DEDUCTION: Apply all deductions at once
-        if not apply_stock_deductions(products, expenses, deductions):
+        # Apply deductions to products (in-memory)
+        if not engine.apply_deductions(deductions):
             return jsonify({
-                'error': 'Failed to apply stock deductions',
+                'error': 'Failed to apply deductions',
                 'message': 'Please try again'
             }), 500
         
-        # Save updated products IMMEDIATELY
+        # SINGLE FILE WRITE: Save updated products immediately
         save_data(PRODUCTS_FILE, products)
         
         # Create sale record
@@ -2201,7 +2180,7 @@ def admin_complete_sale():
             'accountId': request.user['accountId'],
             'cashierId': request.user['id'],
             'cashierName': request.user.get('name', 'Unknown'),
-            'completedBy': 'admin',  # Mark as admin-completed
+            'completedBy': 'admin',
             'stockDeductions': deductions,
             'createdAt': datetime.now().isoformat()
         }
@@ -2209,51 +2188,47 @@ def admin_complete_sale():
         sales.append(sale)
         save_data(SALES_FILE, sales)
         
-        # SHARP BROADCAST: IMMEDIATE 4-tier account-wide notification for STRICT sync
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        # Check for low stock warnings
+        warnings = check_low_stock_warnings(products, request.user['accountId'])
+        
+        # EFFICIENT BROADCAST: Dual notification for all dashboards
         account_id = request.user['accountId']
         
-        # Tier 1: IMMEDIATE - Deduction alert to CASHIER dashboard
-        broadcast_update('SHARP_SALE_ALERT', {
+        # Notify cashier dashboard of immediate deduction
+        broadcast_update('SHARP_DEDUCTION_ALERT', {
             'saleId': sale['id'],
             'deductions': deductions,
-            'saleTotal': sale['total'],
-            'completedAt': datetime.now().isoformat(),
-            'source': 'admin'
+            'source': 'admin',
+            'timestamp': datetime.now().isoformat(),
+            'lowStockWarnings': warnings if warnings else None
         }, account_id=account_id)
         
-        # Tier 2: IMMEDIATE - Stock update for ADMIN dashboard
-        broadcast_update('SHARP_INVENTORY_UPDATE', {
-            'updatedProducts': [{
-                'id': p['id'],
-                'name': p['name'],
-                'quantity': p['quantity'],
-                'unit': p.get('unit', 'pcs'),
-                'deducted': next((d['deducted'] for d in deductions['products'] if d.get('id') == p['id']), 0)
-            } for p in products],
-            'timestamp': datetime.now().isoformat()
-        }, account_id=account_id)
-        
-        # Tier 3: IMMEDIATE - Dashboard notification
-        broadcast_update('SALE_COMPLETED_ADMIN', {
+        # Notify admin dashboard of completed sale
+        broadcast_update('ADMIN_SALE_COMPLETED', {
             'saleId': sale['id'],
             'totalItems': len(deductions['products']),
-            'totalAmount': sale['total']
+            'totalAmount': sale['total'],
+            'processingTime': f"{elapsed_ms:.0f}ms",
+            'lowStockWarnings': warnings if warnings else None
         }, account_id=account_id)
         
-        elapsed = time.time() - start_time
-        print(f"✅ ADMIN Sale #{sale['id']} completed in {elapsed*1000:.0f}ms - SHARP deduction to all dashboards")
+        print(f"✅ Admin Sale #{sale['id']} completed in {elapsed_ms:.0f}ms")
         
         return jsonify({
             'success': True,
             'sale': sale,
             'deductions': deductions,
-            'processingTime': f"{elapsed*1000:.0f}ms",
-            'message': f"Sale #{sale['id']} completed and SHARP deducted on all dashboards!"
+            'processingTime': f"{elapsed_ms:.0f}ms",
+            'lowStockWarnings': warnings,
+            'message': f"Sale #{sale['id']} completed in {elapsed_ms:.0f}ms ✓"
         })
     
     except Exception as e:
         print(f"❌ Admin sale error: {str(e)}")
         return jsonify({'error': 'Failed to complete sale', 'message': str(e)}), 500
+
 
 @app.route('/api/sales/<int:sale_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
