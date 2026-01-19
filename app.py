@@ -2187,20 +2187,23 @@ def handle_sales():
         is_valid, error_msg, deductions = engine.validate_and_prepare_deductions(data.get('items', []))
         
         if not is_valid:
+            print(f"❌ Sale validation failed: {error_msg}")
             return jsonify({
                 'error': error_msg,
-                'message': 'Sale validation failed'
+                'message': 'Sale validation failed - insufficient stock'
             }), 400
         
         # Apply deductions to products (in-memory)
         if not engine.apply_deductions(deductions):
+            print("❌ Failed to apply deductions")
             return jsonify({
                 'error': 'Failed to apply deductions',
                 'message': 'Please try again'
             }), 500
         
-        # SINGLE FILE WRITE: Save updated products
+        # SINGLE FILE WRITE: Save updated products immediately (CRITICAL for stock sync)
         save_data(PRODUCTS_FILE, products)
+        print(f"✅ Products saved with stock deductions")
         
         # Auto-create expense entries for ingredient deductions (if any)
         expenses = create_auto_expenses_for_sale(deductions, products, expenses, request.user['accountId'])
@@ -2237,19 +2240,34 @@ def handle_sales():
         # EFFICIENT BROADCAST: Single notification with updated products list
         account_id = request.user['accountId']
         
-        # Get updated products to send to connected clients
+        # Get ONLY this account's products for response/broadcast (optimized payload)
         updated_products = [p for p in products if p.get('accountId') == account_id]
         
+        # Create a lightweight response for frontend (no need to send all product details)
+        response_products = [
+            {
+                'id': p['id'],
+                'name': p['name'],
+                'quantity': float(p.get('quantity', 0)),
+                'unit': p.get('unit', 'pcs'),
+                'price': float(p.get('price', 0)),
+                'category': p.get('category', 'general'),
+                'isComposite': p.get('isComposite', False)
+            }
+            for p in updated_products
+        ]
+        
+        # BROADCAST TO ALL CONNECTED CLIENTS IN THIS ACCOUNT
         broadcast_update('sale_completed', {
             'saleId': sale['id'],
             'deductions': deductions,
             'timestamp': datetime.now().isoformat(),
             'processingTime': f"{elapsed_ms:.0f}ms",
             'lowStockWarnings': warnings if warnings else None,
-            'updatedProducts': updated_products  # Send updated product list for UI refresh
+            'updatedProducts': response_products  # Send updated product list for UI refresh
         }, account_id=account_id)
         
-        print(f"✅ Sale #{sale['id']} completed in {elapsed_ms:.0f}ms - stock auto-deducted")
+        print(f"✅ Sale #{sale['id']} completed in {elapsed_ms:.0f}ms - stock deducted, {len(deductions.get('products', []))} items")
         
         return jsonify({
             'success': True,
@@ -2257,12 +2275,14 @@ def handle_sales():
             'deductions': deductions,
             'processingTime': f"{elapsed_ms:.0f}ms",
             'lowStockWarnings': warnings,
-            'updatedProducts': updated_products,  # Include updated products in response
-            'message': f"Sale completed in {elapsed_ms:.0f}ms ✓"
-        })
+            'updatedProducts': response_products,  # Include updated products in response
+            'message': f"✅ Sale completed in {elapsed_ms:.0f}ms - Stock updated"
+        }), 200
     
     except Exception as e:
+        import traceback
         print(f"❌ Sale creation error: {str(e)}")
+        print(traceback.format_exc())
         return jsonify({'error': 'Failed to create sale', 'message': str(e)}), 500
 
 @app.route('/api/admin-complete-sale', methods=['POST', 'OPTIONS'])
@@ -2288,20 +2308,23 @@ def admin_complete_sale():
         is_valid, error_msg, deductions = engine.validate_and_prepare_deductions(data.get('items', []))
         
         if not is_valid:
+            print(f"❌ Admin sale validation failed: {error_msg}")
             return jsonify({
                 'error': error_msg,
-                'message': 'Sale validation failed'
+                'message': 'Sale validation failed - insufficient stock'
             }), 400
         
         # Apply deductions to products (in-memory)
         if not engine.apply_deductions(deductions):
+            print("❌ Failed to apply deductions")
             return jsonify({
                 'error': 'Failed to apply deductions',
                 'message': 'Please try again'
             }), 500
         
-        # SINGLE FILE WRITE: Save updated products immediately
+        # SINGLE FILE WRITE: Save updated products immediately (CRITICAL for admin dashboard speed)
         save_data(PRODUCTS_FILE, products)
+        print(f"✅ Products saved with admin sale deductions")
         
         # Auto-create expense entries for ingredient deductions (if any)
         expenses = create_auto_expenses_for_sale(deductions, products, expenses, request.user['accountId'])
@@ -2331,35 +2354,41 @@ def admin_complete_sale():
         
         # Warn if processing took too long
         if elapsed_ms > 5000:
-            print(f"⚠️ WARNING: Sale processing took {elapsed_ms:.0f}ms (slow database?)")
+            print(f"⚠️ WARNING: Admin sale processing took {elapsed_ms:.0f}ms")
         
         # Check for low stock warnings
         warnings = check_low_stock_warnings(products, request.user['accountId'])
         
-        # EFFICIENT BROADCAST: Dual notification for all dashboards
+        # Get ONLY this account's products for response/broadcast (optimized payload)
         account_id = request.user['accountId']
+        updated_products = [p for p in products if p.get('accountId') == account_id]
         
-        # Notify cashier dashboard of immediate deduction
-        broadcast_update('sale_completed', {
+        # Create a lightweight response for frontend
+        response_products = [
+            {
+                'id': p['id'],
+                'name': p['name'],
+                'quantity': float(p.get('quantity', 0)),
+                'unit': p.get('unit', 'pcs'),
+                'price': float(p.get('price', 0)),
+                'category': p.get('category', 'general'),
+                'isComposite': p.get('isComposite', False)
+            }
+            for p in updated_products
+        ]
+        
+        # BROADCAST TO ALL DASHBOARDS IN THIS ACCOUNT
+        broadcast_update('admin_sale_completed', {
             'saleId': sale['id'],
             'deductions': deductions,
             'source': 'admin',
             'timestamp': datetime.now().isoformat(),
-            'lowStockWarnings': warnings if warnings else None,
-            'updatedProducts': [p for p in products if p.get('accountId') == account_id]
-        }, account_id=account_id)
-        
-        # Notify admin dashboard of completed sale
-        broadcast_update('admin_sale_completed', {
-            'saleId': sale['id'],
-            'totalItems': len(deductions['products']),
-            'totalAmount': sale['total'],
             'processingTime': f"{elapsed_ms:.0f}ms",
             'lowStockWarnings': warnings if warnings else None,
-            'updatedProducts': [p for p in products if p.get('accountId') == account_id]
+            'updatedProducts': response_products
         }, account_id=account_id)
         
-        print(f"✅ Admin Sale #{sale['id']} completed in {elapsed_ms:.0f}ms")
+        print(f"✅ Admin Sale #{sale['id']} completed in {elapsed_ms:.0f}ms - {len(deductions.get('products', []))} items deducted")
         
         return jsonify({
             'success': True,
@@ -2367,12 +2396,14 @@ def admin_complete_sale():
             'deductions': deductions,
             'processingTime': f"{elapsed_ms:.0f}ms",
             'lowStockWarnings': warnings,
-            'updatedProducts': [p for p in products if p.get('accountId') == request.user['accountId']],  # Include updated products
-            'message': f"Sale #{sale['id']} completed in {elapsed_ms:.0f}ms ✓"
-        })
+            'updatedProducts': response_products,  # Include updated products in response
+            'message': f"✅ Sale #{sale['id']} completed in {elapsed_ms:.0f}ms - Stock updated"
+        }), 200
     
     except Exception as e:
+        import traceback
         print(f"❌ Admin sale error: {str(e)}")
+        print(traceback.format_exc())
         return jsonify({'error': 'Failed to complete sale', 'message': str(e)}), 500
 
 
