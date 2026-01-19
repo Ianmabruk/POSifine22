@@ -2923,6 +2923,18 @@ def handle_time_entries():
     cashier_name = request.user.get('name', 'Unknown')
     
     if action == 'clock_in':
+        # CHECK: Don't allow double clock-in - user must be clocked out first
+        existing_active = next(
+            (e for e in time_entries if e.get('cashierId') == cashier_id and e.get('status') == 'clocked_in'),
+            None
+        )
+        
+        if existing_active:
+            return jsonify({
+                'error': 'Already clocked in',
+                'message': f'You are already clocked in since {existing_active["clockInTime"]}. Please clock out first.'
+            }), 400
+        
         # Create new time entry
         entry = {
             'id': get_next_id(time_entries),
@@ -2946,6 +2958,7 @@ def handle_time_entries():
             'allTimeEntries': time_entries
         })
         
+        print(f"✅ Cashier {cashier_name} clocked in at {entry['clockInTime']}")
         return jsonify(entry), 201
     
     elif action == 'clock_out':

@@ -8,18 +8,47 @@ Purpose: Handle fast, atomic stock deductions for sales with:
 - <200ms performance target
 - No state duplication between dashboards
 - Batched parallel updates
+- DECIMAL PRECISION: All quantities use float() with proper rounding
 
 Key Design Decisions:
 1. In-memory validation before any file writes
 2. Parallel Promise.all() for multiple deductions instead of sequential await
 3. Single JSON file write at end (not per-item)
 4. Efficient broadcasting with minimal payload
+5. CRITICAL: Use round() for decimal quantities to prevent floating-point errors
 """
 
 import json
 import time
 from datetime import datetime
 from typing import Tuple, List, Dict, Any, Optional
+from decimal import Decimal, ROUND_HALF_UP
+
+
+def safe_round(value: float, decimal_places: int = 4) -> float:
+    """
+    Safely round decimal quantities to prevent floating-point errors.
+    
+    Examples:
+        safe_round(0.1 + 0.2) -> 0.3 (not 0.30000000000000004)
+        safe_round(23.456789) -> 23.4568 (4 decimal places)
+        safe_round(45.1) -> 45.1
+    
+    Args:
+        value: The quantity to round
+        decimal_places: Number of decimal places to keep (default 4 for weight/volume)
+    
+    Returns:
+        Properly rounded float value
+    """
+    try:
+        if value is None or (isinstance(value, float) and (value != value)):  # Check for NaN
+            return 0.0
+        d = Decimal(str(value))
+        rounded = d.quantize(Decimal(10) ** -decimal_places, rounding=ROUND_HALF_UP)
+        return float(rounded)
+    except (ValueError, TypeError):
+        return float(value) if value else 0.0
 
 
 class StockDeductionEngine:
@@ -75,7 +104,8 @@ class StockDeductionEngine:
         try:
             for cart_item in items:
                 product_id = cart_item.get('productId')
-                quantity_sold = float(cart_item.get('quantity', cart_item.get('weight', 0)))
+                # DECIMAL: Safely parse quantity with proper float conversion
+                quantity_sold = safe_round(float(cart_item.get('quantity', cart_item.get('weight', 0))))
                 
                 # Get main product
                 product = self._product_map.get(product_id)
@@ -88,19 +118,21 @@ class StockDeductionEngine:
                 
                 if not is_composite:
                     # Validate main product has stock (only for raw products)
-                    current_qty = float(product.get('quantity', 0))
+                    # DECIMAL: Use safe_round for decimal comparison
+                    current_qty = safe_round(float(product.get('quantity', 0)))
                     if current_qty < quantity_sold:
                         return False, \
                             f"❌ Insufficient stock for '{product['name']}': need {quantity_sold}{product.get('unit', 'pcs')}, " \
                             f"have {current_qty}{product.get('unit', 'pcs')}", None
                     
-                    # Record main product deduction
+                    # Record main product deduction with proper rounding
+                    after_qty = safe_round(current_qty - quantity_sold)
                     deductions['products'].append({
                         'id': product['id'],
                         'name': product['name'],
                         'before_qty': current_qty,
-                        'after_qty': current_qty - quantity_sold,
-                        'deducted': quantity_sold,
+                        'after_qty': after_qty,
+                        'deducted': safe_round(quantity_sold),
                         'unit': product.get('unit', 'pcs')
                     })
                 
@@ -111,7 +143,8 @@ class StockDeductionEngine:
                     for ingredient in recipe:
                         ingredient_id = ingredient.get('productId') or ingredient.get('id')
                         ingredient_name = ingredient.get('name')
-                        ingredient_qty_per_unit = float(ingredient.get('quantity', 0))
+                        # DECIMAL: Safely parse ingredient quantity per unit
+                        ingredient_qty_per_unit = safe_round(float(ingredient.get('quantity', 0)))
                         ingredient_source = ingredient.get('source', 'inventory')
                         
                         # Find ingredient in products
@@ -130,8 +163,9 @@ class StockDeductionEngine:
                                 f"❌ Ingredient '{ingredient_name or ingredient_id}' for '{product['name']}' not found", None
                         
                         # Calculate total ingredient needed for this sale
-                        total_ingredient_needed = ingredient_qty_per_unit * quantity_sold
-                        ingredient_current_qty = float(ingredient_product.get('quantity', 0))
+                        # DECIMAL: Use safe_round for multiplication to prevent floating-point errors
+                        total_ingredient_needed = safe_round(ingredient_qty_per_unit * quantity_sold)
+                        ingredient_current_qty = safe_round(float(ingredient_product.get('quantity', 0)))
                         
                         # Validate ingredient stock
                         if ingredient_current_qty < total_ingredient_needed:
@@ -140,13 +174,16 @@ class StockDeductionEngine:
                                 f"(needed for '{product['name']}'): need {total_ingredient_needed}, " \
                                 f"have {ingredient_current_qty}", None
                         
+                        # Calculate after quantity with proper rounding
+                        after_qty = safe_round(ingredient_current_qty - total_ingredient_needed)
+                        
                         # Determine if deduction goes to products or expenses
                         if ingredient_product.get('expenseOnly', False):
                             deductions['expenses'].append({
                                 'id': ingredient_product['id'],
                                 'name': ingredient_product['name'],
                                 'before_qty': ingredient_current_qty,
-                                'after_qty': ingredient_current_qty - total_ingredient_needed,
+                                'after_qty': after_qty,
                                 'deducted': total_ingredient_needed,
                                 'unit': ingredient_product.get('unit', 'pcs'),
                                 'parent_product': product['name']
@@ -156,7 +193,7 @@ class StockDeductionEngine:
                                 'id': ingredient_product['id'],
                                 'name': ingredient_product['name'],
                                 'before_qty': ingredient_current_qty,
-                                'after_qty': ingredient_current_qty - total_ingredient_needed,
+                                'after_qty': after_qty,
                                 'deducted': total_ingredient_needed,
                                 'unit': ingredient_product.get('unit', 'pcs'),
                                 'parent_product': product['name']
@@ -173,19 +210,22 @@ class StockDeductionEngine:
         
         This modifies self.products in-place with new quantities.
         Call save_products() after this to persist to disk.
+        DECIMAL: Ensures quantities are properly rounded to prevent floating-point errors
         """
         try:
-            # Apply product deductions
+            # Apply product deductions with safe rounding
             for deduction in deductions.get('products', []):
                 product = self._product_map.get(deduction['id'])
                 if product:
-                    product['quantity'] = deduction['after_qty']
+                    # DECIMAL: Apply safe rounding to final quantity
+                    product['quantity'] = safe_round(deduction['after_qty'])
             
             # Apply expense deductions (expenses are in products too now)
             for deduction in deductions.get('expenses', []):
                 product = self._product_map.get(deduction['id'])
                 if product:
-                    product['quantity'] = deduction['after_qty']
+                    # DECIMAL: Apply safe rounding to final quantity
+                    product['quantity'] = safe_round(deduction['after_qty'])
             
             return True
         except Exception as e:
