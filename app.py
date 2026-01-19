@@ -777,6 +777,43 @@ def pin_login():
         print(f"PIN Login error: {error_msg}")
         return jsonify({'error': 'PIN login failed', 'message': str(e)}), 500
 
+@app.route('/api/auth/update-pin', methods=['POST', 'OPTIONS'])
+@token_required
+def update_pin():
+    """Update user PIN for screen lock security"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        new_pin = data.get('pin', '').strip()
+        
+        # Validate PIN format (4 digits)
+        if not new_pin or len(new_pin) != 4 or not new_pin.isdigit():
+            return jsonify({'error': 'PIN must be 4 digits'}), 400
+        
+        users = load_data(USERS_FILE)
+        uid = request.user.get('id')
+        user = next((u for u in users if u.get('id') == uid), None)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Update PIN
+        user['pin'] = new_pin
+        save_data(USERS_FILE, users)
+        
+        print(f"✅ PIN updated for user {uid}")
+        return jsonify({
+            'success': True,
+            'message': 'PIN updated successfully',
+            'user': {k: v for k, v in user.items() if k != 'password'}
+        })
+    
+    except Exception as e:
+        print(f"❌ PIN update error: {str(e)}")
+        return jsonify({'error': 'Failed to update PIN', 'message': str(e)}), 500
+
 @app.route('/api/main-admin/auth/login', methods=['POST', 'OPTIONS'])
 def main_admin_login():
     """Main admin (owner) login - RESTRICTED TO OWNER ROLE ONLY"""
