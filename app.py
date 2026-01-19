@@ -560,8 +560,9 @@ def signup():
         
         users = load_data(USERS_FILE)
         
-        # Normalize email to lowercase
+        # Normalize email to lowercase and strip password
         email = data['email'].strip().lower()
+        password = data['password'].strip()  # ← FIX: Strip password for consistency
         
         # Fast check if user exists
         for u in users:
@@ -592,7 +593,7 @@ def signup():
         user = {
             'id': get_next_id(users),
             'email': email,
-            'password': data['password'],
+            'password': password,
             'name': data['name'],
             'role': 'admin' if plan_id in ['1600', 'ultra', 'paid', 'basic', 'ultra'] else 'cashier',
             'plan': plan_id,
@@ -673,7 +674,7 @@ def login():
         
         # Normalize email to lowercase for case-insensitive comparison
         email = data['email'].strip().lower()
-        password = data['password']
+        password = data['password'].strip()  # ← Strip password for consistent matching
         
         # Fast lookup with early exit
         user = None
@@ -754,14 +755,18 @@ def pin_login():
         
         users = load_data(USERS_FILE)
         
+        # Normalize email to lowercase for case-insensitive comparison
+        email = data['email'].strip().lower()
+        pin = str(data['pin']).strip()
+        
         # For now, PIN login works same as password login (PIN is not implemented yet)
         # In production, you would check user.pin instead of user.password
-        user = next((u for u in users if u.get('email') == data['email']), None)
+        user = next((u for u in users if u.get('email', '').lower() == email), None)
         if not user:
             return jsonify({'error': 'User not found'}), 401
         
         # Simple PIN validation - in production, use bcrypt or similar
-        if str(data['pin']) != str(user.get('pin', data['pin'])):
+        if pin != str(user.get('pin', '')).strip():
             return jsonify({'error': 'Invalid PIN'}), 401
         
         token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role'], 'accountId': user['accountId']}, 
@@ -825,8 +830,8 @@ def main_admin_login():
         if not data:
             return jsonify({'error': 'Invalid request body'}), 400
         
-        email = data.get('email', '').lower()
-        password = data.get('password', '')
+        email = data.get('email', '').lower().strip()
+        password = data.get('password', '').strip()  # ← FIX: Strip whitespace
         
         if not email or not password:
             return jsonify({'error': 'Email and password required'}), 400
