@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 # Copy application
 COPY app.py .
 COPY stock_engine.py .
+COPY fast_backend.py .
 COPY gunicorn.conf.py .
 COPY data/ ./data/
 
