@@ -154,6 +154,9 @@ RAW_MATERIALS_FILE = f'{DATA_DIR}/raw_materials.json'
 SUBSCRIPTIONS_FILE = f'{DATA_DIR}/subscriptions.json'
 SUBSCRIPTION_PLANS_FILE = f'{DATA_DIR}/subscription_plans.json'
 CLOCK_ENTRIES_FILE = f'{DATA_DIR}/clock_entries.json'
+PRICE_HISTORY_FILE = f'{DATA_DIR}/price_history.json'
+SERVICE_FEES_FILE = f'{DATA_DIR}/service_fees.json'
+PRODUCTION_FILE = f'{DATA_DIR}/production.json'
 
 # Ensure data directory exists and initialize empty JSON files
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1365,11 +1368,7 @@ def main_admin_get_all_sales():
     """Get ALL sales from ALL users/accounts"""
     try:
         # Verify owner access
-        current_user_id = request.headers.get('X-User-Id')
-        users = load_data(USERS_FILE)
-        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
-        
-        if not current_user or current_user.get('role') != 'owner':
+        if request.user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
         
         # Load all sales
@@ -1436,11 +1435,7 @@ def main_admin_get_activities():
     """Get ALL activities/events from ALL users"""
     try:
         # Verify owner access
-        current_user_id = request.headers.get('X-User-Id')
-        users = load_data(USERS_FILE)
-        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
-        
-        if not current_user or current_user.get('role') != 'owner':
+        if request.user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
         
         # Get all sales as activities (each sale is an activity)
@@ -1485,29 +1480,13 @@ def main_admin_get_all_time_entries():
     """Get ALL clock in/out time entries from ALL users"""
     try:
         # Verify owner access
-        current_user_id = request.headers.get('X-User-Id')
-        users = load_data(USERS_FILE)
-        current_user = next((u for u in users if current_user_id and u.get('id') == int(current_user_id)), None)
-        
-        if not current_user or current_user.get('role') != 'owner':
+        if request.user.get('role') != 'owner':
             return jsonify({'error': 'Access denied. Owner access required'}), 403
         
         # Load all time entries
         time_entries = load_data(TIME_ENTRIES_FILE) if os.path.exists(TIME_ENTRIES_FILE) else []
         
-        # Group by user
-        entries_by_user = {}
-        for entry in time_entries:
-            user_id = entry.get('userId')
-            if user_id not in entries_by_user:
-                entries_by_user[user_id] = []
-            entries_by_user[user_id].append(entry)
-        
-        return jsonify({
-            'timeEntries': time_entries,
-            'entriesByUser': entries_by_user,
-            'totalEntries': len(time_entries)
-        })
+        return jsonify(time_entries)
     except Exception as e:
         print(f"Get time entries error: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -1923,6 +1902,131 @@ def get_users_with_subscriptions():
     
     return jsonify(enriched_users)
 
+@app.route('/api/main-admin/subscribers/analytics', methods=['GET', 'OPTIONS'])
+@token_required
+def main_admin_subscribers_analytics():
+    """Get comprehensive subscriber analytics for dashboard"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        # Verify owner access
+        if request.user.get('role') != 'owner':
+            return jsonify({'error': 'Access denied. Owner access required'}), 403
+        
+        users = load_data(USERS_FILE)
+        
+        # Aggregate subscription data
+        total_users = len(users)
+        paid_users = len([u for u in users if u.get('planId') != 'free'])
+        free_users = len([u for u in users if u.get('planId') == 'free'])
+        
+        # Plan breakdown
+        plan_counts = {}
+        for u in users:
+            plan = u.get('planId', 'free')
+            plan_counts[plan] = plan_counts.get(plan, 0) + 1
+        
+        # Subscription status
+        active_subs = len([u for u in users if u.get('subscriptionStatus') == 'active'])
+        trial_subs = len([u for u in users if u.get('subscriptionStatus') == 'trial'])
+        expired_subs = len([u for u in users if u.get('subscriptionStatus') == 'expired'])
+        
+        # Revenue calculation (assuming $99/month for paid plans)
+        estimated_monthly_revenue = paid_users * 99
+        
+        # Trial days remaining distribution
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        days_distribution = {}
+        
+        for u in users:
+            if u.get('subscriptionStatus') == 'trial':
+                trial_end = u.get('trialEndDate')
+                if trial_end:
+                    try:
+                        end_date = datetime.fromisoformat(trial_end.replace('Z', '+00:00'))
+                        days_left = (end_date - today).days
+                        bucket = f'{max(0, days_left)}_days'
+                        days_distribution[bucket] = days_distribution.get(bucket, 0) + 1
+                    except:
+                        pass
+        
+        # User growth (approximated from creation dates)
+        signup_timeline = {}
+        for u in users:
+            created = u.get('createdAt', '')
+            if created:
+                date_part = created.split('T')[0]
+                signup_timeline[date_part] = signup_timeline.get(date_part, 0) + 1
+        
+        return jsonify({
+            'summary': {
+                'totalUsers': total_users,
+                'paidUsers': paid_users,
+                'freeUsers': free_users,
+                'activeSubscriptions': active_subs,
+                'trialSubscriptions': trial_subs,
+                'expiredSubscriptions': expired_subs,
+                'estimatedMonthlyRevenue': estimated_monthly_revenue,
+                'conversionRate': round((paid_users / total_users * 100), 2) if total_users > 0 else 0
+            },
+            'planDistribution': plan_counts,
+            'statusDistribution': {
+                'active': active_subs,
+                'trial': trial_subs,
+                'expired': expired_subs
+            },
+            'trialDaysDistribution': days_distribution,
+            'signupTimeline': dict(sorted(signup_timeline.items())[-30:]),  # Last 30 days
+            'topMetrics': {
+                'avgUsersPerDay': round(total_users / max(len(signup_timeline), 1), 2),
+                'conversionPercentage': round((paid_users / total_users * 100), 2) if total_users > 0 else 0,
+                'retentionRate': round((active_subs / paid_users * 100), 2) if paid_users > 0 else 0
+            }
+        })
+    except Exception as e:
+        print(f"Subscribers analytics error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/main-admin/subscribers', methods=['GET', 'OPTIONS'])
+@token_required
+def main_admin_get_subscribers():
+    """Get all subscribers with details"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        # Verify owner access
+        if request.user.get('role') != 'owner':
+            return jsonify({'error': 'Access denied. Owner access required'}), 403
+        
+        users = load_data(USERS_FILE)
+        
+        # Filter to show only subscribers (non-free users)
+        subscribers = []
+        for u in users:
+            if u.get('planId') != 'free' or u.get('subscriptionStatus') == 'trial':
+                subscriber = {
+                    'id': u.get('id'),
+                    'email': u.get('email'),
+                    'name': u.get('name'),
+                    'planId': u.get('planId'),
+                    'subscriptionStatus': u.get('subscriptionStatus'),
+                    'createdAt': u.get('createdAt'),
+                    'trialEndDate': u.get('trialEndDate'),
+                    'lastActive': u.get('lastActive'),
+                    'totalSales': u.get('totalSales', 0)
+                }
+                subscribers.append(subscriber)
+        
+        return jsonify(subscribers)
+    except Exception as e:
+        print(f"Get subscribers error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/main-admin/send-email', methods=['POST'])
 @token_required
 def send_admin_email():
@@ -2279,12 +2383,28 @@ def handle_sales():
         elapsed_ms = (time.time() - start_time) * 1000
         performance.record_sale(elapsed_ms)
         
+        # Build updated products list for UI
+        account_id = request.user['accountId']
+        updated_products = [
+            {
+                'id': p['id'],
+                'name': p['name'],
+                'quantity': p.get('quantity', 0),
+                'unit': p.get('unit', 'pcs'),
+                'price': p.get('price', 0)
+            }
+            for p in products
+            if p.get('accountId') == account_id
+        ]
+        
         # Return immediately (don't wait for background ops)
         return jsonify({
             'success': True,
             'saleId': sale['id'],
             'processingTime': f"{elapsed_ms:.1f}ms",
-            'status': '✅ ULTRA-FAST' if elapsed_ms < 20 else ('✅ FAST' if elapsed_ms < 50 else '⚠️ SLOW')
+            'status': '✅ ULTRA-FAST' if elapsed_ms < 2 else ('✅ FAST' if elapsed_ms < 20 else ('⚠️ OK' if elapsed_ms < 50 else '⚠️ SLOW')),
+            'updatedProducts': updated_products,
+            'stockDeductions': deductions
         }), 200
     
     except Exception as e:
@@ -2303,17 +2423,20 @@ def admin_complete_sale():
     try:
         start_time = time.time()
         data = request.get_json()
+        
+        # Load data FIRST before using
         products = load_data_cached(PRODUCTS_FILE, use_cache=True)
-        sales = load_data(SALES_FILE)
+        expenses = load_data_cached(EXPENSES_FILE, use_cache=True)
+        sales = load_data_cached(SALES_FILE, use_cache=True)
         
         # Validate request
         if not data.get('items') or len(data['items']) == 0:
             return jsonify({'error': 'At least one item is required for a sale'}), 400
         
-        # OPTIMIZED VALIDATION: Use stock engine
-        engine = StockDeductionEngine(products, expenses)
-        expenses = load_data_cached(EXPENSES_FILE, use_cache=True)
-        sales = load_data_cached(SALES_FILE, use_cache=True)
+        # Validate items have required fields
+        for item in data.get('items', []):
+            if 'productId' not in item or 'quantity' not in item:
+                return jsonify({'error': 'Each item must have productId and quantity'}), 400
         
         # ULTRA-FAST: Use UltraFastStockEngine
         engine = UltraFastStockEngine(products, expenses)
@@ -2384,11 +2507,27 @@ def admin_complete_sale():
         elapsed_ms = (time.time() - start_time) * 1000
         performance.record_sale(elapsed_ms)
         
+        # Build updated products list for UI
+        account_id = request.user['accountId']
+        updated_products = [
+            {
+                'id': p['id'],
+                'name': p['name'],
+                'quantity': p.get('quantity', 0),
+                'unit': p.get('unit', 'pcs'),
+                'price': p.get('price', 0)
+            }
+            for p in products
+            if p.get('accountId') == account_id
+        ]
+        
         return jsonify({
             'success': True,
             'saleId': sale['id'],
             'processingTime': f"{elapsed_ms:.1f}ms",
-            'status': '✅ ULTRA-FAST' if elapsed_ms < 20 else ('✅ FAST' if elapsed_ms < 50 else '⚠️ SLOW')
+            'status': '✅ ULTRA-FAST' if elapsed_ms < 2 else ('✅ FAST' if elapsed_ms < 20 else ('⚠️ OK' if elapsed_ms < 50 else '⚠️ SLOW')),
+            'updatedProducts': updated_products,
+            'stockDeductions': deductions
         }), 200
     
     except Exception as e:
@@ -2536,6 +2675,233 @@ def reminders_today():
     
     except Exception as e:
         print(f"❌ Reminder error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reminders', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_reminders():
+    """Get all reminders or create new reminder"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    reminders = load_data(REMINDERS_FILE)
+    account_id = request.user.get('accountId')
+    
+    if request.method == 'GET':
+        # Get all reminders for this account
+        filtered_reminders = [r for r in reminders if r.get('accountId') == account_id]
+        return jsonify(filtered_reminders)
+    
+    # POST - Create new reminder
+    try:
+        data = request.get_json()
+        reminder = {
+            'id': get_next_id(reminders),
+            'accountId': account_id,
+            'message': data.get('message', ''),
+            'priority': data.get('priority', 'normal'),
+            'target': data.get('target', 'all'),
+            'sentBy': request.user.get('name', 'Unknown'),
+            'date': datetime.now().date().isoformat(),
+            'timestamp': datetime.now().isoformat(),
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        reminders.append(reminder)
+        save_data(REMINDERS_FILE, reminders)
+        
+        broadcast_update('reminder_created', reminder, account_id=account_id)
+        
+        return jsonify(reminder), 201
+    except Exception as e:
+        print(f"❌ Reminder error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reminders/<int:reminder_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_reminder(reminder_id):
+    """Update or delete a reminder"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    reminders = load_data(REMINDERS_FILE)
+    reminder = next((r for r in reminders if r['id'] == reminder_id), None)
+    
+    if not reminder:
+        return jsonify({'error': 'Reminder not found'}), 404
+    
+    # Verify ownership
+    if reminder.get('accountId') != request.user.get('accountId'):
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    if request.method == 'DELETE':
+        reminders = [r for r in reminders if r['id'] != reminder_id]
+        save_data(REMINDERS_FILE, reminders)
+        return jsonify({'message': 'Reminder deleted'}), 200
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        reminder.update({
+            'message': data.get('message', reminder.get('message')),
+            'priority': data.get('priority', reminder.get('priority')),
+            'target': data.get('target', reminder.get('target'))
+        })
+        save_data(REMINDERS_FILE, reminders)
+        return jsonify(reminder)
+
+@app.route('/api/price-history', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_price_history():
+    """Track product price changes over time"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    price_history = load_data(PRICE_HISTORY_FILE) if os.path.exists(PRICE_HISTORY_FILE) else []
+    account_id = request.user.get('accountId')
+    
+    if request.method == 'GET':
+        # Get price history for this account
+        filtered_history = [p for p in price_history if p.get('accountId') == account_id]
+        return jsonify(filtered_history)
+    
+    # POST - Record price change
+    try:
+        data = request.get_json()
+        record = {
+            'id': get_next_id(price_history),
+            'productId': int(data.get('productId')),
+            'productName': data.get('productName', ''),
+            'oldPrice': float(data.get('oldPrice', 0)),
+            'newPrice': float(data.get('newPrice', 0)),
+            'reason': data.get('reason', ''),
+            'changedBy': request.user.get('name', 'Unknown'),
+            'accountId': account_id,
+            'timestamp': datetime.now().isoformat(),
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        price_history.append(record)
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(PRICE_HISTORY_FILE), exist_ok=True)
+        save_data(PRICE_HISTORY_FILE, price_history)
+        
+        return jsonify(record), 201
+    except Exception as e:
+        print(f"❌ Price history error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/service-fees', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_service_fees():
+    """Manage service fees and surcharges"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    service_fees = load_data(SERVICE_FEES_FILE) if os.path.exists(SERVICE_FEES_FILE) else []
+    account_id = request.user.get('accountId')
+    
+    if request.method == 'GET':
+        # Get service fees for this account
+        filtered_fees = [f for f in service_fees if f.get('accountId') == account_id]
+        return jsonify(filtered_fees)
+    
+    # POST - Create new service fee
+    try:
+        data = request.get_json()
+        fee = {
+            'id': get_next_id(service_fees),
+            'name': data.get('name', ''),
+            'type': data.get('type', 'fixed'),  # 'fixed' or 'percentage'
+            'value': float(data.get('value', 0)),
+            'description': data.get('description', ''),
+            'active': data.get('active', True),
+            'accountId': account_id,
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        service_fees.append(fee)
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(SERVICE_FEES_FILE), exist_ok=True)
+        save_data(SERVICE_FEES_FILE, service_fees)
+        
+        return jsonify(fee), 201
+    except Exception as e:
+        print(f"❌ Service fee error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/service-fees/<int:fee_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_service_fee(fee_id):
+    """Update or delete service fee"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    service_fees = load_data(SERVICE_FEES_FILE) if os.path.exists(SERVICE_FEES_FILE) else []
+    fee = next((f for f in service_fees if f['id'] == fee_id), None)
+    
+    if not fee:
+        return jsonify({'error': 'Service fee not found'}), 404
+    
+    if request.method == 'DELETE':
+        service_fees = [f for f in service_fees if f['id'] != fee_id]
+        save_data(SERVICE_FEES_FILE, service_fees)
+        return jsonify({'message': 'Service fee deleted'}), 200
+    
+    if request.method == 'PUT':
+        data = request.get_json()
+        fee.update({
+            'name': data.get('name', fee.get('name')),
+            'type': data.get('type', fee.get('type')),
+            'value': float(data.get('value', fee.get('value', 0))),
+            'description': data.get('description', fee.get('description')),
+            'active': data.get('active', fee.get('active'))
+        })
+        save_data(SERVICE_FEES_FILE, service_fees)
+        return jsonify(fee)
+
+@app.route('/api/production', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_production():
+    """Track production/manufacturing batches"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    production_data = load_data(PRODUCTION_FILE) if os.path.exists(PRODUCTION_FILE) else []
+    account_id = request.user.get('accountId')
+    
+    if request.method == 'GET':
+        # Get production records for this account
+        filtered_production = [p for p in production_data if p.get('accountId') == account_id]
+        return jsonify(filtered_production)
+    
+    # POST - Create new production record
+    try:
+        data = request.get_json()
+        record = {
+            'id': get_next_id(production_data),
+            'productId': int(data.get('productId')),
+            'productName': data.get('productName', ''),
+            'quantityProduced': float(data.get('quantityProduced', 0)),
+            'unit': data.get('unit', 'pcs'),
+            'inputMaterials': data.get('inputMaterials', []),  # List of {materialId, quantity}
+            'producedBy': request.user.get('name', 'Unknown'),
+            'notes': data.get('notes', ''),
+            'accountId': account_id,
+            'timestamp': datetime.now().isoformat(),
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        production_data.append(record)
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(PRODUCTION_FILE), exist_ok=True)
+        save_data(PRODUCTION_FILE, production_data)
+        
+        return jsonify(record), 201
+    except Exception as e:
+        print(f"❌ Production error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings', methods=['GET', 'POST', 'OPTIONS'])
