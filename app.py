@@ -4,6 +4,7 @@ import jwt
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 from flask_sock import Sock
@@ -586,7 +587,9 @@ def signup():
             print(f"⚠️ Could not load subscription plans: {e}")
         
         trial_days = 14
-        account_id = get_next_id(users)
+        # FIX: Create unique, immutable account ID using UUID5
+        # This ensures each signup gets a unique, persistent account identifier
+        account_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, email + str(datetime.now())))
         creation_time = datetime.now()
         trial_expiry = creation_time + timedelta(days=trial_days)
         
@@ -1574,16 +1577,21 @@ def handle_product(product_id):
     if not product:
         return jsonify({'error': 'Product not found'}), 404
     
+    # SECURITY FIX: Ensure product belongs to user's account
+    if product.get('accountId') != request.user.get('accountId'):
+        return jsonify({'error': 'Unauthorized - this product belongs to a different account'}), 403
+    
     if request.method == 'PUT':
         data = request.get_json()
         product.update(data)
         save_data(PRODUCTS_FILE, products)
         
-        # Broadcast product update to all connected clients
+        # Broadcast product update to all connected clients in this account
+        account_id = request.user['accountId']
         broadcast_update('product_updated', {
             'product': product,
-            'allProducts': products
-        })
+            'allProducts': [p for p in products if p.get('accountId') == account_id]
+        }, account_id=account_id)
         
         return jsonify(product)
     
@@ -1591,11 +1599,12 @@ def handle_product(product_id):
         products = [p for p in products if p['id'] != product_id]
         save_data(PRODUCTS_FILE, products)
         
-        # Broadcast product deletion to all connected clients
+        # Broadcast product deletion to all connected clients in this account
+        account_id = request.user['accountId']
         broadcast_update('product_deleted', {
             'deletedId': product_id,
-            'allProducts': products
-        })
+            'allProducts': [p for p in products if p.get('accountId') == account_id]
+        }, account_id=account_id)
         
         return jsonify({'message': 'Product deleted'})
 
@@ -1611,6 +1620,10 @@ def update_stock(product_id):
     
     if not product:
         return jsonify({'error': 'Product not found'}), 404
+    
+    # SECURITY FIX: Ensure product belongs to user's account
+    if product.get('accountId') != request.user.get('accountId'):
+        return jsonify({'error': 'Unauthorized - this product belongs to a different account'}), 403
     
     data = request.get_json()
     
@@ -1649,6 +1662,10 @@ def handle_weight_pricing(product_id):
     
     if not product:
         return jsonify({'error': 'Product not found'}), 404
+    
+    # SECURITY FIX: Ensure product belongs to user's account
+    if product.get('accountId') != request.user.get('accountId'):
+        return jsonify({'error': 'Unauthorized - this product belongs to a different account'}), 403
     
     # Initialize weightPricing if it doesn't exist
     if 'weightPricing' not in product:
