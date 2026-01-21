@@ -2996,9 +2996,142 @@ def batches():
 @app.route('/api/credit-requests', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def credit_requests():
+    """Handle credit requests - GET returns requests for account, POST creates new request"""
     if request.method == 'OPTIONS':
         return '', 200
-    return jsonify([])
+    
+    # Ensure credit requests file exists
+    init_json_file(CREDIT_REQUESTS_FILE)
+    credit_requests_data = load_data(CREDIT_REQUESTS_FILE)
+    
+    if request.method == 'GET':
+        # Filter requests by accountId
+        account_id = request.user.get('accountId')
+        user_role = request.user.get('role', 'cashier')
+        
+        if user_role == 'owner' or user_role == 'admin':
+            # Admin/owner sees all requests for their account
+            filtered_requests = [r for r in credit_requests_data if r.get('accountId') == account_id]
+        else:
+            # Cashier sees only their own requests
+            filtered_requests = [r for r in credit_requests_data 
+                               if r.get('accountId') == account_id and r.get('cashierId') == request.user.get('id')]
+        
+        return jsonify(filtered_requests)
+    
+    # POST - Create new credit request
+    try:
+        data = request.get_json()
+        
+        if not data.get('customerName'):
+            return jsonify({'error': 'Customer name is required'}), 400
+        if not data.get('amount') or float(data.get('amount', 0)) <= 0:
+            return jsonify({'error': 'Amount must be greater than 0'}), 400
+        
+        credit_request = {
+            'id': get_next_id(credit_requests_data),
+            'customerName': data.get('customerName'),
+            'amount': float(data.get('amount', 0)),
+            'reason': data.get('reason', ''),
+            'cashierId': request.user.get('id'),
+            'cashierName': request.user.get('name', 'Unknown'),
+            'accountId': request.user['accountId'],
+            'status': 'pending',  # pending, approved, rejected
+            'approvedBy': None,
+            'approvalDate': None,
+            'rejectionReason': None,
+            'notes': data.get('notes', ''),
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        credit_requests_data.append(credit_request)
+        save_data(CREDIT_REQUESTS_FILE, credit_requests_data)
+        
+        # Broadcast to admin dashboards
+        broadcast_update('credit_request_created', {
+            'request': credit_request,
+            'allRequests': credit_requests_data
+        }, account_id=request.user['accountId'])
+        
+        print(f"✅ Credit request created: {credit_request['customerName']} - {credit_request['amount']} KES")
+        
+        return jsonify(credit_request), 201
+    
+    except Exception as e:
+        print(f"❌ Credit request creation error: {str(e)}")
+        return jsonify({'error': 'Failed to create credit request', 'message': str(e)}), 500
+
+@app.route('/api/credit-requests/<int:request_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_credit_request(request_id):
+    """Get, update, or delete a specific credit request"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    init_json_file(CREDIT_REQUESTS_FILE)
+    credit_requests_data = load_data(CREDIT_REQUESTS_FILE)
+    credit_request = next((r for r in credit_requests_data if r['id'] == request_id), None)
+    
+    if not credit_request:
+        return jsonify({'error': 'Credit request not found'}), 404
+    
+    # Verify account ownership
+    if credit_request.get('accountId') != request.user.get('accountId'):
+        return jsonify({'error': 'Access denied'}), 403
+    
+    if request.method == 'GET':
+        return jsonify(credit_request)
+    
+    if request.method == 'DELETE':
+        # Only allow deletion if pending or by admin
+        if credit_request.get('status') != 'pending' and request.user.get('role') not in ['admin', 'owner']:
+            return jsonify({'error': 'Can only delete pending requests'}), 400
+        
+        credit_requests_data = [r for r in credit_requests_data if r['id'] != request_id]
+        save_data(CREDIT_REQUESTS_FILE, credit_requests_data)
+        
+        broadcast_update('credit_request_deleted', {
+            'requestId': request_id,
+            'allRequests': credit_requests_data
+        }, account_id=request.user['accountId'])
+        
+        return jsonify({'message': 'Credit request deleted'}), 200
+    
+    if request.method == 'PUT':
+        # Update request
+        data = request.get_json()
+        
+        # Only admin can approve/reject
+        if data.get('status') in ['approved', 'rejected']:
+            if request.user.get('role') not in ['admin', 'owner']:
+                return jsonify({'error': 'Only admin can approve/reject requests'}), 403
+            
+            credit_request['status'] = data.get('status')
+            credit_request['approvedBy'] = request.user.get('name')
+            credit_request['approvalDate'] = datetime.now().isoformat()
+            
+            if data.get('status') == 'rejected':
+                credit_request['rejectionReason'] = data.get('rejectionReason', '')
+        else:
+            # Cashier can update notes/reason if still pending
+            if credit_request.get('status') != 'pending':
+                return jsonify({'error': 'Can only edit pending requests'}), 400
+            if credit_request.get('cashierId') != request.user.get('id'):
+                return jsonify({'error': 'Can only edit your own requests'}), 403
+            
+            credit_request['customerName'] = data.get('customerName', credit_request.get('customerName'))
+            credit_request['amount'] = float(data.get('amount', credit_request.get('amount', 0)))
+            credit_request['reason'] = data.get('reason', credit_request.get('reason', ''))
+            credit_request['notes'] = data.get('notes', credit_request.get('notes', ''))
+        
+        save_data(CREDIT_REQUESTS_FILE, credit_requests_data)
+        
+        broadcast_update('credit_request_updated', {
+            'request': credit_request,
+            'allRequests': credit_requests_data
+        }, account_id=request.user['accountId'])
+        
+        return jsonify(credit_request)
 
 @app.route('/api/discounts', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 @token_required
