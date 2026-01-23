@@ -316,3 +316,228 @@ def update_settings(**kwargs):
         conn.commit()
     
     conn.close()
+
+
+# ============================================================================
+# NEW PRODUCTION FUNCTIONS FOR SHIFTS, STOCK LOGS, AND REAL-TIME SYNC
+# ============================================================================
+
+# SHIFT OPERATIONS (Clock In/Out)
+def clock_in(account_id, user_id, username):
+    """Clock in a user and create a new shift"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                # Check if user already has an open shift
+                cursor.execute('''
+                    SELECT id FROM shifts 
+                    WHERE userid = %s AND accountid = %s AND status = 'open'
+                    LIMIT 1
+                ''', (user_id, account_id))
+                
+                existing_shift = cursor.fetchone()
+                if existing_shift:
+                    return {'error': 'User already has an open shift', 'shift_id': existing_shift['id']}
+                
+                # Create new shift
+                cursor.execute('''
+                    INSERT INTO shifts (accountid, userid, username, clockintime, status)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP, 'open')
+                    RETURNING id, clockintime
+                ''', (account_id, user_id, username))
+                
+                result = cursor.fetchone()
+                conn.commit()
+                return {'shift_id': result['id'], 'clock_in_time': result['clockintime'].isoformat()}
+    except Exception as e:
+        logger.error(f"Failed to clock in: {e}")
+        return {'error': str(e)}
+
+def clock_out(shift_id):
+    """Clock out a user and close the shift"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    UPDATE shifts 
+                    SET status = 'closed', clockouttime = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status = 'open'
+                    RETURNING id, clockouttime, totalsales, totalexpenses
+                ''', (shift_id,))
+                
+                result = cursor.fetchone()
+                conn.commit()
+                
+                if result:
+                    return {
+                        'shift_id': result['id'],
+                        'clock_out_time': result['clockouttime'].isoformat(),
+                        'total_sales': result['totalsales'],
+                        'total_expenses': result['totalexpenses']
+                    }
+                else:
+                    return {'error': 'Shift not found or already closed'}
+    except Exception as e:
+        logger.error(f"Failed to clock out: {e}")
+        return {'error': str(e)}
+
+def get_user_open_shift(account_id, user_id):
+    """Get the currently open shift for a user"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    SELECT id, clockintime, totalsales, totalexpenses 
+                    FROM shifts
+                    WHERE userid = %s AND accountid = %s AND status = 'open'
+                    LIMIT 1
+                ''', (user_id, account_id))
+                
+                return cursor.fetchone()
+    except Exception as e:
+        logger.error(f"Failed to get user open shift: {e}")
+        return None
+
+
+# STOCK LOG OPERATIONS (Atomic Transaction Tracking)
+def create_stock_log(account_id, product_id, quantity_changed, log_type, reason, sale_id=None, user_id=None, previous_qty=None, new_qty=None):
+    """Create a stock log entry for tracking"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    INSERT INTO stock_logs 
+                    (accountid, productid, quantitychanged, logtype, reason, saleid, userid, previousquantity, newquantity)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                ''', (account_id, product_id, quantity_changed, log_type, reason, sale_id, user_id, previous_qty, new_qty))
+                
+                result = cursor.fetchone()
+                conn.commit()
+                return result['id'] if result else None
+    except Exception as e:
+        logger.error(f"Failed to create stock log: {e}")
+        return None
+
+def get_stock_logs(account_id, product_id=None, limit=100):
+    """Get stock logs for auditing"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                if product_id:
+                    cursor.execute('''
+                        SELECT * FROM stock_logs
+                        WHERE accountid = %s AND productid = %s
+                        ORDER BY createdat DESC
+                        LIMIT %s
+                    ''', (account_id, product_id, limit))
+                else:
+                    cursor.execute('''
+                        SELECT * FROM stock_logs
+                        WHERE accountid = %s
+                        ORDER BY createdat DESC
+                        LIMIT %s
+                    ''', (account_id, limit))
+                
+                return cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to get stock logs: {e}")
+        return []
+
+def get_daily_stock_summary(account_id, product_id):
+    """Get daily stock changes for a product"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    SELECT 
+                        logtype,
+                        SUM(quantitychanged) as total_changed,
+                        COUNT(*) as transaction_count
+                    FROM stock_logs
+                    WHERE accountid = %s AND productid = %s 
+                    AND DATE(createdat) = CURRENT_DATE
+                    GROUP BY logtype
+                ''', (account_id, product_id))
+                
+                return cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to get daily stock summary: {e}")
+        return []
+
+
+# REAL-TIME MONITOR CACHE (for performance)
+def set_monitor_cache(account_id, key, value, ttl_seconds=300):
+    """Set cache for real-time monitor stats"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    INSERT INTO monitor_cache (accountid, key, value, expirat, updatedat)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP + INTERVAL '%s seconds', CURRENT_TIMESTAMP)
+                    ON CONFLICT (accountid, key) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        expirat = CURRENT_TIMESTAMP + INTERVAL '%s seconds',
+                        updatedat = CURRENT_TIMESTAMP
+                ''', (account_id, key, value, ttl_seconds, ttl_seconds))
+                
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"Failed to set monitor cache: {e}")
+        return False
+
+def get_monitor_cache(account_id, key):
+    """Get cached value if not expired"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    SELECT value FROM monitor_cache
+                    WHERE accountid = %s AND key = %s AND expirat > CURRENT_TIMESTAMP
+                ''', (account_id, key))
+                
+                result = cursor.fetchone()
+                return result['value'] if result else None
+    except Exception as e:
+        logger.error(f"Failed to get monitor cache: {e}")
+        return None
+
+
+# AUDIT LOG OPERATIONS (Compliance & Security)
+def create_audit_log(account_id, user_id, action, entity_type, entity_id, old_values=None, new_values=None, ip_address=None, user_agent=None):
+    """Create audit log for compliance"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    INSERT INTO audit_log 
+                    (accountid, userid, action, entitytype, entityid, oldvalues, newvalues, ipaddress, useragent)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ''', (account_id, user_id, action, entity_type, entity_id, 
+                      json.dumps(old_values) if old_values else None,
+                      json.dumps(new_values) if new_values else None,
+                      ip_address, user_agent))
+                
+                conn.commit()
+                return True
+    except Exception as e:
+        logger.error(f"Failed to create audit log: {e}")
+        return False
+
+def get_audit_logs(account_id, limit=100):
+    """Get audit logs for an account"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    SELECT * FROM audit_log
+                    WHERE accountid = %s
+                    ORDER BY createdat DESC
+                    LIMIT %s
+                ''', (account_id, limit))
+                
+                return cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to get audit logs: {e}")
+        return []

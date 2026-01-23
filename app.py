@@ -453,6 +453,22 @@ def init_subscription_plans():
     except Exception as e:
         print(f"Error initializing subscription plans: {e}")
 
+# ============================================================================
+# REGISTER PRODUCTION ATOMIC ENDPOINTS
+# ============================================================================
+try:
+    from atomic_endpoints import register_atomic_endpoints
+    from database import init_db
+    
+    # Initialize PostgreSQL database and register v2 endpoints
+    init_db()
+    register_atomic_endpoints(app, None)  # db_module not needed, using direct connection
+    print("✅ Atomic endpoints registered successfully")
+except ImportError as e:
+    print(f"⚠️  Warning: Could not load atomic endpoints: {e}")
+except Exception as e:
+    print(f"⚠️  Warning: Could not register atomic endpoints: {e}")
+
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -477,6 +493,27 @@ def token_required(f):
             return jsonify({'error': f'Invalid token: {str(e)}'}), 401
         return f(*args, **kwargs)
     return decorated
+
+def role_required(required_role):
+    """Decorator to check user role - allows admin and required role"""
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            # Allow OPTIONS preflight requests
+            if request.method == 'OPTIONS':
+                return '', 200
+            
+            if not hasattr(request, 'user'):
+                return jsonify({'error': 'Unauthorized'}), 401
+            
+            user_role = request.user.get('role', '')
+            # Allow if user is admin OR has the required role
+            if user_role != 'admin' and user_role != required_role and user_role != 'owner':
+                return jsonify({'error': 'Forbidden - insufficient permissions', 'required_role': required_role}), 403
+            
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
 
 
 @app.route('/api/auth/me', methods=['GET'])
@@ -1496,6 +1533,12 @@ def main_admin_get_all_time_entries():
 def handle_products():
     if request.method == 'OPTIONS':
         return '', 200
+    
+    # POST and PUT require admin role
+    if request.method in ['POST', 'PUT', 'DELETE']:
+        user_role = request.user.get('role', '')
+        if user_role not in ['admin', 'owner']:
+            return jsonify({'error': 'Forbidden - admin access required'}), 403
         
     products = load_data(PRODUCTS_FILE)
     
