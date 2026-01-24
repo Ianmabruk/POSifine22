@@ -26,28 +26,15 @@ app = Flask(__name__)
 # COMPREHENSIVE CORS CONFIGURATION - PRODUCTION READY
 # ============================================================
 
-# 1. Configure Flask-CORS with explicit settings
+# 1. Configure Flask-CORS with wildcard to allow all origins
 CORS(
     app,
-    resources={
-        r"/api/*": {
-            "origins": [
-                "*",
-                "https://posifine11.netlify.app",
-                "https://*.netlify.app",
-                "http://localhost:3002",
-                "http://localhost:3000"
-            ],
-            "methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
-            "expose_headers": ["Content-Type", "Authorization"],
-            "max_age": 86400,
-            "supports_credentials": False
-        }
-    },
-    send_wildcard=False,
-    vary_header=True,
-    automatic_options=True
+    resources={r"/api/*": {"origins": "*"}},
+    supports_credentials=False,
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    expose_headers=["Content-Type", "Authorization"],
+    max_age=86400
 )
 
 # 2. Explicit preflight handler - catches all OPTIONS requests
