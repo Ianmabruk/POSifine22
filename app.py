@@ -31,7 +31,13 @@ CORS(
     app,
     resources={
         r"/api/*": {
-            "origins": ["*"],
+            "origins": [
+                "*",
+                "https://posifine11.netlify.app",
+                "https://*.netlify.app",
+                "http://localhost:3002",
+                "http://localhost:3000"
+            ],
             "methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
             "expose_headers": ["Content-Type", "Authorization"],
@@ -39,7 +45,7 @@ CORS(
             "supports_credentials": False
         }
     },
-    send_wildcard=True,
+    send_wildcard=False,
     vary_header=True,
     automatic_options=True
 )
