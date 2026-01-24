@@ -2646,13 +2646,43 @@ def stats():
     filtered_products = [p for p in products if p.get('accountId') == account_id]
     filtered_expenses = [e for e in expenses_data if e.get('accountId') == account_id]
     
+    # Calculate basic totals
     total_sales = sum(s.get('total', 0) for s in filtered_sales)
     total_expenses = sum(e.get('amount', 0) for e in filtered_expenses)
+    
+    # Calculate COGS (Cost of Goods Sold) from sales stockDeductions
+    total_cogs = 0
+    for sale in filtered_sales:
+        stock_deductions = sale.get('stockDeductions', {})
+        if isinstance(stock_deductions, dict):
+            products_deductions = stock_deductions.get('products', [])
+            for deduction in products_deductions:
+                # deduction should have: quantity, cost, total_cost
+                total_cogs += deduction.get('total_cost', 0) or (deduction.get('quantity', 0) * deduction.get('cost', 0))
+    
+    # Calculate daily sales (today)
+    today = datetime.now().date()
+    daily_sales = sum(s.get('total', 0) for s in filtered_sales 
+                     if s.get('createdAt') and datetime.fromisoformat(s.get('createdAt')).date() == today)
+    
+    # Calculate weekly sales (last 7 days)
+    week_ago = today - timedelta(days=7)
+    weekly_sales = sum(s.get('total', 0) for s in filtered_sales 
+                      if s.get('createdAt') and datetime.fromisoformat(s.get('createdAt')).date() >= week_ago)
+    
+    # Calculate profits
+    gross_profit = total_sales - total_cogs  # Revenue minus COGS
+    net_profit = gross_profit - total_expenses  # Gross profit minus operating expenses
     
     return jsonify({
         'totalSales': total_sales,
         'totalExpenses': total_expenses,
-        'profit': total_sales - total_expenses,
+        'totalCOGS': total_cogs,
+        'grossProfit': gross_profit,
+        'netProfit': net_profit,
+        'profit': net_profit,  # For backward compatibility
+        'dailySales': daily_sales,
+        'weeklySales': weekly_sales,
         'productCount': len(filtered_products)
     })
 

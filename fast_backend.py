@@ -209,13 +209,20 @@ class UltraFastStockEngine:
                     new_qty = safe_round(current_qty - qty)
                     product['quantity'] = new_qty
                     
+                    # Get cost price for COGS calculation
+                    cost_price = float(product.get('cost', 0))
+                    total_cost = cost_price * qty
+                    
                     deductions['products'].append({
                         'id': product_id,
                         'name': product['name'],
                         'before': current_qty,
                         'after': new_qty,
                         'deducted': qty,
-                        'unit': product.get('unit', 'pcs')
+                        'quantity': qty,
+                        'unit': product.get('unit', 'pcs'),
+                        'cost': cost_price,
+                        'total_cost': total_cost
                     })
                 
                 # Handle recipe (if any) - fast path
@@ -231,13 +238,21 @@ class UltraFastStockEngine:
                             ing_current = float(ing_product.get('quantity', 0))
                             if ing_current >= ing_qty:
                                 ing_product['quantity'] = safe_round(ing_current - ing_qty)
+                                
+                                # Get cost price for ingredient
+                                ing_cost_price = float(ing_product.get('cost', 0))
+                                ing_total_cost = ing_cost_price * ing_qty
+                                
                                 deductions['products'].append({
                                     'id': ing_id,
                                     'name': ing_product['name'],
                                     'before': ing_current,
                                     'after': ing_product['quantity'],
                                     'deducted': ing_qty,
-                                    'unit': ing_product.get('unit', 'pcs')
+                                    'quantity': ing_qty,
+                                    'unit': ing_product.get('unit', 'pcs'),
+                                    'cost': ing_cost_price,
+                                    'total_cost': ing_total_cost
                                 })
             
             return True, None, deductions
