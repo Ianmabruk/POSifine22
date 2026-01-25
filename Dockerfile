@@ -14,10 +14,15 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
-# Copy application
+# Copy application files
 COPY app.py .
+COPY database.py .
+COPY models.py .
 COPY stock_engine.py .
-COPY fast_backend.py .
+COPY auth_controller.py .
+COPY admin_controller.py .
+COPY cashier_controller.py .
+COPY sync_manager.py .
 COPY gunicorn.conf.py .
 COPY data/ ./data/
 
