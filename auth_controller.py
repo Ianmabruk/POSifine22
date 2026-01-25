@@ -68,15 +68,16 @@ class AuthController:
         except jwt.InvalidTokenError:
             return None
     
-    def signup(self, email: str, password: str, name: str, plan: str = 'free') -> Tuple[bool, Optional[str], Optional[Dict]]:
+    def signup(self, email: str, password: str, name: str, plan: str = 'free', is_main_admin: bool = False) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
-        Create new account and owner user
+        Create new account and user (owner or admin based on plan)
         
         Args:
-            email: User email (also account owner email)
+            email: User email
             password: Password
             name: User name
-            plan: Subscription plan
+            plan: Subscription plan (free, basic, ultra, enterprise)
+            is_main_admin: If True, create as owner/main admin; otherwise create as regular admin
         
         Returns:
             (success, error_message, user_data_with_token)
@@ -86,6 +87,14 @@ class AuthController:
             existing_user = self.ds.get_user_by_email(email)
             if existing_user:
                 return False, "Email already registered", None
+            
+            # Determine user role based on plan and main admin flag
+            # Main admins (owners) - have full system access, manage all accounts
+            # Regular admins - manage their own business, have admin dashboard access
+            if is_main_admin or plan in ['enterprise', 'ultra']:
+                user_role = 'owner'  # Main admin / super admin
+            else:
+                user_role = 'admin'  # Regular business admin
             
             # Create account
             account_id = hashlib.md5(email.encode()).hexdigest()[:16]
@@ -112,13 +121,13 @@ class AuthController:
             else:
                 account_id = existing_account['id']
             
-            # Create owner user
+            # Create user with appropriate role
             user_data = {
                 'account_id': account_id,
                 'email': email,
                 'password_hash': self.hash_password(password),
                 'name': name,
-                'role': 'owner',
+                'role': user_role,  # 'owner' for main admins, 'admin' for regular admins
                 'is_active': True,
                 'is_locked': False,
                 'screen_locked': False,
@@ -131,8 +140,12 @@ class AuthController:
             # Generate token
             token = self.generate_token(user)
             
-            # Return user data (without password_hash) in the expected format
+            # Add plan to user response for frontend routing
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
+            user_response['plan'] = plan
+            
+            # Log signup
+            logger.info(f"New signup: {email} (role: {user_role}, plan: {plan})")
             
             return True, None, {
                 'user': user_response,

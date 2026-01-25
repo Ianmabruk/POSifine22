@@ -172,18 +172,20 @@ def index():
 
 @app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
-    """Create new account and owner user"""
+    """Create new account and user (owner or admin based on plan)"""
     try:
         data = request.get_json()
         email = data.get('email')
         password = data.get('password')
         name = data.get('name')
         plan = data.get('plan', 'free')
+        is_main_admin = data.get('is_main_admin', False)  # Explicit main admin flag
         
         if not email or not password or not name:
             return jsonify({'error': 'Missing required fields'}), 400
         
-        success, error, user = auth.signup(email, password, name, plan)
+        # Signup with role determination
+        success, error, user = auth.signup(email, password, name, plan, is_main_admin)
         
         if success:
             return jsonify(user), 201
