@@ -3946,6 +3946,325 @@ def get_clock_entries():
         print(f"Get clock entries error: {str(e)}")
         return jsonify({'error': 'Failed to get clock entries', 'message': str(e)}), 500
 
+# ============================================================================
+# V2 ENDPOINTS - OPTIMIZED FOR FRONTEND COMPATIBILITY
+# ============================================================================
+
+@app.route('/api/v2/sales/complete', methods=['POST', 'OPTIONS'])
+@token_required
+def complete_sale_v2():
+    """
+    Complete Sale V2 - Optimized for <300ms performance
+    
+    ✅ FIXED ARCHITECTURE:
+    1. Validate cart
+    2. Deduct stock (synchronous, immediate)
+    3. Create sale record
+    4. Update analytics (background)
+    5. Broadcast to admin (background)
+    6. Return immediately with updated products
+    
+    Performance target: <300ms
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        start_time = time.time()
+        data = request.get_json()
+        
+        # 1. VALIDATE REQUEST
+        if not data.get('items') or len(data['items']) == 0:
+            return jsonify({'error': 'At least one item required'}), 400
+        
+        # 2. LOAD DATA (with cache for speed)
+        products = load_data_cached(PRODUCTS_FILE, use_cache=True)
+        expenses = load_data_cached(EXPENSES_FILE, use_cache=True)
+        sales = load_data_cached(SALES_FILE, use_cache=True)
+        
+        # 3. DEDUCT STOCK SYNCHRONOUSLY (CRITICAL - MUST HAPPEN BEFORE RESPONSE)
+        engine = UltraFastStockEngine(products, expenses)
+        is_valid, error_msg, deductions = engine.validate_and_deduct_fast(data.get('items', []))
+        
+        if not is_valid:
+            return jsonify({'error': error_msg, 'success': False}), 400
+        
+        # 4. SAVE PRODUCTS IMMEDIATELY (stock must persist)
+        save_data_fast(PRODUCTS_FILE, products)
+        
+        # 5. CREATE SALE RECORD
+        sale = {
+            'id': get_next_id(sales),
+            'items': data['items'],
+            'total': float(data['total']),
+            'discount': float(data.get('discount', 0)),
+            'tax': float(data.get('tax', 0)),
+            'paymentMethod': data.get('paymentMethod', 'cash'),
+            'shiftId': data.get('shiftId'),
+            'accountId': request.user['accountId'],
+            'cashierId': request.user['id'],
+            'cashierName': request.user.get('name', 'Unknown'),
+            'stockDeductions': deductions,
+            'createdAt': datetime.now().isoformat()
+        }
+        
+        sales.append(sale)
+        
+        # 6. BUILD UPDATED PRODUCTS FOR UI (immediate feedback)
+        account_id = request.user['accountId']
+        updated_products = [
+            {
+                'id': p['id'],
+                'name': p['name'],
+                'quantity': p.get('quantity', 0),
+                'unit': p.get('unit', 'pcs'),
+                'price': p.get('price', 0)
+            }
+            for p in products
+            if p.get('accountId') == account_id
+        ]
+        
+        # 7. BACKGROUND OPERATIONS (non-blocking)
+        def background_ops():
+            """Non-critical operations in background"""
+            try:
+                # Save sales
+                save_data_fast(SALES_FILE, sales)
+                
+                # Create auto-expenses
+                expenses_updated = create_auto_expenses_for_sale(
+                    deductions, products, expenses, request.user['accountId']
+                )
+                save_data_fast(EXPENSES_FILE, expenses_updated)
+                
+                # Check low stock
+                warnings = check_low_stock_warnings(products, request.user['accountId'])
+                
+                # Broadcast to all dashboards
+                broadcast_update('sale_completed', {
+                    'saleId': sale['id'],
+                    'deductions': deductions,
+                    'total': sale['total'],
+                    'timestamp': datetime.now().isoformat(),
+                    'updatedProducts': updated_products,
+                    'lowStockWarnings': warnings
+                }, account_id=account_id)
+            except Exception as e:
+                print(f"⚠️ Background ops error: {e}")
+        
+        # Start background thread
+        bg_thread = threading.Thread(target=background_ops, daemon=True)
+        bg_thread.start()
+        
+        elapsed_ms = (time.time() - start_time) * 1000
+        performance.record_sale(elapsed_ms)
+        
+        # 8. RETURN IMMEDIATELY (don't wait for background)
+        return jsonify({
+            'success': True,
+            'saleId': sale['id'],
+            'total': sale['total'],
+            'processingTime': f"{elapsed_ms:.1f}ms",
+            'status': '✅ FAST' if elapsed_ms < 300 else '⚠️ OK',
+            'updatedProducts': updated_products,
+            'stockDeductions': deductions,
+            'timestamp': sale['createdAt']
+        }), 200
+    
+    except Exception as e:
+        import traceback
+        print(f"❌ V2 Sale error: {e}")
+        print(traceback.format_exc())
+        return jsonify({
+            'error': 'Sale failed',
+            'message': str(e),
+            'success': False
+        }), 500
+
+
+@app.route('/api/v2/monitor/stats', methods=['GET', 'OPTIONS'])
+@token_required
+def monitor_stats_v2():
+    """
+    Monitor Dashboard Statistics - Real-time calculations
+    
+    ✅ FIXED CALCULATIONS:
+    - Total Sales = sum(sales.total)
+    - Total Expenses = sum(expenses.amount)
+    - Net Profit = Total Sales - Total Expenses
+    - Transaction Count = len(sales)
+    
+    Updates instantly after each sale.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        account_id = request.user.get('accountId')
+        
+        # Load data (using cache for speed)
+        sales = load_data_cached(SALES_FILE, use_cache=True)
+        expenses = load_data_cached(EXPENSES_FILE, use_cache=True)
+        
+        # Filter by account and today's date
+        today = datetime.now().date()
+        
+        account_sales = [
+            s for s in sales 
+            if s.get('accountId') == account_id 
+            and s.get('createdAt') 
+            and datetime.fromisoformat(s.get('createdAt')).date() == today
+        ]
+        
+        account_expenses = [
+            e for e in expenses 
+            if e.get('accountId') == account_id 
+            and e.get('createdAt') 
+            and datetime.fromisoformat(e.get('createdAt')).date() == today
+        ]
+        
+        # CALCULATE TOTALS (as specified in requirements)
+        total_sales = sum(s.get('total', 0) for s in account_sales)
+        total_expenses = sum(e.get('amount', 0) for e in account_expenses)
+        net_profit = total_sales - total_expenses
+        transaction_count = len(account_sales)
+        
+        return jsonify({
+            'totalSales': float(total_sales),
+            'totalExpenses': float(total_expenses),
+            'netProfit': float(net_profit),
+            'transactionCount': transaction_count,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    
+    except Exception as e:
+        print(f"❌ Monitor stats error: {e}")
+        return jsonify({
+            'error': 'Failed to calculate statistics',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/v2/shifts/clock-in', methods=['POST', 'OPTIONS'])
+@token_required
+def clock_in_v2():
+    """
+    Clock In V2 - Create shift for cashier
+    Returns shiftId for sale tracking
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        # For file-based system, we'll use a simple shift tracker
+        shifts_file = f'{DATA_DIR}/shifts.json'
+        init_json_file(shifts_file)
+        shifts = load_data(shifts_file)
+        
+        # Check if already clocked in
+        active_shift = next((s for s in shifts 
+                           if s.get('userId') == request.user['id'] 
+                           and not s.get('clockOutTime')), None)
+        
+        if active_shift:
+            return jsonify({
+                'success': True,
+                'shiftId': active_shift['id'],
+                'message': 'Already clocked in',
+                'clockInTime': active_shift['clockInTime']
+            }), 200
+        
+        # Create new shift
+        shift = {
+            'id': get_next_id(shifts),
+            'userId': request.user['id'],
+            'userName': request.user.get('name', 'Unknown'),
+            'accountId': request.user['accountId'],
+            'clockInTime': datetime.now().isoformat(),
+            'clockOutTime': None,
+            'totalSales': 0,
+            'totalExpenses': 0
+        }
+        
+        shifts.append(shift)
+        save_data(shifts_file, shifts)
+        
+        print(f"✅ Shift started: {shift['userName']} (ID: {shift['id']})")
+        
+        return jsonify({
+            'success': True,
+            'shiftId': shift['id'],
+            'clockInTime': shift['clockInTime']
+        }), 200
+    
+    except Exception as e:
+        print(f"❌ Clock-in V2 error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/v2/shifts/clock-out', methods=['POST', 'OPTIONS'])
+@token_required
+def clock_out_v2():
+    """
+    Clock Out V2 - End shift and return summary
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json() or {}
+        shift_id = data.get('shiftId')
+        
+        shifts_file = f'{DATA_DIR}/shifts.json'
+        init_json_file(shifts_file)
+        shifts = load_data(shifts_file)
+        
+        # Find shift
+        shift = next((s for s in shifts if s.get('id') == shift_id), None)
+        
+        if not shift:
+            return jsonify({'error': 'Shift not found'}), 404
+        
+        if shift.get('clockOutTime'):
+            return jsonify({'error': 'Already clocked out'}), 400
+        
+        # Calculate totals from sales during this shift
+        sales = load_data_cached(SALES_FILE, use_cache=True)
+        shift_sales = [
+            s for s in sales 
+            if s.get('shiftId') == shift_id or 
+            (s.get('cashierId') == shift['userId'] and 
+             s.get('createdAt') and 
+             s.get('createdAt') >= shift['clockInTime'])
+        ]
+        
+        total_sales = sum(s.get('total', 0) for s in shift_sales)
+        
+        # Update shift
+        shift['clockOutTime'] = datetime.now().isoformat()
+        shift['totalSales'] = total_sales
+        
+        save_data(shifts_file, shifts)
+        
+        print(f"✅ Shift ended: {shift['userName']} - Total: {total_sales}")
+        
+        return jsonify({
+            'success': True,
+            'shiftId': shift['id'],
+            'clockOutTime': shift['clockOutTime'],
+            'totalSales': total_sales,
+            'totalExpenses': shift.get('totalExpenses', 0)
+        }), 200
+    
+    except Exception as e:
+        print(f"❌ Clock-out V2 error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ============================================================================
+# END V2 ENDPOINTS
+# ============================================================================
+
 # 404 Error Handler
 @app.errorhandler(404)
 def not_found(error):
