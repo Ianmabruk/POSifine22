@@ -88,13 +88,10 @@ class AuthController:
             if existing_user:
                 return False, "Email already registered", None
             
-            # Determine user role based on plan and main admin flag
-            # Main admins (owners) - have full system access, manage all accounts
-            # Regular admins - manage their own business, have admin dashboard access
-            if is_main_admin or plan in ['enterprise', 'ultra']:
-                user_role = 'owner'  # Main admin / super admin
-            else:
-                user_role = 'admin'  # Regular business admin
+            # All signups create 'admin' role users
+            # Main admin dashboard (/main-admin) is accessed via direct URL only
+            # Admins manage their business and create cashier users
+            user_role = 'admin'  # All new signups are business admins
             
             # Create account
             account_id = hashlib.md5(email.encode()).hexdigest()[:16]
