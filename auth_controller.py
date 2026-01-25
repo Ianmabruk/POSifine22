@@ -131,11 +131,13 @@ class AuthController:
             # Generate token
             token = self.generate_token(user)
             
-            # Return user data (without password_hash)
+            # Return user data (without password_hash) in the expected format
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
-            user_response['token'] = token
             
-            return True, None, user_response
+            return True, None, {
+                'user': user_response,
+                'token': token
+            }
             
         except Exception as e:
             logger.error(f"Signup error: {e}")
@@ -185,11 +187,13 @@ class AuthController:
             # Generate token
             token = self.generate_token(user)
             
-            # Return user data
+            # Return user data in the expected format
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
-            user_response['token'] = token
             
-            return True, None, user_response
+            return True, None, {
+                'user': user_response,
+                'token': token
+            }
             
         except Exception as e:
             logger.error(f"Login error: {e}")
@@ -238,11 +242,13 @@ class AuthController:
             # Generate token
             token = self.generate_token(user)
             
-            # Return user data
+            # Return user data in the expected format
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
-            user_response['token'] = token
             
-            return True, None, user_response
+            return True, None, {
+                'user': user_response,
+                'token': token
+            }
             
         except Exception as e:
             logger.error(f"PIN login error: {e}")
