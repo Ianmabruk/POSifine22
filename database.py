@@ -1,543 +1,681 @@
-import psycopg
-from psycopg.rows import dict_row
+"""
+OPTIMIZED DATABASE LAYER
+=========================
+High-performance data access layer with:
+- Dual storage support (JSON files + PostgreSQL)
+- Connection pooling for PostgreSQL
+- Efficient batch operations
+- Transaction management
+- Multi-tenant data isolation
+- Caching for frequently accessed data
+"""
+
 import json
 import os
-import logging
+import threading
+from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime
-from urllib.parse import urlparse
+from pathlib import Path
+import logging
+from functools import lru_cache
+
+# PostgreSQL support (optional)
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+    HAS_POSTGRES = True
+except ImportError:
+    HAS_POSTGRES = False
+    psycopg = None
+    ConnectionPool = None
 
 logger = logging.getLogger(__name__)
 
-def get_db_url():
-    database_url = os.environ.get('DATABASE_URL')
-    if database_url:
-        if database_url.startswith('postgres://'):
-            database_url = database_url.replace('postgres://', 'postgresql://', 1)
-        return database_url
-    return 'postgresql://localhost/pos_db'
+# Thread-safe file locks
+file_locks = {}
+lock_manager = threading.Lock()
 
-def init_db():
-    try:
-        with psycopg.connect(get_db_url()) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
+
+def get_file_lock(filepath: str) -> threading.Lock:
+    """Get or create a thread-safe lock for a file"""
+    with lock_manager:
+        if filepath not in file_locks:
+            file_locks[filepath] = threading.Lock()
+        return file_locks[filepath]
+
+
+class DataStore:
+    """
+    High-performance data store with dual backend support
+    """
+    
+    def __init__(self, data_dir: str = None, use_postgres: bool = False):
+        """
+        Initialize data store
+        
+        Args:
+            data_dir: Directory for JSON file storage
+            use_postgres: Whether to use PostgreSQL (requires DATABASE_URL)
+        """
+        # Setup data directory
+        if data_dir is None:
+            data_dir = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data'))
+        
+        self.data_dir = os.path.abspath(data_dir)
+        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Storage backend
+        self.use_postgres = use_postgres and HAS_POSTGRES
+        self.pg_pool: Optional[ConnectionPool] = None
+        
+        # In-memory cache for frequently accessed data
+        self._cache = {}
+        self._cache_lock = threading.Lock()
+        
+        # Initialize storage
+        if self.use_postgres:
+            self._init_postgres()
+        else:
+            self._init_json_files()
+        
+        logger.info(f"DataStore initialized with {'PostgreSQL' if self.use_postgres else 'JSON files'}")
+    
+    # ============================================================
+    # POSTGRESQL OPERATIONS
+    # ============================================================
+    
+    def _init_postgres(self):
+        """Initialize PostgreSQL connection pool"""
+        try:
+            db_url = os.environ.get('DATABASE_URL', '')
+            if db_url.startswith('postgres://'):
+                db_url = db_url.replace('postgres://', 'postgresql://', 1)
+            
+            # Create connection pool (min 2, max 10 connections)
+            self.pg_pool = ConnectionPool(
+                db_url,
+                min_size=2,
+                max_size=10,
+                timeout=30
+            )
+            
+            # Create tables
+            self._create_tables()
+            logger.info("PostgreSQL connection pool created")
+        except Exception as e:
+            logger.error(f"PostgreSQL initialization failed: {e}")
+            logger.info("Falling back to JSON file storage")
+            self.use_postgres = False
+            self._init_json_files()
+    
+    def _create_tables(self):
+        """Create database tables if they don't exist"""
+        with self.pg_pool.connection() as conn:
+            with conn.cursor() as cur:
+                # Accounts table
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS accounts (
-                        id SERIAL PRIMARY KEY,
-                        owneremail TEXT UNIQUE,
-                        plan TEXT,
-                        islocked BOOLEAN DEFAULT FALSE,
-                        trialendsat TEXT,
-                        createdat TEXT
-                    );
-                    
+                        id TEXT PRIMARY KEY,
+                        owner_email TEXT UNIQUE NOT NULL,
+                        business_name TEXT NOT NULL,
+                        plan TEXT DEFAULT 'free',
+                        is_active BOOLEAN DEFAULT TRUE,
+                        is_locked BOOLEAN DEFAULT FALSE,
+                        trial_ends_at TEXT,
+                        subscription_ends_at TEXT,
+                        created_at TEXT NOT NULL,
+                        business_logo TEXT,
+                        currency TEXT DEFAULT 'KES',
+                        tax_rate REAL DEFAULT 0.0,
+                        screen_lock_password TEXT DEFAULT '2005',
+                        days_used INTEGER DEFAULT 0,
+                        last_activity_date TEXT,
+                        requested_trial BOOLEAN DEFAULT FALSE
+                    )
+                """)
+                
+                # Users table
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         id SERIAL PRIMARY KEY,
-                        email TEXT UNIQUE,
-                        password TEXT,
-                        name TEXT,
-                        role TEXT,
-                        plan TEXT,
-                        accountid INTEGER REFERENCES accounts(id),
-                        active BOOLEAN DEFAULT TRUE,
-                        locked BOOLEAN DEFAULT FALSE,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        email TEXT UNIQUE NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        role TEXT DEFAULT 'cashier',
                         pin TEXT,
-                        cashierpin TEXT,
-                        createdby INTEGER,
-                        createdat TEXT
-                    );
-                    
+                        cashier_pin TEXT,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        is_locked BOOLEAN DEFAULT FALSE,
+                        screen_locked BOOLEAN DEFAULT FALSE,
+                        created_at TEXT NOT NULL,
+                        created_by INTEGER,
+                        last_login TEXT,
+                        hourly_rate REAL DEFAULT 0.0,
+                        UNIQUE(account_id, email)
+                    )
+                """)
+                
+                # Products table
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS products (
                         id SERIAL PRIMARY KEY,
-                        accountid INTEGER REFERENCES accounts(id),
-                        name TEXT,
-                        price REAL,
-                        cost REAL DEFAULT 0,
-                        quantity INTEGER DEFAULT 0,
-                        image TEXT,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        cost REAL DEFAULT 0.0,
+                        quantity REAL DEFAULT 0.0,
+                        product_type TEXT DEFAULT 'regular',
                         category TEXT DEFAULT 'general',
                         unit TEXT DEFAULT 'pcs',
-                        recipe TEXT DEFAULT '[]',
-                        iscomposite BOOLEAN DEFAULT FALSE,
-                        createdat TEXT,
-                        createdby INTEGER,
-                        updatedat TEXT
-                    );
-                    
+                        image TEXT,
+                        barcode TEXT,
+                        sku TEXT,
+                        is_composite BOOLEAN DEFAULT FALSE,
+                        recipe JSONB DEFAULT '[]',
+                        reorder_level REAL DEFAULT 0.0,
+                        max_stock_level REAL DEFAULT 0.0,
+                        cost_per_unit REAL DEFAULT 0.0,
+                        enable_weight_pricing BOOLEAN DEFAULT FALSE,
+                        created_at TEXT NOT NULL,
+                        created_by INTEGER,
+                        updated_at TEXT
+                    )
+                """)
+                
+                # Sales table
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS sales (
                         id SERIAL PRIMARY KEY,
-                        accountid INTEGER REFERENCES accounts(id),
-                        items TEXT,
-                        total REAL,
-                        cashierid INTEGER,
-                        cashiername TEXT,
-                        createdat TEXT
-                    );
-                    
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        items JSONB NOT NULL,
+                        total REAL NOT NULL,
+                        total_cost REAL DEFAULT 0.0,
+                        gross_profit REAL DEFAULT 0.0,
+                        payment_method TEXT DEFAULT 'cash',
+                        amount_paid REAL DEFAULT 0.0,
+                        change REAL DEFAULT 0.0,
+                        tax_amount REAL DEFAULT 0.0,
+                        discount_amount REAL DEFAULT 0.0,
+                        service_fee REAL DEFAULT 0.0,
+                        cashier_id INTEGER,
+                        cashier_name TEXT,
+                        created_at TEXT NOT NULL,
+                        receipt_number TEXT,
+                        notes TEXT
+                    )
+                """)
+                
+                # Time entries table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS time_entries (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        user_id INTEGER NOT NULL,
+                        user_name TEXT NOT NULL,
+                        clock_in_time TEXT NOT NULL,
+                        clock_out_time TEXT,
+                        duration_minutes INTEGER DEFAULT 0,
+                        date TEXT NOT NULL,
+                        notes TEXT
+                    )
+                """)
+                
+                # Reminders table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS reminders (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        title TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        created_by INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        seen_by JSONB DEFAULT '[]'
+                    )
+                """)
+                
+                # Vendors table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS vendors (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        product_or_service TEXT NOT NULL,
+                        email TEXT,
+                        phone TEXT,
+                        address TEXT,
+                        city TEXT,
+                        country TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+                
+                # Credit requests table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS credit_requests (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        cashier_id INTEGER NOT NULL,
+                        cashier_name TEXT NOT NULL,
+                        amount REAL NOT NULL,
+                        reason TEXT NOT NULL,
+                        status TEXT DEFAULT 'pending',
+                        reviewed_by INTEGER,
+                        reviewed_at TEXT,
+                        admin_notes TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+                
+                # Expenses table
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS expenses (
                         id SERIAL PRIMARY KEY,
-                        accountid INTEGER REFERENCES accounts(id),
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        amount REAL NOT NULL,
+                        quantity REAL DEFAULT 1.0,
+                        unit TEXT DEFAULT 'unit',
+                        category TEXT DEFAULT 'general',
                         description TEXT,
-                        amount REAL,
-                        createdat TEXT
-                    );
-                    
-                    CREATE TABLE IF NOT EXISTS activities (
+                        source TEXT DEFAULT 'manual',
+                        linked_product_id INTEGER,
+                        created_at TEXT NOT NULL,
+                        created_by INTEGER
+                    )
+                """)
+                
+                # Discounts table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS discounts (
                         id SERIAL PRIMARY KEY,
-                        type TEXT,
-                        userid INTEGER,
-                        email TEXT,
-                        name TEXT,
-                        plan TEXT,
-                        createdby INTEGER,
-                        timestamp TEXT
-                    );
-                    
-                    CREATE TABLE IF NOT EXISTS settings (
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        product_id INTEGER NOT NULL,
+                        discount_type TEXT DEFAULT 'percentage',
+                        discount_value REAL DEFAULT 0.0,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+                
+                # Service fees table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS service_fees (
                         id SERIAL PRIMARY KEY,
-                        screenlockpassword TEXT DEFAULT '2005',
-                        businessname TEXT DEFAULT 'My Business'
-                    );
-                ''')
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        amount REAL NOT NULL,
+                        fee_type TEXT DEFAULT 'fixed',
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TEXT NOT NULL
+                    )
+                """)
                 
-                cursor.execute('SELECT COUNT(*) FROM settings')
-                if cursor.fetchone()[0] == 0:
-                    cursor.execute('INSERT INTO settings (screenlockpassword, businessname) VALUES (%s, %s)', 
-                                  ('2005', 'My Business'))
-            conn.commit()
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
-        raise
-
-def get_db():
-    try:
-        conn = psycopg.connect(get_db_url(), row_factory=dict_row)
-        return conn
-    except Exception as e:
-        logger.error(f"Database connection failed: {e}")
-        raise
-
-def create_account(owner_email, plan, trial_ends_at):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    INSERT INTO accounts (owneremail, plan, trialendsat, createdat)
-                    VALUES (%s, %s, %s, %s) RETURNING id
-                ''', (owner_email, plan, trial_ends_at, datetime.now().isoformat()))
-                return cursor.fetchone()['id']
-    except Exception as e:
-        logger.error(f"Failed to create account: {e}")
-        raise
-
-def get_account(account_id):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT * FROM accounts WHERE id = %s', (account_id,))
-                return cursor.fetchone()
-    except Exception as e:
-        logger.error(f"Failed to get account: {e}")
-        return None
-
-def create_user(email, password, name, role, plan, account_id, pin=None, created_by=None):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    INSERT INTO users (email, password, name, role, plan, accountid, pin, cashierpin, createdby, createdat)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-                ''', (email, password, name, role, plan, account_id, pin, pin, created_by, datetime.now().isoformat()))
-                return cursor.fetchone()['id']
-    except Exception as e:
-        logger.error(f"Failed to create user: {e}")
-        raise
-
-def get_user_by_email(email):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT * FROM users WHERE email = %s', (email,))
-                return cursor.fetchone()
-    except Exception as e:
-        logger.error(f"Failed to get user by email: {e}")
-        return None
-
-def get_user_by_id(user_id):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))
-                return cursor.fetchone()
-    except Exception as e:
-        logger.error(f"Failed to get user by id: {e}")
-        return None
-
-def get_users_by_account(account_id):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT * FROM users WHERE accountid = %s', (account_id,))
-                return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Failed to get users by account: {e}")
-        return []
-
-def get_all_users():
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('SELECT * FROM users')
-                return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Failed to get all users: {e}")
-        return []
-
-# Product operations
-def create_product(account_id, name, price, cost, quantity, image, category, unit, recipe, is_composite, created_by):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO products (accountId, name, price, cost, quantity, image, category, unit, recipe, isComposite, createdAt, createdBy)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-    ''', (account_id, name, price, cost, quantity, image, category, unit, json.dumps(recipe), is_composite, datetime.now().isoformat(), created_by))
-    product_id = cursor.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return product_id
-
-def get_products_by_account(account_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM products WHERE accountId = %s', (account_id,))
-    rows = cursor.fetchall()
-    products = []
-    for row in rows:
-        product = dict(row)
-        product['recipe'] = json.loads(product['recipe']) if product['recipe'] else []
-        products.append(product)
-    conn.close()
-    return products
-
-def update_product(product_id, **kwargs):
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    set_clause = []
-    values = []
-    for key, value in kwargs.items():
-        set_clause.append(f"{key} = %s")
-        values.append(value)
-    
-    if set_clause:
-        values.append(datetime.now().isoformat())
-        values.append(product_id)
-        cursor.execute(f'''
-            UPDATE products SET {", ".join(set_clause)}, updatedAt = %s
-            WHERE id = %s
-        ''', values)
-        conn.commit()
-    
-    conn.close()
-
-def delete_product(product_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM products WHERE id = %s', (product_id,))
-    conn.commit()
-    conn.close()
-
-# Sales operations
-def create_sale(account_id, items, total, cashier_id, cashier_name):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO sales (accountId, items, total, cashierId, cashierName, createdAt)
-        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
-    ''', (account_id, json.dumps(items), total, cashier_id, cashier_name, datetime.now().isoformat()))
-    sale_id = cursor.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return sale_id
-
-def get_sales_by_account(account_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM sales WHERE accountId = %s', (account_id,))
-    rows = cursor.fetchall()
-    sales = []
-    for row in rows:
-        sale = dict(row)
-        sale['items'] = json.loads(sale['items']) if sale['items'] else []
-        sales.append(sale)
-    conn.close()
-    return sales
-
-# Activity operations
-def create_activity(activity_type, user_id, email, name, plan, created_by=None):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO activities (type, userId, email, name, plan, createdBy, timestamp)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    ''', (activity_type, user_id, email, name, plan, created_by, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def get_all_activities():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM activities ORDER BY timestamp DESC')
-    result = list_from_rows(cursor.fetchall())
-    conn.close()
-    return result
-
-# Settings operations
-def get_settings():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM settings LIMIT 1')
-    result = dict_from_row(cursor.fetchone())
-    conn.close()
-    return result or {'screenLockPassword': '2005', 'businessName': 'My Business'}
-
-def update_settings(**kwargs):
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    set_clause = []
-    values = []
-    for key, value in kwargs.items():
-        set_clause.append(f"{key} = %s")
-        values.append(value)
-    
-    if set_clause:
-        cursor.execute(f'UPDATE settings SET {", ".join(set_clause)} WHERE id = 1', values)
-        conn.commit()
-    
-    conn.close()
-
-
-# ============================================================================
-# NEW PRODUCTION FUNCTIONS FOR SHIFTS, STOCK LOGS, AND REAL-TIME SYNC
-# ============================================================================
-
-# SHIFT OPERATIONS (Clock In/Out)
-def clock_in(account_id, user_id, username):
-    """Clock in a user and create a new shift"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                # Check if user already has an open shift
-                cursor.execute('''
-                    SELECT id FROM shifts 
-                    WHERE userid = %s AND accountid = %s AND status = 'open'
-                    LIMIT 1
-                ''', (user_id, account_id))
+                # Stock movements table (audit trail)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_movements (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        product_id INTEGER NOT NULL,
+                        quantity REAL NOT NULL,
+                        movement_type TEXT NOT NULL,
+                        reference_id INTEGER,
+                        notes TEXT,
+                        created_at TEXT NOT NULL,
+                        created_by INTEGER
+                    )
+                """)
                 
-                existing_shift = cursor.fetchone()
-                if existing_shift:
-                    return {'error': 'User already has an open shift', 'shift_id': existing_shift['id']}
+                # Create indexes for performance
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_products_account ON products(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_account ON sales(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_account ON time_entries(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_user ON time_entries(user_id)")
                 
-                # Create new shift
-                cursor.execute('''
-                    INSERT INTO shifts (accountid, userid, username, clockintime, status)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP, 'open')
-                    RETURNING id, clockintime
-                ''', (account_id, user_id, username))
-                
-                result = cursor.fetchone()
                 conn.commit()
-                return {'shift_id': result['id'], 'clock_in_time': result['clockintime'].isoformat()}
-    except Exception as e:
-        logger.error(f"Failed to clock in: {e}")
-        return {'error': str(e)}
-
-def clock_out(shift_id):
-    """Clock out a user and close the shift"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    UPDATE shifts 
-                    SET status = 'closed', clockouttime = CURRENT_TIMESTAMP
-                    WHERE id = %s AND status = 'open'
-                    RETURNING id, clockouttime, totalsales, totalexpenses
-                ''', (shift_id,))
-                
-                result = cursor.fetchone()
-                conn.commit()
-                
-                if result:
-                    return {
-                        'shift_id': result['id'],
-                        'clock_out_time': result['clockouttime'].isoformat(),
-                        'total_sales': result['totalsales'],
-                        'total_expenses': result['totalexpenses']
-                    }
+    
+    # ============================================================
+    # JSON FILE OPERATIONS
+    # ============================================================
+    
+    def _init_json_files(self):
+        """Initialize JSON file storage"""
+        self.files = {
+            'accounts': os.path.join(self.data_dir, 'accounts.json'),
+            'users': os.path.join(self.data_dir, 'users.json'),
+            'products': os.path.join(self.data_dir, 'products.json'),
+            'sales': os.path.join(self.data_dir, 'sales.json'),
+            'time_entries': os.path.join(self.data_dir, 'time_entries.json'),
+            'reminders': os.path.join(self.data_dir, 'reminders.json'),
+            'vendors': os.path.join(self.data_dir, 'vendors.json'),
+            'credit_requests': os.path.join(self.data_dir, 'credit_requests.json'),
+            'expenses': os.path.join(self.data_dir, 'expenses.json'),
+            'discounts': os.path.join(self.data_dir, 'discounts.json'),
+            'service_fees': os.path.join(self.data_dir, 'service_fees.json'),
+            'stock_movements': os.path.join(self.data_dir, 'stock_movements.json'),
+        }
+        
+        # Initialize empty files
+        for filepath in self.files.values():
+            if not os.path.exists(filepath):
+                self._write_json(filepath, [])
+    
+    def _read_json(self, filepath: str) -> List[Dict]:
+        """Thread-safe JSON file read"""
+        lock = get_file_lock(filepath)
+        with lock:
+            try:
+                with open(filepath, 'r') as f:
+                    return json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                return []
+    
+    def _write_json(self, filepath: str, data: List[Dict]):
+        """Thread-safe JSON file write"""
+        lock = get_file_lock(filepath)
+        with lock:
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2)
+    
+    # ============================================================
+    # GENERIC CRUD OPERATIONS
+    # ============================================================
+    
+    def get_all(self, table: str, account_id: Optional[str] = None) -> List[Dict]:
+        """Get all records from a table"""
+        if self.use_postgres:
+            return self._pg_get_all(table, account_id)
+        else:
+            return self._json_get_all(table, account_id)
+    
+    def get_by_id(self, table: str, id: int, account_id: Optional[str] = None) -> Optional[Dict]:
+        """Get record by ID"""
+        if self.use_postgres:
+            return self._pg_get_by_id(table, id, account_id)
+        else:
+            return self._json_get_by_id(table, id, account_id)
+    
+    def create(self, table: str, data: Dict) -> Dict:
+        """Create a new record"""
+        if self.use_postgres:
+            return self._pg_create(table, data)
+        else:
+            return self._json_create(table, data)
+    
+    def update(self, table: str, id: int, data: Dict, account_id: Optional[str] = None) -> bool:
+        """Update a record"""
+        if self.use_postgres:
+            return self._pg_update(table, id, data, account_id)
+        else:
+            return self._json_update(table, id, data, account_id)
+    
+    def delete(self, table: str, id: int, account_id: Optional[str] = None) -> bool:
+        """Delete a record"""
+        if self.use_postgres:
+            return self._pg_delete(table, id, account_id)
+        else:
+            return self._json_delete(table, id, account_id)
+    
+    def get_next_id(self, table: str) -> int:
+        """Get next available ID for a table"""
+        if self.use_postgres:
+            # PostgreSQL uses SERIAL, so this is not needed
+            return 0
+        else:
+            filepath = self.files.get(table)
+            if not filepath:
+                return 1
+            data = self._read_json(filepath)
+            if not data:
+                return 1
+            return max(item.get('id', 0) for item in data) + 1
+    
+    # ============================================================
+    # POSTGRESQL IMPLEMENTATIONS
+    # ============================================================
+    
+    def _pg_get_all(self, table: str, account_id: Optional[str] = None) -> List[Dict]:
+        """PostgreSQL: Get all records"""
+        with self.pg_pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                if account_id and table != 'accounts':
+                    cur.execute(f"SELECT * FROM {table} WHERE account_id = %s ORDER BY id", (account_id,))
                 else:
-                    return {'error': 'Shift not found or already closed'}
-    except Exception as e:
-        logger.error(f"Failed to clock out: {e}")
-        return {'error': str(e)}
-
-def get_user_open_shift(account_id, user_id):
-    """Get the currently open shift for a user"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    SELECT id, clockintime, totalsales, totalexpenses 
-                    FROM shifts
-                    WHERE userid = %s AND accountid = %s AND status = 'open'
-                    LIMIT 1
-                ''', (user_id, account_id))
-                
-                return cursor.fetchone()
-    except Exception as e:
-        logger.error(f"Failed to get user open shift: {e}")
-        return None
-
-
-# STOCK LOG OPERATIONS (Atomic Transaction Tracking)
-def create_stock_log(account_id, product_id, quantity_changed, log_type, reason, sale_id=None, user_id=None, previous_qty=None, new_qty=None):
-    """Create a stock log entry for tracking"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    INSERT INTO stock_logs 
-                    (accountid, productid, quantitychanged, logtype, reason, saleid, userid, previousquantity, newquantity)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                ''', (account_id, product_id, quantity_changed, log_type, reason, sale_id, user_id, previous_qty, new_qty))
-                
-                result = cursor.fetchone()
-                conn.commit()
-                return result['id'] if result else None
-    except Exception as e:
-        logger.error(f"Failed to create stock log: {e}")
-        return None
-
-def get_stock_logs(account_id, product_id=None, limit=100):
-    """Get stock logs for auditing"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                if product_id:
-                    cursor.execute('''
-                        SELECT * FROM stock_logs
-                        WHERE accountid = %s AND productid = %s
-                        ORDER BY createdat DESC
-                        LIMIT %s
-                    ''', (account_id, product_id, limit))
+                    cur.execute(f"SELECT * FROM {table} ORDER BY id")
+                return cur.fetchall()
+    
+    def _pg_get_by_id(self, table: str, id: int, account_id: Optional[str] = None) -> Optional[Dict]:
+        """PostgreSQL: Get record by ID"""
+        with self.pg_pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                if account_id and table != 'accounts':
+                    cur.execute(f"SELECT * FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
                 else:
-                    cursor.execute('''
-                        SELECT * FROM stock_logs
-                        WHERE accountid = %s
-                        ORDER BY createdat DESC
-                        LIMIT %s
-                    ''', (account_id, limit))
-                
-                return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Failed to get stock logs: {e}")
-        return []
-
-def get_daily_stock_summary(account_id, product_id):
-    """Get daily stock changes for a product"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    SELECT 
-                        logtype,
-                        SUM(quantitychanged) as total_changed,
-                        COUNT(*) as transaction_count
-                    FROM stock_logs
-                    WHERE accountid = %s AND productid = %s 
-                    AND DATE(createdat) = CURRENT_DATE
-                    GROUP BY logtype
-                ''', (account_id, product_id))
-                
-                return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Failed to get daily stock summary: {e}")
-        return []
-
-
-# REAL-TIME MONITOR CACHE (for performance)
-def set_monitor_cache(account_id, key, value, ttl_seconds=300):
-    """Set cache for real-time monitor stats"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    INSERT INTO monitor_cache (accountid, key, value, expirat, updatedat)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP + INTERVAL '%s seconds', CURRENT_TIMESTAMP)
-                    ON CONFLICT (accountid, key) DO UPDATE SET
-                        value = EXCLUDED.value,
-                        expirat = CURRENT_TIMESTAMP + INTERVAL '%s seconds',
-                        updatedat = CURRENT_TIMESTAMP
-                ''', (account_id, key, value, ttl_seconds, ttl_seconds))
-                
+                    cur.execute(f"SELECT * FROM {table} WHERE id = %s", (id,))
+                return cur.fetchone()
+    
+    def _pg_create(self, table: str, data: Dict) -> Dict:
+        """PostgreSQL: Create record"""
+        with self.pg_pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                columns = ', '.join(data.keys())
+                placeholders = ', '.join(['%s'] * len(data))
+                query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING *"
+                cur.execute(query, list(data.values()))
                 conn.commit()
-                return True
-    except Exception as e:
-        logger.error(f"Failed to set monitor cache: {e}")
-        return False
-
-def get_monitor_cache(account_id, key):
-    """Get cached value if not expired"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    SELECT value FROM monitor_cache
-                    WHERE accountid = %s AND key = %s AND expirat > CURRENT_TIMESTAMP
-                ''', (account_id, key))
+                return cur.fetchone()
+    
+    def _pg_update(self, table: str, id: int, data: Dict, account_id: Optional[str] = None) -> bool:
+        """PostgreSQL: Update record"""
+        with self.pg_pool.connection() as conn:
+            with conn.cursor() as cur:
+                set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
+                values = list(data.values())
+                values.append(id)
                 
-                result = cursor.fetchone()
-                return result['value'] if result else None
-    except Exception as e:
-        logger.error(f"Failed to get monitor cache: {e}")
+                if account_id and table != 'accounts':
+                    query = f"UPDATE {table} SET {set_clause} WHERE id = %s AND account_id = %s"
+                    values.append(account_id)
+                else:
+                    query = f"UPDATE {table} SET {set_clause} WHERE id = %s"
+                
+                cur.execute(query, values)
+                conn.commit()
+                return cur.rowcount > 0
+    
+    def _pg_delete(self, table: str, id: int, account_id: Optional[str] = None) -> bool:
+        """PostgreSQL: Delete record"""
+        with self.pg_pool.connection() as conn:
+            with conn.cursor() as cur:
+                if account_id and table != 'accounts':
+                    cur.execute(f"DELETE FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
+                else:
+                    cur.execute(f"DELETE FROM {table} WHERE id = %s", (id,))
+                conn.commit()
+                return cur.rowcount > 0
+    
+    # ============================================================
+    # JSON FILE IMPLEMENTATIONS
+    # ============================================================
+    
+    def _json_get_all(self, table: str, account_id: Optional[str] = None) -> List[Dict]:
+        """JSON: Get all records"""
+        filepath = self.files.get(table)
+        if not filepath:
+            return []
+        
+        data = self._read_json(filepath)
+        
+        if account_id and table != 'accounts':
+            return [item for item in data if item.get('account_id') == account_id]
+        return data
+    
+    def _json_get_by_id(self, table: str, id: int, account_id: Optional[str] = None) -> Optional[Dict]:
+        """JSON: Get record by ID"""
+        data = self._json_get_all(table, account_id)
+        for item in data:
+            if item.get('id') == id:
+                return item
         return None
-
-
-# AUDIT LOG OPERATIONS (Compliance & Security)
-def create_audit_log(account_id, user_id, action, entity_type, entity_id, old_values=None, new_values=None, ip_address=None, user_agent=None):
-    """Create audit log for compliance"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    INSERT INTO audit_log 
-                    (accountid, userid, action, entitytype, entityid, oldvalues, newvalues, ipaddress, useragent)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ''', (account_id, user_id, action, entity_type, entity_id, 
-                      json.dumps(old_values) if old_values else None,
-                      json.dumps(new_values) if new_values else None,
-                      ip_address, user_agent))
-                
-                conn.commit()
-                return True
-    except Exception as e:
-        logger.error(f"Failed to create audit log: {e}")
+    
+    def _json_create(self, table: str, data: Dict) -> Dict:
+        """JSON: Create record"""
+        filepath = self.files.get(table)
+        if not filepath:
+            raise ValueError(f"Unknown table: {table}")
+        
+        all_data = self._read_json(filepath)
+        
+        # Auto-assign ID if not provided
+        if 'id' not in data:
+            data['id'] = self.get_next_id(table)
+        
+        all_data.append(data)
+        self._write_json(filepath, all_data)
+        
+        return data
+    
+    def _json_update(self, table: str, id: int, data: Dict, account_id: Optional[str] = None) -> bool:
+        """JSON: Update record"""
+        filepath = self.files.get(table)
+        if not filepath:
+            return False
+        
+        all_data = self._read_json(filepath)
+        updated = False
+        
+        for i, item in enumerate(all_data):
+            if item.get('id') == id:
+                if account_id and item.get('account_id') != account_id:
+                    continue
+                all_data[i].update(data)
+                updated = True
+                break
+        
+        if updated:
+            self._write_json(filepath, all_data)
+        
+        return updated
+    
+    def _json_delete(self, table: str, id: int, account_id: Optional[str] = None) -> bool:
+        """JSON: Delete record"""
+        filepath = self.files.get(table)
+        if not filepath:
+            return False
+        
+        all_data = self._read_json(filepath)
+        original_length = len(all_data)
+        
+        all_data = [
+            item for item in all_data 
+            if not (item.get('id') == id and (not account_id or item.get('account_id') == account_id))
+        ]
+        
+        if len(all_data) < original_length:
+            self._write_json(filepath, all_data)
+            return True
+        
         return False
-
-def get_audit_logs(account_id, limit=100):
-    """Get audit logs for an account"""
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    SELECT * FROM audit_log
-                    WHERE accountid = %s
-                    ORDER BY createdat DESC
-                    LIMIT %s
-                ''', (account_id, limit))
-                
-                return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Failed to get audit logs: {e}")
-        return []
+    
+    # ============================================================
+    # SPECIALIZED QUERIES
+    # ============================================================
+    
+    def get_user_by_email(self, email: str) -> Optional[Dict]:
+        """Get user by email"""
+        if self.use_postgres:
+            with self.pg_pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                    return cur.fetchone()
+        else:
+            users = self._read_json(self.files['users'])
+            for user in users:
+                if user.get('email') == email:
+                    return user
+            return None
+    
+    def get_account_by_email(self, owner_email: str) -> Optional[Dict]:
+        """Get account by owner email"""
+        if self.use_postgres:
+            with self.pg_pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("SELECT * FROM accounts WHERE owner_email = %s", (owner_email,))
+                    return cur.fetchone()
+        else:
+            accounts = self._read_json(self.files['accounts'])
+            for account in accounts:
+                if account.get('owner_email') == owner_email:
+                    return account
+            return None
+    
+    def get_sales_by_date_range(self, account_id: str, start_date: str, end_date: str) -> List[Dict]:
+        """Get sales within a date range"""
+        if self.use_postgres:
+            with self.pg_pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("""
+                        SELECT * FROM sales 
+                        WHERE account_id = %s AND created_at >= %s AND created_at <= %s
+                        ORDER BY created_at DESC
+                    """, (account_id, start_date, end_date))
+                    return cur.fetchall()
+        else:
+            sales = self._json_get_all('sales', account_id)
+            return [
+                sale for sale in sales 
+                if start_date <= sale.get('created_at', '') <= end_date
+            ]
+    
+    def batch_update_stock(self, updates: List[Tuple[int, float, str]]) -> bool:
+        """
+        Batch update product stock
+        
+        Args:
+            updates: List of (product_id, new_quantity, account_id) tuples
+        """
+        if self.use_postgres:
+            with self.pg_pool.connection() as conn:
+                with conn.cursor() as cur:
+                    for product_id, quantity, account_id in updates:
+                        cur.execute("""
+                            UPDATE products SET quantity = %s, updated_at = %s 
+                            WHERE id = %s AND account_id = %s
+                        """, (quantity, datetime.now().isoformat(), product_id, account_id))
+                    conn.commit()
+            return True
+        else:
+            filepath = self.files['products']
+            products = self._read_json(filepath)
+            
+            update_map = {(pid, aid): qty for pid, qty, aid in updates}
+            
+            for product in products:
+                key = (product.get('id'), product.get('account_id'))
+                if key in update_map:
+                    product['quantity'] = update_map[key]
+                    product['updated_at'] = datetime.now().isoformat()
+            
+            self._write_json(filepath, products)
+            return True
+    
+    def get_active_time_entry(self, user_id: int, account_id: str) -> Optional[Dict]:
+        """Get active (not clocked out) time entry for user"""
+        if self.use_postgres:
+            with self.pg_pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("""
+                        SELECT * FROM time_entries 
+                        WHERE user_id = %s AND account_id = %s AND clock_out_time IS NULL
+                        ORDER BY id DESC LIMIT 1
+                    """, (user_id, account_id))
+                    return cur.fetchone()
+        else:
+            entries = self._json_get_all('time_entries', account_id)
+            for entry in reversed(entries):
+                if entry.get('user_id') == user_id and not entry.get('clock_out_time'):
+                    return entry
+            return None

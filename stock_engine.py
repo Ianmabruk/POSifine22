@@ -1,422 +1,423 @@
 """
-OPTIMIZED STOCK DEDUCTION ENGINE
-=================================
-
-Purpose: Handle fast, atomic stock deductions for sales with:
-- Single source of truth (products.json only)
-- Support for raw and composite products
-- <200ms performance target
-- No state duplication between dashboards
-- Batched parallel updates
-- DECIMAL PRECISION: All quantities use float() with proper rounding
-
-Key Design Decisions:
-1. In-memory validation before any file writes
-2. Parallel Promise.all() for multiple deductions instead of sequential await
-3. Single JSON file write at end (not per-item)
-4. Efficient broadcasting with minimal payload
-5. CRITICAL: Use round() for decimal quantities to prevent floating-point errors
+ULTRA-FAST STOCK DEDUCTION ENGINE
+==================================
+Optimized for <50ms sale completion with:
+- Batch stock deductions (single transaction)
+- In-memory validation before any writes
+- Support for composite products with recipes
+- Automatic expense tracking for ingredients
+- Thread-safe operations
+- Decimal precision for weights/volumes
 """
 
-import json
-import time
+from typing import List, Dict, Tuple, Optional
 from datetime import datetime
-from typing import Tuple, List, Dict, Any, Optional
 from decimal import Decimal, ROUND_HALF_UP
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-def safe_round(value: float, decimal_places: int = 4) -> float:
-    """
-    Safely round decimal quantities to prevent floating-point errors.
-    
-    Examples:
-        safe_round(0.1 + 0.2) -> 0.3 (not 0.30000000000000004)
-        safe_round(23.456789) -> 23.4568 (4 decimal places)
-        safe_round(45.1) -> 45.1
-    
-    Args:
-        value: The quantity to round
-        decimal_places: Number of decimal places to keep (default 4 for weight/volume)
-    
-    Returns:
-        Properly rounded float value
-    """
+def safe_float(value: any, default: float = 0.0) -> float:
+    """Safely convert value to float"""
     try:
-        if value is None or (isinstance(value, float) and (value != value)):  # Check for NaN
-            return 0.0
-        d = Decimal(str(value))
-        rounded = d.quantize(Decimal(10) ** -decimal_places, rounding=ROUND_HALF_UP)
-        return float(rounded)
+        return float(value) if value is not None else default
     except (ValueError, TypeError):
-        return float(value) if value else 0.0
+        return default
 
 
-class StockDeductionEngine:
+def round_decimal(value: float, places: int = 4) -> float:
+    """Round decimal to prevent floating point errors"""
+    try:
+        d = Decimal(str(value))
+        rounded = d.quantize(Decimal(10) ** -places, rounding=ROUND_HALF_UP)
+        return float(rounded)
+    except:
+        return float(value)
+
+
+class StockEngine:
     """
-    Atomic stock deduction for POS sales.
-    
-    Supports:
-    - Raw products (direct inventory items)
-    - Composite products (with ingredient recipes from any source)
-    - Multiple units (kg, liters, grams, pcs, etc.)
-    - Decimal quantities
+    Ultra-fast stock deduction engine
+    Target: <50ms for Complete Sell operation
     """
     
-    def __init__(self, products: List[Dict], expenses: List[Dict] = None):
+    def __init__(self, datastore):
         """
-        Initialize with data sources.
+        Initialize with data store
         
         Args:
-            products: Full products list (acts as single source of truth)
-            expenses: Legacy expenses list (merged into products for compatibility)
+            datastore: DataStore instance
         """
-        self.products = products or []
-        self.expenses = expenses or []
-        
-        # Build lookup tables for O(1) access
-        self._product_map = {p['id']: p for p in self.products}
-        self._expense_map = {e['id']: e for e in self.expenses}
-        
-    def validate_and_prepare_deductions(
-        self,
+        self.ds = datastore
+    
+    def validate_and_prepare_sale(
+        self, 
         items: List[Dict],
-        for_validation_only: bool = False
+        account_id: str
     ) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
-        Validate all items have sufficient stock WITHOUT modifying anything.
+        Validate sale items and prepare stock deductions
+        
+        Fast validation:
+        1. Load all products once (in-memory)
+        2. Build product lookup map
+        3. Validate each item
+        4. Calculate deductions for composites
+        5. Verify sufficient stock
+        
+        Args:
+            items: List of sale items [{product_id, quantity, ...}]
+            account_id: Account ID for multi-tenant isolation
         
         Returns:
-            (is_valid, error_message, deductions_dict)
-        
-        Deductions format:
-        {
-            'products': [
-                {'id': 1, 'name': 'Tilapia', 'before_qty': 23, 'after_qty': 20, 'deducted': 3, 'unit': 'kg'},
-                {'id': 3, 'name': 'Salt', 'before_qty': 5, 'after_qty': 4.95, 'deducted': 0.05, 'unit': 'kg', 'parent': 'Fried Fish'}
-            ],
-            'expenses': [
-                {'id': 2, 'name': 'Cooking Oil', 'before_qty': 10, 'after_qty': 9.8, 'deducted': 0.2, 'unit': 'liters'}
-            ]
-        }
+            (is_valid, error_message, deduction_plan)
         """
-        deductions = {'products': [], 'expenses': []}
-        
         try:
-            for cart_item in items:
-                product_id = cart_item.get('productId')
-                # DECIMAL: Safely parse quantity with proper float conversion
-                quantity_sold = safe_round(float(cart_item.get('quantity', cart_item.get('weight', 0))))
+            # Load all products once
+            products = self.ds.get_all('products', account_id)
+            product_map = {p['id']: p for p in products}
+            
+            # Track required deductions
+            deductions = {}  # {product_id: quantity}
+            deduction_details = []  # Detailed info for response
+            
+            # Process each sale item
+            for item in items:
+                product_id = item.get('product_id') or item.get('id')
+                quantity = safe_float(item.get('quantity', 0))
                 
-                # Get main product
-                product = self._product_map.get(product_id)
+                if quantity <= 0:
+                    continue
+                
+                product = product_map.get(product_id)
                 if not product:
-                    return False, f"❌ Product ID {product_id} not found", None
+                    return False, f"Product ID {product_id} not found", None
                 
-                # For composite products, don't validate the composite product itself has stock
-                # (it's a recipe, not an inventory item)
-                is_composite = product.get('isComposite', False) or bool(product.get('recipe', product.get('ingredients', [])))
-                
-                if not is_composite:
-                    # Validate main product has stock (only for raw products)
-                    # DECIMAL: Use safe_round for decimal comparison
-                    current_qty = safe_round(float(product.get('quantity', 0)))
-                    if current_qty < quantity_sold:
-                        return False, \
-                            f"❌ Insufficient stock for '{product['name']}': need {quantity_sold}{product.get('unit', 'pcs')}, " \
-                            f"have {current_qty}{product.get('unit', 'pcs')}", None
+                # Check if composite product
+                if product.get('is_composite'):
+                    # Deduct ingredients from recipe
+                    recipe = product.get('recipe', [])
+                    if not recipe:
+                        return False, f"Composite product '{product['name']}' has no recipe", None
                     
-                    # Record main product deduction with proper rounding
-                    after_qty = safe_round(current_qty - quantity_sold)
-                    deductions['products'].append({
-                        'id': product['id'],
+                    for ingredient in recipe:
+                        ing_id = ingredient.get('product_id') or ingredient.get('id')
+                        ing_qty = safe_float(ingredient.get('quantity', 0))
+                        total_ing_qty = round_decimal(ing_qty * quantity)
+                        
+                        # Add to deductions
+                        deductions[ing_id] = deductions.get(ing_id, 0) + total_ing_qty
+                        
+                        # Track details
+                        ing_product = product_map.get(ing_id)
+                        if ing_product:
+                            deduction_details.append({
+                                'product_id': ing_id,
+                                'name': ing_product['name'],
+                                'quantity': total_ing_qty,
+                                'unit': ing_product.get('unit', 'unit'),
+                                'parent_product': product['name']
+                            })
+                else:
+                    # Regular product - deduct directly
+                    deductions[product_id] = deductions.get(product_id, 0) + quantity
+                    deduction_details.append({
+                        'product_id': product_id,
                         'name': product['name'],
-                        'before_qty': current_qty,
-                        'after_qty': after_qty,
-                        'deducted': safe_round(quantity_sold),
+                        'quantity': quantity,
                         'unit': product.get('unit', 'pcs')
                     })
-                
-                # Handle composite products (with recipe/ingredients)
-                recipe = product.get('recipe', product.get('ingredients', []))
-                
-                if is_composite and recipe:
-                    for ingredient in recipe:
-                        ingredient_id = ingredient.get('productId') or ingredient.get('id')
-                        ingredient_name = ingredient.get('name')
-                        # DECIMAL: Safely parse ingredient quantity per unit
-                        ingredient_qty_per_unit = safe_round(float(ingredient.get('quantity', 0)))
-                        ingredient_source = ingredient.get('source', 'inventory')
-                        
-                        # Find ingredient in products
-                        ingredient_product = None
-                        if ingredient_id:
-                            ingredient_product = self._product_map.get(ingredient_id)
-                        elif ingredient_name:
-                            # Fallback: search by name
-                            ingredient_product = next(
-                                (p for p in self.products if p['name'].lower() == ingredient_name.lower()),
-                                None
-                            )
-                        
-                        if not ingredient_product:
-                            return False, \
-                                f"❌ Ingredient '{ingredient_name or ingredient_id}' for '{product['name']}' not found", None
-                        
-                        # Calculate total ingredient needed for this sale
-                        # DECIMAL: Use safe_round for multiplication to prevent floating-point errors
-                        total_ingredient_needed = safe_round(ingredient_qty_per_unit * quantity_sold)
-                        ingredient_current_qty = safe_round(float(ingredient_product.get('quantity', 0)))
-                        
-                        # Validate ingredient stock
-                        if ingredient_current_qty < total_ingredient_needed:
-                            return False, \
-                                f"❌ Insufficient ingredient stock for '{ingredient_product['name']}' " \
-                                f"(needed for '{product['name']}'): need {total_ingredient_needed}, " \
-                                f"have {ingredient_current_qty}", None
-                        
-                        # Calculate after quantity with proper rounding
-                        after_qty = safe_round(ingredient_current_qty - total_ingredient_needed)
-                        
-                        # Determine if deduction goes to products or expenses
-                        if ingredient_product.get('expenseOnly', False):
-                            deductions['expenses'].append({
-                                'id': ingredient_product['id'],
-                                'name': ingredient_product['name'],
-                                'before_qty': ingredient_current_qty,
-                                'after_qty': after_qty,
-                                'deducted': total_ingredient_needed,
-                                'unit': ingredient_product.get('unit', 'pcs'),
-                                'parent_product': product['name']
-                            })
-                        else:
-                            deductions['products'].append({
-                                'id': ingredient_product['id'],
-                                'name': ingredient_product['name'],
-                                'before_qty': ingredient_current_qty,
-                                'after_qty': after_qty,
-                                'deducted': total_ingredient_needed,
-                                'unit': ingredient_product.get('unit', 'pcs'),
-                                'parent_product': product['name']
-                            })
             
-            return True, None, deductions
+            # Validate sufficient stock for all deductions
+            for product_id, required_qty in deductions.items():
+                product = product_map.get(product_id)
+                if not product:
+                    return False, f"Product ID {product_id} not found", None
+                
+                current_qty = safe_float(product.get('quantity', 0))
+                
+                if current_qty < required_qty:
+                    return False, f"Insufficient stock for '{product['name']}'. Required: {required_qty}, Available: {current_qty}", None
+            
+            # Prepare deduction plan
+            deduction_plan = {
+                'deductions': deductions,  # {product_id: quantity}
+                'details': deduction_details,  # Detailed info
+                'product_map': product_map  # For quick access
+            }
+            
+            return True, None, deduction_plan
             
         except Exception as e:
-            return False, f"❌ Validation error: {str(e)}", None
+            logger.error(f"Error validating sale: {e}")
+            return False, f"Validation error: {str(e)}", None
     
-    def apply_deductions(self, deductions: Dict) -> bool:
+    def execute_sale(
+        self,
+        items: List[Dict],
+        account_id: str,
+        cashier_id: int,
+        cashier_name: str,
+        payment_method: str = 'cash',
+        amount_paid: float = 0.0,
+        tax_rate: float = 0.0,
+        discount_amount: float = 0.0,
+        service_fee: float = 0.0
+    ) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
-        Apply validated deductions to products list.
+        Execute complete sale with stock deduction
         
-        This modifies self.products in-place with new quantities.
-        Call save_products() after this to persist to disk.
-        DECIMAL: Ensures quantities are properly rounded to prevent floating-point errors
+        FAST EXECUTION:
+        1. Validate (in-memory)
+        2. Batch update all stock (single transaction)
+        3. Create sale record
+        4. Create expense records for ingredients
+        5. Return result
+        
+        Args:
+            items: Sale items
+            account_id: Account ID
+            cashier_id: Cashier user ID
+            cashier_name: Cashier name
+            payment_method: Payment method
+            amount_paid: Amount paid by customer
+            tax_rate: Tax rate (%)
+            discount_amount: Discount applied
+            service_fee: Service fee applied
+        
+        Returns:
+            (success, error_message, sale_record)
+        """
+        start_time = datetime.now()
+        
+        try:
+            # Step 1: Validate and prepare (fast)
+            is_valid, error, deduction_plan = self.validate_and_prepare_sale(items, account_id)
+            if not is_valid:
+                return False, error, None
+            
+            # Step 2: Calculate sale totals
+            product_map = deduction_plan['product_map']
+            sale_items = []
+            subtotal = 0.0
+            total_cost = 0.0
+            
+            for item in items:
+                product_id = item.get('product_id') or item.get('id')
+                quantity = safe_float(item.get('quantity', 0))
+                
+                product = product_map.get(product_id)
+                if not product:
+                    continue
+                
+                unit_price = safe_float(product.get('price', 0))
+                item_subtotal = round_decimal(unit_price * quantity)
+                
+                # Calculate cost
+                if product.get('is_composite'):
+                    # Sum ingredient costs
+                    recipe = product.get('recipe', [])
+                    item_cost = 0.0
+                    for ingredient in recipe:
+                        ing_id = ingredient.get('product_id') or ingredient.get('id')
+                        ing_qty = safe_float(ingredient.get('quantity', 0))
+                        ing_product = product_map.get(ing_id)
+                        if ing_product:
+                            ing_cost = safe_float(ing_product.get('cost', 0))
+                            item_cost += ing_cost * ing_qty * quantity
+                else:
+                    item_cost = safe_float(product.get('cost', 0)) * quantity
+                
+                sale_items.append({
+                    'product_id': product_id,
+                    'product_name': product['name'],
+                    'quantity': quantity,
+                    'unit_price': unit_price,
+                    'subtotal': item_subtotal,
+                    'cost': item_cost,
+                    'unit': product.get('unit', 'pcs')
+                })
+                
+                subtotal += item_subtotal
+                total_cost += item_cost
+            
+            # Apply tax, discount, service fee
+            tax_amount = round_decimal(subtotal * (tax_rate / 100))
+            total = round_decimal(subtotal + tax_amount + service_fee - discount_amount)
+            change = round_decimal(amount_paid - total) if amount_paid > total else 0.0
+            gross_profit = round_decimal(total - total_cost)
+            
+            # Step 3: Batch update stock (FAST - single transaction)
+            stock_updates = [
+                (product_id, round_decimal(product_map[product_id]['quantity'] - qty), account_id)
+                for product_id, qty in deduction_plan['deductions'].items()
+            ]
+            self.ds.batch_update_stock(stock_updates)
+            
+            # Step 4: Create sale record
+            sale_data = {
+                'account_id': account_id,
+                'items': sale_items,
+                'total': total,
+                'total_cost': total_cost,
+                'gross_profit': gross_profit,
+                'payment_method': payment_method,
+                'amount_paid': amount_paid,
+                'change': change,
+                'tax_amount': tax_amount,
+                'discount_amount': discount_amount,
+                'service_fee': service_fee,
+                'cashier_id': cashier_id,
+                'cashier_name': cashier_name,
+                'created_at': datetime.now().isoformat(),
+                'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            }
+            sale = self.ds.create('sales', sale_data)
+            
+            # Step 5: Create expense records for ingredients
+            self._create_auto_expenses(deduction_plan, account_id, sale['id'])
+            
+            # Log performance
+            elapsed = (datetime.now() - start_time).total_seconds() * 1000
+            logger.info(f"Sale completed in {elapsed:.2f}ms")
+            
+            return True, None, sale
+            
+        except Exception as e:
+            logger.error(f"Error executing sale: {e}")
+            return False, f"Sale execution error: {str(e)}", None
+    
+    def _create_auto_expenses(self, deduction_plan: Dict, account_id: str, sale_id: int):
+        """
+        Create automatic expense records for ingredient usage
+        
+        Args:
+            deduction_plan: Deduction plan from validation
+            account_id: Account ID
+            sale_id: Created sale ID
         """
         try:
-            # Apply product deductions with safe rounding
-            for deduction in deductions.get('products', []):
-                product = self._product_map.get(deduction['id'])
-                if product:
-                    # DECIMAL: Apply safe rounding to final quantity
-                    product['quantity'] = safe_round(deduction['after_qty'])
+            product_map = deduction_plan['product_map']
             
-            # Apply expense deductions (expenses are in products too now)
-            for deduction in deductions.get('expenses', []):
-                product = self._product_map.get(deduction['id'])
-                if product:
-                    # DECIMAL: Apply safe rounding to final quantity
-                    product['quantity'] = safe_round(deduction['after_qty'])
+            for detail in deduction_plan['details']:
+                # Only create expenses for ingredients (not final products)
+                if 'parent_product' in detail:
+                    product_id = detail['product_id']
+                    product = product_map.get(product_id)
+                    
+                    if product:
+                        cost_per_unit = safe_float(product.get('cost_per_unit') or product.get('cost', 0))
+                        quantity = detail['quantity']
+                        total_cost = round_decimal(cost_per_unit * quantity)
+                        
+                        if total_cost > 0:
+                            expense_data = {
+                                'account_id': account_id,
+                                'name': f"Auto: {product['name']} for {detail['parent_product']}",
+                                'amount': total_cost,
+                                'quantity': quantity,
+                                'unit': product.get('unit', 'unit'),
+                                'category': 'ingredient',
+                                'description': f"Auto-deducted from sale #{sale_id}",
+                                'source': 'auto-deduction',
+                                'linked_product_id': product_id,
+                                'created_at': datetime.now().isoformat()
+                            }
+                            self.ds.create('expenses', expense_data)
+        except Exception as e:
+            logger.error(f"Error creating auto expenses: {e}")
+    
+    def adjust_stock(
+        self,
+        product_id: int,
+        quantity: float,
+        account_id: str,
+        movement_type: str = 'adjustment',
+        notes: Optional[str] = None,
+        user_id: Optional[int] = None
+    ) -> bool:
+        """
+        Adjust product stock (add or set quantity)
+        
+        Args:
+            product_id: Product ID
+            quantity: New quantity or adjustment amount
+            account_id: Account ID
+            movement_type: 'adjustment', 'restock', etc.
+            notes: Optional notes
+            user_id: User making adjustment
+        
+        Returns:
+            Success status
+        """
+        try:
+            product = self.ds.get_by_id('products', product_id, account_id)
+            if not product:
+                return False
+            
+            old_quantity = safe_float(product.get('quantity', 0))
+            
+            # Update product
+            self.ds.update('products', product_id, {
+                'quantity': quantity,
+                'updated_at': datetime.now().isoformat()
+            }, account_id)
+            
+            # Create stock movement record
+            movement_data = {
+                'account_id': account_id,
+                'product_id': product_id,
+                'quantity': round_decimal(quantity - old_quantity),
+                'movement_type': movement_type,
+                'notes': notes,
+                'created_at': datetime.now().isoformat(),
+                'created_by': user_id
+            }
+            self.ds.create('stock_movements', movement_data)
             
             return True
+            
         except Exception as e:
-            print(f"❌ Error applying deductions: {str(e)}")
+            logger.error(f"Error adjusting stock: {e}")
             return False
     
-    def calculate_composite_deductions(self, product_id: int, quantity: float) -> Dict:
+    def get_stock_deduction_log(
+        self,
+        account_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> List[Dict]:
         """
-        Calculate what would be deducted for a composite product without validation.
+        Get stock deduction audit log
         
-        Useful for preview/display purposes.
+        Args:
+            account_id: Account ID
+            start_date: Optional start date filter
+            end_date: Optional end date filter
+        
+        Returns:
+            List of stock movements
         """
-        product = self._product_map.get(product_id)
-        if not product:
-            return {'error': f"Product {product_id} not found"}
+        movements = self.ds.get_all('stock_movements', account_id)
         
-        result = {
-            'product_name': product['name'],
-            'quantity_sold': quantity,
-            'ingredients': []
-        }
+        if start_date:
+            movements = [m for m in movements if m.get('created_at', '') >= start_date]
+        if end_date:
+            movements = [m for m in movements if m.get('created_at', '') <= end_date]
         
-        recipe = product.get('recipe', product.get('ingredients', []))
-        for ingredient in recipe:
-            ingredient_id = ingredient.get('productId') or ingredient.get('id')
-            ingredient_product = self._product_map.get(ingredient_id)
-            
-            if ingredient_product:
-                ingredient_qty_per_unit = float(ingredient.get('quantity', 0))
-                total_needed = ingredient_qty_per_unit * quantity
-                
-                result['ingredients'].append({
-                    'name': ingredient_product['name'],
-                    'unit': ingredient_product.get('unit', 'pcs'),
-                    'quantity_per_unit': ingredient_qty_per_unit,
-                    'total_for_sale': total_needed,
-                    'current_stock': float(ingredient_product.get('quantity', 0))
-                })
-        
-        return result
-
-
-def optimize_sale_completion(
-    cart_items: List[Dict],
-    products: List[Dict],
-    expenses: List[Dict] = None,
-    user_id: str = None,
-    account_id: str = None
-) -> Tuple[bool, Dict]:
-    """
-    OPTIMIZED SALE COMPLETION - Target: <200ms
+        return movements
     
-    This is the core function for cashier.completeSale() and admin.completeSale()
-    
-    Returns:
-        (success: bool, response: dict)
-    
-    Success response:
-    {
-        'success': True,
-        'sale_id': 123,
-        'processing_time_ms': 45,
-        'deductions': {...},
-        'message': 'Sale completed successfully'
-    }
-    
-    Error response:
-    {
-        'success': False,
-        'error': 'Insufficient stock for Tilapia',
-        'message': 'Sale failed - validation error'
-    }
-    """
-    start_time = time.time()
-    
-    try:
-        # Step 1: Initialize engine with products (IN-MEMORY)
-        engine = StockDeductionEngine(products, expenses)
-        
-        # Step 2: Validate & prepare ALL deductions (NO file writes yet)
-        is_valid, error_msg, deductions = engine.validate_and_prepare_deductions(cart_items)
-        if not is_valid:
-            return False, {
-                'success': False,
-                'error': error_msg,
-                'message': 'Sale validation failed'
-            }
-        
-        # Step 3: Apply deductions to in-memory products
-        if not engine.apply_deductions(deductions):
-            return False, {
-                'success': False,
-                'error': 'Failed to apply deductions',
-                'message': 'Internal error'
-            }
-        
-        # Step 4: Prepare broadcast payload (minimal, efficient)
-        updated_products = [
-            {
-                'id': p['id'],
-                'name': p['name'],
-                'quantity': p['quantity'],
-                'unit': p.get('unit', 'pcs')
-            }
-            for d in deductions.get('products', [])
-            for p in [engine._product_map.get(d['id'])]
-            if p
+    def get_low_stock_products(self, account_id: str) -> List[Dict]:
+        """Get products with low stock"""
+        products = self.ds.get_all('products', account_id)
+        return [
+            p for p in products 
+            if safe_float(p.get('reorder_level', 0)) > 0 
+            and safe_float(p.get('quantity', 0)) <= safe_float(p.get('reorder_level', 0))
         ]
-        
-        elapsed_ms = (time.time() - start_time) * 1000
-        
-        return True, {
-            'success': True,
-            'deductions': deductions,
-            'updated_products': updated_products,
-            'processing_time_ms': elapsed_ms,
-            'message': f"Sale completed in {elapsed_ms:.0f}ms - {len(deductions['products'])} items deducted"
-        }
-        
-    except Exception as e:
-        elapsed_ms = (time.time() - start_time) * 1000
-        return False, {
-            'success': False,
-            'error': str(e),
-            'processing_time_ms': elapsed_ms,
-            'message': 'Sale processing failed'
-        }
-
-
-# ============================================================
-# EXAMPLE PRODUCT SCHEMA (for reference)
-# ============================================================
-EXAMPLE_PRODUCT_SCHEMAS = {
-    "raw_product": {
-        "id": 1,
-        "name": "Tilapia",
-        "type": "raw",
-        "quantity": 23,
-        "unit": "kg",
-        "price": 5.50,
-        "cost": 2.00,
-        "category": "fish",
-        "isComposite": False,
-        "accountId": "main",
-        "createdAt": "2024-01-01T10:00:00"
-    },
-    "composite_product": {
-        "id": 5,
-        "name": "Fried Fish",
-        "type": "composite",
-        "quantity": 0,  # Composite products don't have direct inventory
-        "unit": "serving",
-        "price": 8.00,
-        "cost": 3.50,
-        "isComposite": True,
-        "recipe": [
-            {
-                "productId": 1,
-                "name": "Tilapia",
-                "quantity": 2,
-                "unit": "kg",
-                "source": "inventory"
-            },
-            {
-                "productId": 3,
-                "name": "Cooking Oil",
-                "quantity": 0.2,
-                "unit": "liters",
-                "source": "expenses"
-            },
-            {
-                "productId": 4,
-                "name": "Salt",
-                "quantity": 0.05,
-                "unit": "kg",
-                "source": "expenses"
-            }
-        ],
-        "accountId": "main",
-        "createdAt": "2024-01-01T10:00:00"
-    },
-    "expense_item": {
-        "id": 3,
-        "name": "Cooking Oil",
-        "type": "expense",
-        "quantity": 50,
-        "unit": "liters",
-        "price": 0.50,
-        "expenseOnly": True,
-        "visibleToCashier": False,
-        "accountId": "main",
-        "createdAt": "2024-01-01T10:00:00"
-    }
-}
+    
+    def get_out_of_stock_products(self, account_id: str) -> List[Dict]:
+        """Get products that are out of stock"""
+        products = self.ds.get_all('products', account_id)
+        return [p for p in products if safe_float(p.get('quantity', 0)) <= 0]
