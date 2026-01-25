@@ -253,7 +253,17 @@ class StockEngine:
                 (product_id, round_decimal(product_map[product_id]['quantity'] - qty), account_id)
                 for product_id, qty in deduction_plan['deductions'].items()
             ]
+            
+            logger.info(f"📦 Deducting stock for {len(stock_updates)} products")
+            for product_id, new_qty, _ in stock_updates:
+                product = product_map.get(product_id)
+                if product:
+                    old_qty = product.get('quantity', 0)
+                    deducted = old_qty - new_qty
+                    logger.info(f"  - {product['name']}: {old_qty} → {new_qty} (-{deducted})")
+            
             self.ds.batch_update_stock(stock_updates)
+            logger.info(f"✅ Stock deduction completed successfully")
             
             # Step 4: Create sale record
             sale_data = {

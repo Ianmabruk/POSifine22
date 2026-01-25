@@ -462,6 +462,9 @@ def low_stock_warnings():
 @auth.require_auth
 def sales():
     """Get sales or create new sale (Complete Sell)"""
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     try:
         if request.method == 'GET':
             start_date = request.args.get('startDate')
@@ -475,8 +478,15 @@ def sales():
             return jsonify(sales_list), 200
         
         elif request.method == 'POST':
-            # COMPLETE SELL - OPTIMIZED FOR <50ms
+            # COMPLETE SELL - STRICT & FAST (<100ms)
+            # All operations are ATOMIC - either ALL succeed or ALL fail
             data = request.get_json()
+            
+            # Validate required fields
+            if not data.get('items') or len(data.get('items', [])) == 0:
+                return jsonify({'error': 'No items in cart', 'success': False}), 400
+            
+            start_time = datetime.now()
             
             success, error, sale = cashier.complete_sale(
                 account_id=request.account_id,
@@ -491,15 +501,29 @@ def sales():
             )
             
             if success:
+                elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+                
                 # Broadcast sale completion (real-time sync)
                 sync_manager.broadcast_sale_completed(request.account_id, sale)
-                return jsonify(sale), 201
+                
+                # Return success with all details
+                response = {
+                    'success': True,
+                    'saleId': sale.get('id'),
+                    'sale': sale,
+                    'elapsedMs': round(elapsed_ms, 2),
+                    'message': f'Sale completed in {elapsed_ms:.0f}ms'
+                }
+                
+                logger.info(f"✅ Sale #{sale.get('id')} completed in {elapsed_ms:.1f}ms")
+                return jsonify(response), 201
             else:
-                return jsonify({'error': error}), 400
+                logger.error(f"❌ Sale failed: {error}")
+                return jsonify({'error': error, 'success': False}), 400
     
     except Exception as e:
-        logger.error(f"Sales error: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Sales error: {e}", exc_info=True)
+        return jsonify({'error': f'Sale failed: {str(e)}', 'success': False}), 500
 
 # Alternative endpoint for Complete Sell (v2)
 @app.route('/api/v2/sales/complete', methods=['POST', 'OPTIONS'])
@@ -567,6 +591,9 @@ def cashier_monitor_stats():
 @auth.require_auth
 def clock_in():
     """Clock in"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     try:
         success, error, entry = cashier.clock_in(
             request.account_id,
@@ -582,13 +609,19 @@ def clock_in():
                 request.user['name'],
                 entry
             )
-            return jsonify(entry), 201
+            # Return consistent format with shiftId
+            return jsonify({
+                'success': True,
+                'shiftId': entry.get('id'),
+                'clockInTime': entry.get('clock_in_time'),
+                'entry': entry
+            }), 201
         else:
-            return jsonify({'error': error}), 400
+            return jsonify({'error': error, 'success': False}), 400
     
     except Exception as e:
-        logger.error(f"Clock in error: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Clock in error: {e}", exc_info=True)
+        return jsonify({'error': f'Clock in failed: {str(e)}', 'success': False}), 500
 
 @app.route('/api/clock-out', methods=['POST', 'OPTIONS'])
 @app.route('/api/v2/shifts/clock-out', methods=['POST', 'OPTIONS'])
