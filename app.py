@@ -20,6 +20,14 @@ from fast_backend import (
     build_minimal_response, performance, file_cache
 )
 
+# NEW: Import refactored services for clean architecture
+from services.sales_service import SalesService
+from services.stock_service import StockService
+from services.shift_service import ShiftService
+from services.notification_service import NotificationService
+from services.data_store import DataStore
+from routes.refactored_routes import setup_routes
+
 app = Flask(__name__)
 
 # ============================================================
@@ -297,6 +305,48 @@ try:
     init_main_admin()
 except Exception as e:
     print(f"⚠️  Failed to initialize main admin on startup: {e}")
+
+# ============================================================
+# INITIALIZE NEW REFACTORED SERVICES (Clean Architecture)
+# ============================================================
+print("\n" + "="*60)
+print("INITIALIZING REFACTORED SERVICES")
+print("="*60)
+
+try:
+    # Create centralized data store
+    data_store = DataStore(DATA_DIR)
+    data_store.init_all()
+    print("✅ DataStore initialized")
+    
+    # Initialize services
+    stock_service = StockService(data_store)
+    print("✅ StockService initialized (inventory management)")
+    
+    shift_service = ShiftService(data_store)
+    print("✅ ShiftService initialized (unified clock system)")
+    
+    notification_service = NotificationService(connected_clients)
+    print("✅ NotificationService initialized (WebSocket broadcasts)")
+    
+    sales_service = SalesService(data_store, stock_service, notification_service)
+    print("✅ SalesService initialized (centralized transaction handling)")
+    
+    # Store services globally for access in routes
+    app.sales_service = sales_service
+    app.shift_service = shift_service
+    app.notification_service = notification_service
+    app.stock_service = stock_service
+    app.data_store = data_store
+    
+    print("\n✅ ALL REFACTORED SERVICES READY")
+    print("="*60 + "\n")
+    
+except Exception as e:
+    print(f"❌ ERROR initializing refactored services: {e}")
+    import traceback
+    traceback.print_exc()
+    print("⚠️  Falling back to legacy code")
 
 # PIN Rate Limiting Tracker (in-memory, resets on server restart)
 pin_attempts = defaultdict(lambda: {'count': 0, 'locked_until': None})
@@ -2321,32 +2371,49 @@ def get_stock_status():
 @app.route('/api/sales', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_sales():
-    """Handle sales - GET returns sales list, POST creates sale with ULTRA-FAST stock deduction"""
+    """Handle sales - GET returns sales list, POST creates sale with centralized service"""
     if request.method == 'OPTIONS':
         return '', 200
     
     if request.method == 'GET':
-        # Use cache for fast GET (typically <1ms with cache hit)
+        # Use cache for fast GET
         sales = load_data_cached(SALES_FILE, use_cache=True)
         account_id = request.user.get('accountId')
         filtered_sales = [s for s in sales if s.get('accountId') == account_id]
         return jsonify(filtered_sales)
     
-    # POST - Create new sale with ULTRA-FAST stock deduction (<20ms target)
+    # POST - Create new sale using CENTRALIZED SALES SERVICE
     try:
-        start_time = time.time()
         data = request.get_json()
         
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
+        # Use new centralized SalesService for guaranteed consistency
+        success, error_msg, response = app.sales_service.complete_sale(
+            user_id=request.user['id'],
+            user_name=request.user.get('name', 'Unknown'),
+            account_id=request.user['accountId'],
+            items=data.get('items', []),
+            total=float(data.get('total', 0)),
+            payment_method=data.get('paymentMethod', 'cash'),
+            discount=float(data.get('discount', 0)),
+            tax=float(data.get('tax', 0)),
+            tax_type=data.get('taxType', 'exclusive'),
+            completed_by='cashier'
+        )
         
-        if not data.get('items') or len(data['items']) == 0:
-            return jsonify({'error': 'At least one item required'}), 400
+        if not success:
+            return jsonify({'error': error_msg, 'message': error_msg}), 400
         
-        # ULTRA-FAST: Load with cache (hit typically <1ms)
-        products = load_data_cached(PRODUCTS_FILE, use_cache=True)
-        expenses = load_data_cached(EXPENSES_FILE, use_cache=True)
-        sales = load_data_cached(SALES_FILE, use_cache=True)
+        # Return guaranteed updatedProducts for immediate UI refresh
+        return jsonify({
+            'success': True,
+            **response
+        })
+    
+    except Exception as e:
+        print(f"❌ Sale creation error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Failed to create sale', 'message': str(e)}), 500
         
         # ULTRA-FAST: Use new UltraFastStockEngine for <5ms deductions
         engine = UltraFastStockEngine(products, expenses)
@@ -3530,89 +3597,76 @@ def handle_cashier_note(note_id):
 @app.route('/api/time-entries', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_time_entries():
-    """Get all time entries or create a new one"""
+    """Get all time entries or create a new one - NOW USES UNIFIED SHIFT SERVICE"""
     if request.method == 'OPTIONS':
         return '', 200
     
-    time_entries = load_data(TIME_ENTRIES_FILE)
-    
     if request.method == 'GET':
+        # Return legacy format for backward compatibility
+        time_entries = load_data(TIME_ENTRIES_FILE)
         return jsonify(time_entries)
     
-    # POST - Clock in/out
+    # POST - Clock in/out using NEW UNIFIED SHIFT SERVICE
     data = request.get_json()
-    action = data.get('action', 'clock_in')  # 'clock_in' or 'clock_out'
+    action = data.get('action', 'clock_in')
     
     cashier_id = request.user.get('id')
     cashier_name = request.user.get('name', 'Unknown')
+    account_id = request.user.get('accountId')
     
     if action == 'clock_in':
-        # CHECK: Don't allow double clock-in - user must be clocked out first
-        existing_active = next(
-            (e for e in time_entries if e.get('cashierId') == cashier_id and e.get('status') == 'clocked_in'),
-            None
+        # Use unified shift service
+        success, error_msg, shift = app.shift_service.clock_in(
+            cashier_id, cashier_name, account_id
         )
         
-        if existing_active:
-            return jsonify({
-                'error': 'Already clocked in',
-                'message': f'You are already clocked in since {existing_active["clockInTime"]}. Please clock out first.'
-            }), 400
+        if not success:
+            return jsonify({'error': error_msg, 'message': error_msg}), 400
         
-        # Create new time entry
-        entry = {
-            'id': get_next_id(time_entries),
-            'cashierId': cashier_id,
-            'cashierName': cashier_name,
-            'cashierEmail': request.user.get('email'),
-            'clockInTime': datetime.now().isoformat(),
-            'clockOutTime': None,
-            'duration': None,  # In minutes
+        # Broadcast to dashboards
+        app.notification_service.broadcast_shift_event(
+            account_id, shift, 'shift_opened'
+        )
+        
+        print(f"✅ {cashier_name} clocked in at {shift['clockInTime']}")
+        
+        # Return in format frontend expects
+        return jsonify({
+            'success': True,
+            'shift': shift,
+            'id': shift['id'],
+            'clockInTime': shift['clockInTime'],
             'status': 'clocked_in',
-            'date': datetime.now().strftime('%Y-%m-%d'),
-            'createdAt': datetime.now().isoformat()
-        }
-        
-        time_entries.append(entry)
-        save_data(TIME_ENTRIES_FILE, time_entries)
-        
-        # Broadcast clock in to all connected clients
-        broadcast_update('cashier_clocked_in', {
-            'entry': entry,
-            'allTimeEntries': time_entries
-        })
-        
-        print(f"✅ Cashier {cashier_name} clocked in at {entry['clockInTime']}")
-        return jsonify(entry), 201
+            'message': f'Clocked in at {shift["clockInTime"]}'
+        }), 201
     
     elif action == 'clock_out':
-        # Find the latest open time entry for this cashier
-        open_entry = next(
-            (e for e in reversed(time_entries) if e.get('cashierId') == cashier_id and e.get('status') == 'clocked_in'),
-            None
+        # Use unified shift service
+        success, error_msg, shift = app.shift_service.clock_out(
+            cashier_id, account_id
         )
         
-        if not open_entry:
-            return jsonify({'error': 'No active clock in found'}), 404
+        if not success:
+            return jsonify({'error': error_msg, 'message': error_msg}), 400
         
-        # Calculate duration
-        clock_in = datetime.fromisoformat(open_entry['clockInTime'])
-        clock_out = datetime.now()
-        duration = int((clock_out - clock_in).total_seconds() / 60)  # Duration in minutes
+        # Broadcast to dashboards
+        app.notification_service.broadcast_shift_event(
+            account_id, shift, 'shift_closed'
+        )
         
-        open_entry['clockOutTime'] = clock_out.isoformat()
-        open_entry['duration'] = duration
-        open_entry['status'] = 'clocked_out'
+        print(f"✅ {cashier_name} clocked out - {shift['durationDisplay']}")
         
-        save_data(TIME_ENTRIES_FILE, time_entries)
-        
-        # Broadcast clock out to all connected clients
-        broadcast_update('cashier_clocked_out', {
-            'entry': open_entry,
-            'allTimeEntries': time_entries
+        # Return in format frontend expects
+        return jsonify({
+            'success': True,
+            'shift': shift,
+            'id': shift['id'],
+            'clockOutTime': shift['clockOutTime'],
+            'duration': shift['durationSeconds'] // 60,  # minutes
+            'displayDuration': shift['durationDisplay'],
+            'status': 'clocked_out',
+            'message': f"Clocked out. Total time: {shift['durationDisplay']}"
         })
-        
-        return jsonify(open_entry)
     
     else:
         return jsonify({'error': 'Invalid action. Use clock_in or clock_out'}), 400
