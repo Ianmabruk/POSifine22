@@ -1,0 +1,29 @@
+[
+  {
+    "id": 1,
+    "name": "Rice",
+    "price": 50,
+    "cost": 25,
+    "quantity": 8.0,
+    "unit": "kg",
+    "accountId": "test"
+  },
+  {
+    "id": 2,
+    "name": "Sugar",
+    "price": 30,
+    "cost": 15,
+    "quantity": 4.0,
+    "unit": "kg",
+    "accountId": "test"
+  },
+  {
+    "id": 3,
+    "name": "Bread",
+    "price": 50,
+    "cost": 20,
+    "quantity": 12.0,
+    "unit": "pcs",
+    "accountId": "test"
+  }
+]
