@@ -140,6 +140,8 @@ class AuthController:
             # Add plan to user response for frontend routing
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
             user_response['plan'] = plan
+            # Map is_active to active for frontend compatibility
+            user_response['active'] = user.get('is_active', True)
             
             # Log signup
             logger.info(f"New signup: {email} (role: {user_role}, plan: {plan})")
@@ -199,6 +201,8 @@ class AuthController:
             
             # Return user data in the expected format
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
+            # Map is_active to active for frontend compatibility
+            user_response['active'] = user.get('is_active', True)
             
             return True, None, {
                 'user': user_response,
@@ -254,6 +258,8 @@ class AuthController:
             
             # Return user data in the expected format
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
+            # Map is_active to active for frontend compatibility
+            user_response['active'] = user.get('is_active', True)
             
             return True, None, {
                 'user': user_response,
@@ -389,6 +395,9 @@ class AuthController:
             # Check if user is active
             if not user.get('is_active') or user.get('is_locked'):
                 return jsonify({'error': 'Account is inactive or locked'}), 403
+            
+            # Map is_active to active for frontend compatibility
+            user['active'] = user.get('is_active', True)
             
             # Inject user into request
             request.user = user
