@@ -20,13 +20,13 @@ from fast_backend import (
     build_minimal_response, performance, file_cache
 )
 
-# NEW: Import refactored services for clean architecture
-from services.sales_service import SalesService
-from services.stock_service import StockService
-from services.shift_service import ShiftService
-from services.notification_service import NotificationService
-from services.data_store import DataStore
-from routes.refactored_routes import setup_routes
+# NOTE: Service imports commented out - not used in production deployment
+# from services.sales_service import SalesService
+# from services.stock_service import StockService
+# from services.shift_service import ShiftService
+# from services.notification_service import NotificationService
+# from services.data_store import DataStore
+# from routes.refactored_routes import setup_routes
 
 app = Flask(__name__)
 
@@ -307,46 +307,47 @@ except Exception as e:
     print(f"⚠️  Failed to initialize main admin on startup: {e}")
 
 # ============================================================
-# INITIALIZE NEW REFACTORED SERVICES (Clean Architecture)
+# REFACTORED SERVICES - NOT USED IN PRODUCTION
 # ============================================================
-print("\n" + "="*60)
-print("INITIALIZING REFACTORED SERVICES")
-print("="*60)
-
-try:
-    # Create centralized data store
-    data_store = DataStore(DATA_DIR)
-    data_store.init_all()
-    print("✅ DataStore initialized")
-    
-    # Initialize services
-    stock_service = StockService(data_store)
-    print("✅ StockService initialized (inventory management)")
-    
-    shift_service = ShiftService(data_store)
-    print("✅ ShiftService initialized (unified clock system)")
-    
-    notification_service = NotificationService(connected_clients)
-    print("✅ NotificationService initialized (WebSocket broadcasts)")
-    
-    sales_service = SalesService(data_store, stock_service, notification_service)
-    print("✅ SalesService initialized (centralized transaction handling)")
-    
-    # Store services globally for access in routes
-    app.sales_service = sales_service
-    app.shift_service = shift_service
-    app.notification_service = notification_service
-    app.stock_service = stock_service
-    app.data_store = data_store
-    
-    print("\n✅ ALL REFACTORED SERVICES READY")
-    print("="*60 + "\n")
-    
-except Exception as e:
-    print(f"❌ ERROR initializing refactored services: {e}")
-    import traceback
-    traceback.print_exc()
-    print("⚠️  Falling back to legacy code")
+# NOTE: Service architecture commented out - using direct implementation
+# print("\n" + "="*60)
+# print("INITIALIZING REFACTORED SERVICES")
+# print("="*60)
+#
+# try:
+#     # Create centralized data store
+#     data_store = DataStore(DATA_DIR)
+#     data_store.init_all()
+#     print("✅ DataStore initialized")
+#     
+#     # Initialize services
+#     stock_service = StockService(data_store)
+#     print("✅ StockService initialized (inventory management)")
+#     
+#     shift_service = ShiftService(data_store)
+#     print("✅ ShiftService initialized (unified clock system)")
+#     
+#     notification_service = NotificationService(connected_clients)
+#     print("✅ NotificationService initialized (WebSocket broadcasts)")
+#     
+#     sales_service = SalesService(data_store, stock_service, notification_service)
+#     print("✅ SalesService initialized (centralized transaction handling)")
+#     
+#     # Store services globally for access in routes
+#     app.sales_service = sales_service
+#     app.shift_service = shift_service
+#     app.notification_service = notification_service
+#     app.stock_service = stock_service
+#     app.data_store = data_store
+#     
+#     print("\n✅ ALL REFACTORED SERVICES READY")
+#     print("="*60 + "\n")
+#     
+# except Exception as e:
+#     print(f"❌ ERROR initializing refactored services: {e}")
+#     import traceback
+#     traceback.print_exc()
+#     print("⚠️  Falling back to legacy code")
 
 # PIN Rate Limiting Tracker (in-memory, resets on server restart)
 pin_attempts = defaultdict(lambda: {'count': 0, 'locked_until': None})
