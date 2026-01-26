@@ -335,6 +335,44 @@ def get_analytics():
         logger.error(f"Get analytics error: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/analytics/today', methods=['GET', 'OPTIONS'])
+@auth.require_auth
+def get_today_analytics():
+    """Get today's analytics for Monitor and Dashboard"""
+    try:
+        # Get today's date range
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        
+        # Get today's sales
+        sales = datastore.get_sales_by_date_range(request.account_id, today_start, now.isoformat())
+        
+        # Calculate totals
+        total_sales = sum(s.get('total', 0) for s in sales)
+        total_cost = sum(s.get('total_cost', 0) for s in sales)
+        
+        # Get today's expenses
+        expenses = datastore.get_all('expenses', request.account_id)
+        today_expenses = [e for e in expenses if e.get('created_at', '') >= today_start]
+        total_expense = sum(e.get('amount', 0) for e in today_expenses)
+        
+        # Calculate profit
+        gross_profit = total_sales - total_cost
+        net_profit = gross_profit - total_expense
+        
+        return jsonify({
+            'totalSales': round(total_sales, 2),
+            'totalCOGS': round(total_cost, 2),
+            'totalExpense': round(total_expense, 2),
+            'grossProfit': round(gross_profit, 2),
+            'netProfit': round(net_profit, 2),
+            'salesCount': len(sales),
+            'timestamp': now.isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Get today analytics error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # ============================================================
 # PRODUCT ENDPOINTS
 # ============================================================
@@ -488,31 +526,46 @@ def sales():
             
             start_time = datetime.now()
             
+            # Normalize field names: productId -> product_id for backend compatibility
+            items = data.get('items', [])
+            normalized_items = []
+            for item in items:
+                normalized_item = dict(item)
+                if 'productId' in normalized_item and 'product_id' not in normalized_item:
+                    normalized_item['product_id'] = normalized_item.pop('productId')
+                normalized_items.append(normalized_item)
+            
             success, error, sale = cashier.complete_sale(
                 account_id=request.account_id,
                 cashier_id=request.user['id'],
                 cashier_name=request.user['name'],
-                items=data.get('items', []),
+                items=normalized_items,
                 payment_method=data.get('paymentMethod', 'cash'),
                 amount_paid=float(data.get('amountPaid', 0)),
-                tax_rate=float(data.get('taxRate', 0)),
-                discount_amount=float(data.get('discountAmount', 0)),
+                tax_rate=float(data.get('tax', 0) * 100 if data.get('taxType') != 'inclusive' else 0),
+                discount_amount=float(data.get('discount', 0)),
                 service_fee=float(data.get('serviceFee', 0))
             )
             
             if success:
                 elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
                 
+                # Get updated products for frontend
+                updated_products = admin.get_products(request.account_id)
+                
                 # Broadcast sale completion (real-time sync)
                 sync_manager.broadcast_sale_completed(request.account_id, sale)
                 
-                # Return success with all details
+                # Return success with all details including updated inventory
                 response = {
                     'success': True,
                     'saleId': sale.get('id'),
                     'sale': sale,
                     'elapsedMs': round(elapsed_ms, 2),
-                    'message': f'Sale completed in {elapsed_ms:.0f}ms'
+                    'message': f'Sale completed in {elapsed_ms:.0f}ms',
+                    'updatedProducts': updated_products,
+                    'stockDeductions': {},  # Could add detailed deduction info if needed
+                    'lowStockWarnings': stock_engine.get_low_stock_products(request.account_id)
                 }
                 
                 logger.info(f"✅ Sale #{sale.get('id')} completed in {elapsed_ms:.1f}ms")

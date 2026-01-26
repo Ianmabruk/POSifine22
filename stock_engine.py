@@ -94,8 +94,9 @@ class StockEngine:
                 if not product:
                     return False, f"Product ID {product_id} not found", None
                 
-                # Check if composite product
-                if product.get('is_composite'):
+                # Check if composite product (support both is_composite and isComposite)
+                is_composite = product.get('is_composite') or product.get('isComposite', False)
+                if is_composite:
                     # Deduct ingredients from recipe
                     recipe = product.get('recipe', [])
                     if not recipe:
@@ -214,8 +215,9 @@ class StockEngine:
                 unit_price = safe_float(product.get('price', 0))
                 item_subtotal = round_decimal(unit_price * quantity)
                 
-                # Calculate cost
-                if product.get('is_composite'):
+                # Calculate cost (support both is_composite and isComposite)
+                is_composite = product.get('is_composite') or product.get('isComposite', False)
+                if is_composite:
                     # Sum ingredient costs
                     recipe = product.get('recipe', [])
                     item_cost = 0.0
