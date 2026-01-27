@@ -111,6 +111,14 @@ try:
 except ImportError as e:
     logger.warning(f"⚠️ Could not load business routes: {e}")
 
+# Import and register message routes
+try:
+    from message_routes import register_message_routes
+    register_message_routes(app)
+    logger.info("✅ Internal messaging routes registered")
+except ImportError as e:
+    logger.warning(f"⚠️ Could not load message routes: {e}")
+
 logger.info("✅ POS Backend initialized successfully")
 logger.info(f"✅ Storage: {'PostgreSQL' if USE_POSTGRES else 'JSON files'}")
 logger.info(f"✅ Data directory: {DATA_DIR}")
