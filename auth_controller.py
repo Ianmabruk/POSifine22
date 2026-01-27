@@ -143,16 +143,21 @@ class AuthController:
             # Add plan to user response for frontend routing
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
             user_response['plan'] = plan
+            user_response['subscription'] = plan  # Add both for compatibility
             # Map is_active to active for frontend compatibility
             user_response['active'] = user.get('is_active', True)
             
             # Add businessType to response if it exists
             if business_type:
                 user_response['businessType'] = business_type
+                user_response['business_type'] = business_type  # Keep both formats
                 logger.info(f"✅ Signup with business_type: {business_type}")
             
             # Log signup
-            logger.info(f"New signup: {email} (role: {user_role}, plan: {plan})")
+            logger.info(f"✅ New signup: {email}")
+            logger.info(f"   - Role: {user_role}")
+            logger.info(f"   - Subscription: {plan}")
+            logger.info(f"   - Business Type: {business_type or 'None'}")
             
             return True, None, {
                 'user': user_response,
@@ -207,27 +212,48 @@ class AuthController:
             # Generate token
             token = self.generate_token(user)
             
+            # CRITICAL: Get subscription plan from account (not from user)
+            subscription = 'free'  # Default
+            if account:
+                subscription = account.get('plan', 'free')
+                logger.info(f"✅ User subscription from account: {subscription}")
+            
             # Return user data in the expected format
             user_response = {k: v for k, v in user.items() if k != 'password_hash'}
             # Map is_active to active for frontend compatibility
             user_response['active'] = user.get('is_active', True)
             
+            # CRITICAL: Always include subscription field (from account.plan)
+            user_response['subscription'] = subscription
+            user_response['plan'] = subscription  # Keep both for compatibility
+            
             # Include businessType and businessRole if user has them (from user record)
             if user.get('business_type'):
                 user_response['businessType'] = user.get('business_type')
+                user_response['business_type'] = user.get('business_type')  # Keep both formats
                 user_response['businessRole'] = user.get('business_role', 'cashier')
+                user_response['business_role'] = user.get('business_role', 'cashier')  # Keep both formats
                 logger.info(f"✅ User has business_type: {user.get('business_type')}, role: {user.get('business_role')}")
             
-            # For Pro plan users without direct business_type, check business_profile
-            if user.get('plan') == 'pro' and not user_response.get('businessType'):
+            # For Pro/Custom plan users without direct business_type, check business_profile
+            if subscription in ['pro', 'custom'] and not user_response.get('businessType'):
                 try:
-                    profiles = self.ds.get_all('business_profiles', user['account_id'])
+                    profiles = self.ds.find('business_profiles', {'account_id': user['account_id']})
                     if profiles:
                         profile = profiles[0]
-                        user_response['businessType'] = profile.get('business_type')
-                        logger.info(f"✅ Added businessType from profile: {profile.get('business_type')}")
+                        business_type = profile.get('business_type')
+                        user_response['businessType'] = business_type
+                        user_response['business_type'] = business_type
+                        logger.info(f"✅ Added businessType from profile: {business_type}")
                 except Exception as e:
                     logger.error(f"Failed to load business profile: {e}")
+            
+            # Log complete user info for debugging
+            logger.info(f"✅ Login successful: {email}")
+            logger.info(f"   - Role: {user_response.get('role')}")
+            logger.info(f"   - Subscription: {user_response.get('subscription')}")
+            logger.info(f"   - Business Type: {user_response.get('businessType', 'None')}")
+            logger.info(f"   - Business Role: {user_response.get('businessRole', 'None')}")
             
             return True, None, {
                 'user': user_response,
