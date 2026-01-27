@@ -486,10 +486,7 @@ class DataStore:
             'appointments': os.path.join(self.data_dir, 'appointments.json'),
             'prescriptions': os.path.join(self.data_dir, 'prescriptions.json'),
             'table_orders': os.path.join(self.data_dir, 'table_orders.json'),
-            'room_bookings': os.path.join(self.data_dir, 'room_bookings.json'),
-        }
-            'service_fees': os.path.join(self.data_dir, 'service_fees.json'),
-            'stock_movements': os.path.join(self.data_dir, 'stock_movements.json'),
+            'room_bookings': os.path.join(self.data_dir, 'room_bookings.json')
         }
         
         # Initialize empty files
