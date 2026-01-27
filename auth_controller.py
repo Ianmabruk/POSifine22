@@ -204,14 +204,20 @@ class AuthController:
             # Map is_active to active for frontend compatibility
             user_response['active'] = user.get('is_active', True)
             
-            # For Pro plan users, include business_type from business_profile
-            if user.get('plan') == 'pro':
+            # Include businessType and businessRole if user has them (from user record)
+            if user.get('business_type'):
+                user_response['businessType'] = user.get('business_type')
+                user_response['businessRole'] = user.get('business_role', 'cashier')
+                logger.info(f"✅ User has business_type: {user.get('business_type')}, role: {user.get('business_role')}")
+            
+            # For Pro plan users without direct business_type, check business_profile
+            if user.get('plan') == 'pro' and not user_response.get('businessType'):
                 try:
                     profiles = self.ds.get_all('business_profiles', user['account_id'])
                     if profiles:
                         profile = profiles[0]
                         user_response['businessType'] = profile.get('business_type')
-                        logger.info(f"✅ Added businessType to user: {profile.get('business_type')}")
+                        logger.info(f"✅ Added businessType from profile: {profile.get('business_type')}")
                 except Exception as e:
                     logger.error(f"Failed to load business profile: {e}")
             

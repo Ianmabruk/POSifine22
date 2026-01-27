@@ -784,7 +784,9 @@ def users():
                 name=data.get('name'),
                 role=data.get('role', 'cashier'),
                 pin=data.get('pin'),
-                created_by=request.user['id']
+                created_by=request.user['id'],
+                business_type=data.get('businessType'),
+                business_role=data.get('businessRole')
             )
             
             if success:

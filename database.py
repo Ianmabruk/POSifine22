@@ -153,6 +153,8 @@ class DataStore:
                         created_by INTEGER,
                         last_login TEXT,
                         hourly_rate REAL DEFAULT 0.0,
+                        business_type TEXT,
+                        business_role TEXT,
                         UNIQUE(account_id, email)
                     )
                 """)
@@ -458,6 +460,21 @@ class DataStore:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_account ON stock_movements(account_id)")
+                
+                # ============================================================
+                # MIGRATIONS: Add new columns to existing tables
+                # ============================================================
+                
+                # Add business_type and business_role columns to users table if they don't exist
+                try:
+                    cur.execute("""
+                        ALTER TABLE users 
+                        ADD COLUMN IF NOT EXISTS business_type TEXT,
+                        ADD COLUMN IF NOT EXISTS business_role TEXT
+                    """)
+                    logger.info("✅ Migration: Added business_type and business_role columns to users table")
+                except Exception as e:
+                    logger.warning(f"Migration warning (may be normal if columns exist): {e}")
                 
                 conn.commit()
     

@@ -308,7 +308,9 @@ class AdminController:
         name: str,
         role: str = 'cashier',
         pin: Optional[str] = None,
-        created_by: Optional[int] = None
+        created_by: Optional[int] = None,
+        business_type: Optional[str] = None,
+        business_role: Optional[str] = None
     ) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """Create new user (cashier/admin)"""
         try:
@@ -334,7 +336,9 @@ class AdminController:
                 'screen_locked': False,
                 'created_at': datetime.now().isoformat(),
                 'created_by': created_by,
-                'hourly_rate': 0.0
+                'hourly_rate': 0.0,
+                'business_type': business_type,
+                'business_role': business_role
             }
             
             user = self.ds.create('users', user_data)
