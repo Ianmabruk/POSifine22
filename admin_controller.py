@@ -232,10 +232,9 @@ class AdminController:
                 # Get current product to preserve quantity
                 current_product = self.ds.get_by_id('products', product_id, account_id)
                 if current_product:
-                    # Preserve existing quantity unless explicitly zero (new product scenario)
-                    if current_product.get('quantity', 0) > 0:
-                        logger.warning(f"Attempted to update quantity via product edit for product {product_id}. Preserving existing quantity.")
-                        updates['quantity'] = current_product['quantity']
+                    # ALWAYS preserve existing quantity - never allow product edit to change stock
+                    logger.warning(f"Attempted to update quantity via product edit for product {product_id}. Preserving existing quantity: {current_product.get('quantity', 0)}")
+                    updates['quantity'] = current_product.get('quantity', 0)
             
             updates['updated_at'] = datetime.now().isoformat()
             success = self.ds.update('products', product_id, updates, account_id)
