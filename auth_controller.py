@@ -68,7 +68,7 @@ class AuthController:
         except jwt.InvalidTokenError:
             return None
     
-    def signup(self, email: str, password: str, name: str, plan: str = 'free', is_main_admin: bool = False) -> Tuple[bool, Optional[str], Optional[Dict]]:
+    def signup(self, email: str, password: str, name: str, plan: str = 'free', is_main_admin: bool = False, business_type: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
         Create new account and user (owner or admin based on plan)
         
@@ -78,6 +78,7 @@ class AuthController:
             name: User name
             plan: Subscription plan (free, basic, ultra, enterprise)
             is_main_admin: If True, create as owner/main admin; otherwise create as regular admin
+            business_type: Business type for Pro plan users (clinic, hotel, bar, etc.)
         
         Returns:
             (success, error_message, user_data_with_token)
@@ -130,7 +131,9 @@ class AuthController:
                 'screen_locked': False,
                 'created_at': datetime.now().isoformat(),
                 'last_login': datetime.now().isoformat(),
-                'hourly_rate': 0.0
+                'hourly_rate': 0.0,
+                'business_type': business_type,  # Store business type directly in user
+                'business_role': 'admin'  # Default role for signups
             }
             user = self.ds.create('users', user_data)
             
@@ -142,6 +145,11 @@ class AuthController:
             user_response['plan'] = plan
             # Map is_active to active for frontend compatibility
             user_response['active'] = user.get('is_active', True)
+            
+            # Add businessType to response if it exists
+            if business_type:
+                user_response['businessType'] = business_type
+                logger.info(f"✅ Signup with business_type: {business_type}")
             
             # Log signup
             logger.info(f"New signup: {email} (role: {user_role}, plan: {plan})")

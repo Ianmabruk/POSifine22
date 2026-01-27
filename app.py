@@ -185,8 +185,12 @@ def signup():
         if not email or not password or not name:
             return jsonify({'error': 'Missing required fields'}), 400
         
+        logger.info(f"📝 Signup request - Plan: {plan}, Business Type: {business_type}")
+        
+        logger.info(f"📝 Signup request - Plan: {plan}, Business Type: {business_type}")
+        
         # Signup with role determination
-        success, error, response = auth.signup(email, password, name, plan, is_main_admin)
+        success, error, response = auth.signup(email, password, name, plan, is_main_admin, business_type)
         
         if success:
             # If Pro plan with business type, create business profile
@@ -205,6 +209,9 @@ def signup():
                     logger.info(f"✅ Created Pro business profile: {business_type} for {email}")
                 except Exception as e:
                     logger.error(f"Failed to create business profile: {e}")
+            elif plan == 'pro' and not business_type:
+                # Pro plan without business type - check if it's stored in business_profiles
+                logger.info(f"ℹ️ Pro plan signup without business_type - will use default routing")
             
             return jsonify(response), 201
         else:
