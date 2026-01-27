@@ -773,7 +773,10 @@ def clock_status():
 @app.route('/api/time-entries', methods=['GET', 'POST', 'OPTIONS'])
 @auth.require_auth
 def time_entries():
-    """Get time entries"""
+    """Get or create time entries"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     try:
         if request.method == 'GET':
             # Admins can see all, cashiers see only their own
@@ -791,9 +794,45 @@ def time_entries():
                 entries = cashier.get_time_entries(request.account_id, request.user['id'], start_date, end_date)
             
             return jsonify(entries), 200
+        
+        elif request.method == 'POST':
+            # Handle clock in/out via time entries endpoint
+            data = request.get_json()
+            action = data.get('action', 'clock_in')
+            
+            account_id = request.account_id
+            user_id = request.user.get('id')
+            user_name = request.user.get('name', 'Unknown')
+            
+            if action == 'clock_in':
+                success, error, entry = cashier.clock_in(account_id, user_id, user_name)
+                if success:
+                    sync_manager.broadcast_clock_in(account_id, user_id, user_name, entry)
+                    return jsonify({
+                        'success': True,
+                        'clockInTime': entry.get('clock_in_time'),
+                        'entry': entry
+                    }), 201
+                else:
+                    return jsonify({'error': error, 'success': False}), 400
+            
+            elif action == 'clock_out':
+                success, error, entry = cashier.clock_out(account_id, user_id)
+                if success:
+                    sync_manager.broadcast_clock_out(account_id, user_id, entry)
+                    return jsonify({
+                        'success': True,
+                        'duration': entry.get('duration'),
+                        'entry': entry
+                    }), 200
+                else:
+                    return jsonify({'error': error, 'success': False}), 400
+            
+            else:
+                return jsonify({'error': 'Invalid action'}), 400
     
     except Exception as e:
-        logger.error(f"Time entries error: {e}")
+        logger.error(f"Time entries error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/clock-entries', methods=['GET', 'OPTIONS'])
