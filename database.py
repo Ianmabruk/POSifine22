@@ -327,6 +327,113 @@ class DataStore:
                     )
                 """)
                 
+                # Batches table (for stock batch management)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS batches (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        productId INTEGER NOT NULL,
+                        quantity REAL NOT NULL,
+                        expiryDate TEXT,
+                        batchNumber TEXT NOT NULL,
+                        cost REAL DEFAULT 0.0,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+                
+                # Business profiles table (Pro Plan)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS business_profiles (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE UNIQUE,
+                        business_type TEXT NOT NULL,
+                        plan TEXT DEFAULT 'basic',
+                        created_at TEXT NOT NULL,
+                        settings JSONB DEFAULT '{}'
+                    )
+                """)
+                
+                # Role assignments table (Pro Plan - business-specific roles)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS role_assignments (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        business_type TEXT NOT NULL,
+                        business_role TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(user_id, business_type)
+                    )
+                """)
+                
+                # Appointments table (Clinic/Hospital)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS appointments (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        patient_name TEXT NOT NULL,
+                        patient_phone TEXT,
+                        patient_email TEXT,
+                        doctor_id INTEGER,
+                        appointment_date TEXT NOT NULL,
+                        appointment_time TEXT NOT NULL,
+                        status TEXT DEFAULT 'scheduled',
+                        notes TEXT,
+                        created_at TEXT NOT NULL,
+                        created_by INTEGER
+                    )
+                """)
+                
+                # Prescriptions table (Clinic/Hospital)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS prescriptions (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        appointment_id INTEGER REFERENCES appointments(id),
+                        patient_name TEXT NOT NULL,
+                        doctor_id INTEGER NOT NULL,
+                        medications JSONB NOT NULL,
+                        instructions TEXT,
+                        status TEXT DEFAULT 'pending',
+                        dispensed_by INTEGER,
+                        dispensed_at TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+                
+                # Tables/Orders table (Bar/Restaurant)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS table_orders (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        table_number TEXT NOT NULL,
+                        items JSONB NOT NULL,
+                        total REAL DEFAULT 0.0,
+                        status TEXT DEFAULT 'open',
+                        server_id INTEGER,
+                        created_at TEXT NOT NULL,
+                        closed_at TEXT
+                    )
+                """)
+                
+                # Room bookings table (Hotel)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS room_bookings (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        room_number TEXT NOT NULL,
+                        guest_name TEXT NOT NULL,
+                        guest_phone TEXT,
+                        guest_email TEXT,
+                        check_in_date TEXT NOT NULL,
+                        check_out_date TEXT NOT NULL,
+                        status TEXT DEFAULT 'reserved',
+                        total_amount REAL DEFAULT 0.0,
+                        notes TEXT,
+                        created_at TEXT NOT NULL,
+                        created_by INTEGER
+                    )
+                """)
+                
                 # Create indexes for performance
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
@@ -338,6 +445,15 @@ class DataStore:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_account ON time_entries(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_user ON time_entries(user_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_date ON time_entries(date)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_batches_account ON batches(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_batches_product ON batches(productId)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_business_profiles_account ON business_profiles(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_appointments_account ON appointments(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_prescriptions_account ON prescriptions(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_table_orders_account ON table_orders(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_room_bookings_account ON room_bookings(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_account ON expenses(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id)")
@@ -362,6 +478,16 @@ class DataStore:
             'credit_requests': os.path.join(self.data_dir, 'credit_requests.json'),
             'expenses': os.path.join(self.data_dir, 'expenses.json'),
             'discounts': os.path.join(self.data_dir, 'discounts.json'),
+            'service_fees': os.path.join(self.data_dir, 'service_fees.json'),
+            'stock_movements': os.path.join(self.data_dir, 'stock_movements.json'),
+            'batches': os.path.join(self.data_dir, 'batches.json'),
+            'business_profiles': os.path.join(self.data_dir, 'business_profiles.json'),
+            'role_assignments': os.path.join(self.data_dir, 'role_assignments.json'),
+            'appointments': os.path.join(self.data_dir, 'appointments.json'),
+            'prescriptions': os.path.join(self.data_dir, 'prescriptions.json'),
+            'table_orders': os.path.join(self.data_dir, 'table_orders.json'),
+            'room_bookings': os.path.join(self.data_dir, 'room_bookings.json'),
+        }
             'service_fees': os.path.join(self.data_dir, 'service_fees.json'),
             'stock_movements': os.path.join(self.data_dir, 'stock_movements.json'),
         }

@@ -204,6 +204,17 @@ class AuthController:
             # Map is_active to active for frontend compatibility
             user_response['active'] = user.get('is_active', True)
             
+            # For Pro plan users, include business_type from business_profile
+            if user.get('plan') == 'pro':
+                try:
+                    profiles = self.ds.get_all('business_profiles', user['account_id'])
+                    if profiles:
+                        profile = profiles[0]
+                        user_response['businessType'] = profile.get('business_type')
+                        logger.info(f"✅ Added businessType to user: {profile.get('business_type')}")
+                except Exception as e:
+                    logger.error(f"Failed to load business profile: {e}")
+            
             return True, None, {
                 'user': user_response,
                 'token': token

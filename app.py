@@ -179,16 +179,34 @@ def signup():
         password = data.get('password')
         name = data.get('name')
         plan = data.get('plan', 'free')
-        is_main_admin = data.get('is_main_admin', False)  # Explicit main admin flag
+        is_main_admin = data.get('is_main_admin', False)
+        business_type = data.get('business_type')  # New: for Pro plan
         
         if not email or not password or not name:
             return jsonify({'error': 'Missing required fields'}), 400
         
         # Signup with role determination
-        success, error, user = auth.signup(email, password, name, plan, is_main_admin)
+        success, error, response = auth.signup(email, password, name, plan, is_main_admin)
         
         if success:
-            return jsonify(user), 201
+            # If Pro plan with business type, create business profile
+            if plan == 'pro' and business_type:
+                try:
+                    profile_data = {
+                        'account_id': response['user']['account_id'],
+                        'business_type': business_type,
+                        'plan': 'pro',
+                        'created_at': datetime.now().isoformat(),
+                        'settings': {}
+                    }
+                    datastore.create('business_profiles', profile_data)
+                    # Add businessType to user object for frontend
+                    response['user']['businessType'] = business_type
+                    logger.info(f"✅ Created Pro business profile: {business_type} for {email}")
+                except Exception as e:
+                    logger.error(f"Failed to create business profile: {e}")
+            
+            return jsonify(response), 201
         else:
             return jsonify({'error': error}), 400
     
@@ -1192,8 +1210,326 @@ def service_fee_detail(fee_id):
         else:
             return jsonify({'error': 'Service fee not found'}), 404
 
-# Batches, recipes, raw materials endpoints (placeholders)
+# ============================================================
+# PRO PLAN - BUSINESS PROFILES & ROLES
+# ============================================================
+
+@app.route('/api/business-profile', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
+@auth.require_auth
+def business_profile():
+    """Manage business profile for Pro plan users"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        if request.method == 'GET':
+            # Get business profile for current account
+            profiles = datastore.get_all('business_profiles', request.account_id)
+            if profiles:
+                return jsonify(profiles[0]), 200
+            else:
+                return jsonify({'business_type': None, 'plan': 'basic'}), 200
+        
+        elif request.method == 'POST' or request.method == 'PUT':
+            # Create or update business profile
+            data = request.get_json()
+            business_type = data.get('business_type')
+            
+            if not business_type:
+                return jsonify({'error': 'Business type required'}), 400
+            
+            # Check if profile exists
+            existing = datastore.get_all('business_profiles', request.account_id)
+            
+            profile_data = {
+                'account_id': request.account_id,
+                'business_type': business_type,
+                'plan': data.get('plan', 'pro'),
+                'settings': data.get('settings', {})
+            }
+            
+            if existing:
+                # Update existing
+                profile_data['id'] = existing[0]['id']
+                datastore.update('business_profiles', existing[0]['id'], profile_data, request.account_id)
+                return jsonify(profile_data), 200
+            else:
+                # Create new
+                profile_data['created_at'] = datetime.now().isoformat()
+                profile = datastore.create('business_profiles', profile_data)
+                return jsonify(profile), 201
+    
+    except Exception as e:
+        logger.error(f"Business profile error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/role-assignments', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
+@auth.require_auth
+@auth.require_role('owner', 'admin')
+def role_assignments():
+    """Manage business-specific role assignments"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        if request.method == 'GET':
+            # Get all role assignments for account
+            user_id = request.args.get('user_id')
+            roles = datastore.get_all('role_assignments', request.account_id)
+            
+            if user_id:
+                roles = [r for r in roles if r.get('user_id') == int(user_id)]
+            
+            return jsonify(roles), 200
+        
+        elif request.method == 'POST':
+            # Assign role to user
+            data = request.get_json()
+            user_id = data.get('user_id')
+            business_role = data.get('business_role')
+            
+            if not user_id or not business_role:
+                return jsonify({'error': 'User ID and business role required'}), 400
+            
+            # Get business type from profile
+            profile = datastore.get_all('business_profiles', request.account_id)
+            if not profile:
+                return jsonify({'error': 'No business profile found'}), 400
+            
+            business_type = profile[0]['business_type']
+            
+            role_data = {
+                'user_id': user_id,
+                'business_type': business_type,
+                'business_role': business_role,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            role = datastore.create('role_assignments', role_data)
+            return jsonify(role), 201
+        
+        elif request.method == 'DELETE':
+            # Remove role assignment
+            role_id = request.args.get('id')
+            if not role_id:
+                return jsonify({'error': 'Role ID required'}), 400
+            
+            success = datastore.delete('role_assignments', int(role_id))
+            if success:
+                return jsonify({'message': 'Role removed'}), 200
+            else:
+                return jsonify({'error': 'Role not found'}), 404
+    
+    except Exception as e:
+        logger.error(f"Role assignments error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ============================================================
+# CLINIC/HOSPITAL ENDPOINTS (Pro Plan)
+# ============================================================
+
+@app.route('/api/appointments', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
+@auth.require_auth
+def appointments():
+    """Manage appointments for clinic/hospital"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        if request.method == 'GET':
+            appointments_list = datastore.get_all('appointments', request.account_id)
+            return jsonify(appointments_list), 200
+        
+        elif request.method == 'POST':
+            data = request.get_json()
+            appointment_data = {
+                'account_id': request.account_id,
+                'patient_name': data.get('patient_name'),
+                'patient_phone': data.get('patient_phone'),
+                'patient_email': data.get('patient_email'),
+                'doctor_id': data.get('doctor_id'),
+                'appointment_date': data.get('appointment_date'),
+                'appointment_time': data.get('appointment_time'),
+                'status': data.get('status', 'scheduled'),
+                'notes': data.get('notes'),
+                'created_at': datetime.now().isoformat(),
+                'created_by': request.user['id']
+            }
+            appointment = datastore.create('appointments', appointment_data)
+            return jsonify(appointment), 201
+    
+    except Exception as e:
+        logger.error(f"Appointments error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/prescriptions', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
+@auth.require_auth
+def prescriptions():
+    """Manage prescriptions for clinic/hospital"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        if request.method == 'GET':
+            prescriptions_list = datastore.get_all('prescriptions', request.account_id)
+            return jsonify(prescriptions_list), 200
+        
+        elif request.method == 'POST':
+            data = request.get_json()
+            prescription_data = {
+                'account_id': request.account_id,
+                'appointment_id': data.get('appointment_id'),
+                'patient_name': data.get('patient_name'),
+                'doctor_id': request.user['id'],
+                'medications': data.get('medications', []),
+                'instructions': data.get('instructions'),
+                'status': 'pending',
+                'created_at': datetime.now().isoformat()
+            }
+            prescription = datastore.create('prescriptions', prescription_data)
+            return jsonify(prescription), 201
+    
+    except Exception as e:
+        logger.error(f"Prescriptions error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ============================================================
+# BAR/RESTAURANT ENDPOINTS (Pro Plan)
+# ============================================================
+
+@app.route('/api/table-orders', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
+@auth.require_auth
+def table_orders():
+    """Manage table orders for bar/restaurant"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        if request.method == 'GET':
+            orders = datastore.get_all('table_orders', request.account_id)
+            return jsonify(orders), 200
+        
+        elif request.method == 'POST':
+            data = request.get_json()
+            order_data = {
+                'account_id': request.account_id,
+                'table_number': data.get('table_number'),
+                'items': data.get('items', []),
+                'total': data.get('total', 0),
+                'status': 'open',
+                'server_id': request.user['id'],
+                'created_at': datetime.now().isoformat()
+            }
+            order = datastore.create('table_orders', order_data)
+            return jsonify(order), 201
+    
+    except Exception as e:
+        logger.error(f"Table orders error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ============================================================
+# HOTEL ENDPOINTS (Pro Plan)
+# ============================================================
+
+@app.route('/api/room-bookings', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
+@auth.require_auth
+def room_bookings():
+    """Manage room bookings for hotel"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        if request.method == 'GET':
+            bookings = datastore.get_all('room_bookings', request.account_id)
+            return jsonify(bookings), 200
+        
+        elif request.method == 'POST':
+            data = request.get_json()
+            booking_data = {
+                'account_id': request.account_id,
+                'room_number': data.get('room_number'),
+                'guest_name': data.get('guest_name'),
+                'guest_phone': data.get('guest_phone'),
+                'guest_email': data.get('guest_email'),
+                'check_in_date': data.get('check_in_date'),
+                'check_out_date': data.get('check_out_date'),
+                'status': 'reserved',
+                'total_amount': data.get('total_amount', 0),
+                'notes': data.get('notes'),
+                'created_at': datetime.now().isoformat(),
+                'created_by': request.user['id']
+            }
+            booking = datastore.create('room_bookings', booking_data)
+            return jsonify(booking), 201
+    
+    except Exception as e:
+        logger.error(f"Room bookings error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ============================================================
+# BATCHES ENDPOINT (STOCK MANAGEMENT)
+# ============================================================
+
 @app.route('/api/batches', methods=['GET', 'POST', 'OPTIONS'])
+@auth.require_auth
+def batches_endpoint():
+    """Manage stock batches for inventory"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        if request.method == 'GET':
+            # Get all batches, optionally filter by product
+            product_id = request.args.get('productId')
+            if product_id:
+                batches = datastore.get_all('batches', request.account_id)
+                batches = [b for b in batches if b.get('productId') == int(product_id)]
+                return jsonify(batches), 200
+            else:
+                batches = datastore.get_all('batches', request.account_id)
+                return jsonify(batches), 200
+        
+        elif request.method == 'POST':
+            # Create new batch and update product quantity
+            data = request.get_json()
+            product_id = data.get('productId')
+            quantity = float(data.get('quantity', 0))
+            
+            if not product_id or quantity <= 0:
+                return jsonify({'error': 'Invalid batch data'}), 400
+            
+            # Create batch record
+            batch_data = {
+                'account_id': request.account_id,
+                'productId': product_id,
+                'quantity': quantity,
+                'expiryDate': data.get('expiryDate'),
+                'batchNumber': data.get('batchNumber', f'BATCH-{datetime.now().strftime("%Y%m%d%H%M%S")}'),
+                'cost': float(data.get('cost', 0)),
+                'created_at': datetime.now().isoformat()
+            }
+            
+            batch = datastore.create('batches', batch_data)
+            
+            # Update product quantity (add to existing stock)
+            product = datastore.get_by_id('products', product_id, request.account_id)
+            if product:
+                current_qty = float(product.get('quantity', 0))
+                new_qty = current_qty + quantity
+                datastore.update('products', product_id, {'quantity': new_qty}, request.account_id)
+                
+                logger.info(f"✅ Stock added: Product {product_id} | {current_qty} → {new_qty} (+{quantity})")
+                
+                # Broadcast stock update
+                sync_manager.broadcast_stock_update(request.account_id, product_id, new_qty)
+            
+            return jsonify(batch), 201
+    
+    except Exception as e:
+        logger.error(f"Batches error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# Recipes and raw materials endpoints (placeholders)
 @app.route('/api/recipes', methods=['GET', 'POST', 'OPTIONS'])
 @app.route('/api/raw-materials', methods=['GET', 'POST', 'OPTIONS'])
 @auth.require_auth
