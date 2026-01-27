@@ -102,6 +102,15 @@ auth = AuthController(datastore, app.config['SECRET_KEY'])
 admin = AdminController(datastore, stock_engine)
 cashier = CashierController(datastore, stock_engine)
 
+# Import and register business routes
+try:
+    from business_routes import create_business_routes
+    business_bp = create_business_routes(datastore, auth)
+    app.register_blueprint(business_bp, url_prefix='/api/business')
+    logger.info("✅ Business management routes registered")
+except ImportError as e:
+    logger.warning(f"⚠️ Could not load business routes: {e}")
+
 logger.info("✅ POS Backend initialized successfully")
 logger.info(f"✅ Storage: {'PostgreSQL' if USE_POSTGRES else 'JSON files'}")
 logger.info(f"✅ Data directory: {DATA_DIR}")
