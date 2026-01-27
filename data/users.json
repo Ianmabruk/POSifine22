@@ -26,7 +26,7 @@
   {
     "id": 3,
     "email": "hub@gmail.com",
-    "password": "345678",
+    "password": null,
     "name": "the hub",
     "role": "admin",
     "plan": "ultra",
@@ -34,7 +34,9 @@
     "active": true,
     "createdAt": "2026-01-08T12:34:30.351907",
     "lastLoginDate": "2026-01-16T12:54:07.028873",
-    "lastActivityDate": "2026-01-16T12:54:07.028919"
+    "lastActivityDate": "2026-01-16T12:54:07.028919",
+    "password_hash": "$2b$12$ueb2mr77PgpOAEZVsjWc2eyU1gRqb48u1eTmPriwpCszV5SfKiTse",
+    "last_login": "2026-01-27T23:06:46.763126"
   },
   {
     "id": 4,

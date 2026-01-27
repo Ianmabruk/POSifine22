@@ -50,11 +50,13 @@ class AuthController:
     
     def generate_token(self, user: Dict, expires_hours: int = 24) -> str:
         """Generate JWT token for user"""
+        # Handle both account_id and accountId field names
+        account_id = user.get('account_id', user.get('accountId'))
         payload = {
             'user_id': user['id'],
             'email': user['email'],
             'role': user['role'],
-            'account_id': user['account_id'],
+            'account_id': account_id,
             'exp': datetime.utcnow() + timedelta(hours=expires_hours)
         }
         return jwt.encode(payload, self.secret_key, algorithm='HS256')
@@ -185,21 +187,41 @@ class AuthController:
             if not user:
                 return False, "Invalid email or password", None
             
-            # Verify password
-            if not self.verify_password(password, user['password_hash']):
+            # Verify password - handle both old (plaintext) and new (hashed) formats
+            password_field = user.get('password_hash') or user.get('password')
+            if not password_field:
+                return False, "Invalid email or password", None
+            
+            # If password starts with $2b$, it's bcrypt hashed
+            if password_field.startswith('$2b$'):
+                password_valid = self.verify_password(password, password_field)
+            else:
+                # Plain text password (legacy format)
+                password_valid = (password == password_field)
+                
+                # Upgrade to hashed password on successful login
+                if password_valid:
+                    hashed = self.hash_password(password)
+                    self.ds.update('users', user['id'], {
+                        'password_hash': hashed,
+                        'password': None  # Remove plain text
+                    })
+                    logger.info(f"Upgraded password to hashed format for user {user['id']}")
+            
+            if not password_valid:
                 return False, "Invalid email or password", None
             
             # Check if user is active
-            if not user.get('is_active'):
+            if not user.get('is_active', user.get('active', True)):
                 return False, "Account is inactive", None
             
             if user.get('is_locked'):
                 return False, "Account is locked", None
             
             # Check account status
-            account = self.ds.get_by_id('accounts', user['account_id'])
+            account = self.ds.get_by_id('accounts', user.get('account_id', user.get('accountId')))
             if account:
-                if not account.get('is_active'):
+                if not account.get('is_active', account.get('active', True)):
                     return False, "Account is inactive", None
                 if account.get('is_locked'):
                     return False, "Account is locked", None
@@ -438,21 +460,31 @@ class AuthController:
             if not payload:
                 return jsonify({'error': 'Invalid or expired token'}), 401
             
-            # Get user - pass account_id for proper isolation
+            # Get user - try with account_id first, fallback to just user_id for legacy data
             account_id = payload.get('account_id')
             user_id = payload.get('user_id')
             
-            if not account_id or not user_id:
-                logger.error(f"Invalid token payload: account_id={account_id}, user_id={user_id}")
+            if not user_id:
+                logger.error(f"Invalid token payload: user_id={user_id}")
                 return jsonify({'error': 'Invalid token payload'}), 401
             
-            user = self.ds.get_by_id('users', user_id, account_id)
+            # Try to get user with account isolation first
+            user = None
+            if account_id:
+                user = self.ds.get_by_id('users', user_id, account_id)
+            
+            # Fallback to getting user without account isolation (for legacy data)
+            if not user:
+                user = self.ds.get_by_id('users', user_id)
+            
             if not user:
                 logger.error(f"User not found: user_id={user_id}, account_id={account_id}")
                 return jsonify({'error': 'User not found'}), 401
             
-            # Check if user is active
-            if not user.get('is_active') or user.get('is_locked'):
+            # Check if user is active - handle both field name formats
+            is_active = user.get('is_active', user.get('active', True))
+            is_locked = user.get('is_locked', False)
+            if not is_active or is_locked:
                 return jsonify({'error': 'Account is inactive or locked'}), 403
             
             # Map is_active to active for frontend compatibility

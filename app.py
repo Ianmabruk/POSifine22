@@ -1593,6 +1593,20 @@ def clear_data():
         return jsonify({'error': str(e)}), 500
 
 # ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'ok',
+        'timestamp': datetime.now().isoformat(),
+        'version': '2.0',
+        'database': 'connected'
+    }), 200
+
+# ============================================================
 # ERROR HANDLERS
 # ============================================================
 
