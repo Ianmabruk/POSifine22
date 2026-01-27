@@ -690,18 +690,34 @@ def clock_in():
         return '', 200
     
     try:
+        # Validate request data
+        account_id = getattr(request, 'account_id', None)
+        user_id = request.user.get('id') if hasattr(request, 'user') and request.user else None
+        user_name = request.user.get('name') if hasattr(request, 'user') and request.user else 'Unknown'
+        
+        if not account_id:
+            logger.error("Clock in failed: Missing account_id")
+            return jsonify({'error': 'Missing account ID', 'success': False}), 400
+        
+        if not user_id:
+            logger.error("Clock in failed: Missing user_id")
+            return jsonify({'error': 'Missing user ID', 'success': False}), 400
+        
+        logger.info(f"Clock in attempt: user_id={user_id}, account_id={account_id}, name={user_name}")
+        
         success, error, entry = cashier.clock_in(
-            request.account_id,
-            request.user['id'],
-            request.user['name']
+            account_id,
+            user_id,
+            user_name
         )
         
         if success:
+            logger.info(f"Clock in successful: entry_id={entry.get('id')}")
             # Broadcast clock in (real-time sync)
             sync_manager.broadcast_clock_in(
-                request.account_id,
-                request.user['id'],
-                request.user['name'],
+                account_id,
+                user_id,
+                user_name,
                 entry
             )
             # Return consistent format with shiftId
@@ -712,6 +728,7 @@ def clock_in():
                 'entry': entry
             }), 201
         else:
+            logger.warning(f"Clock in failed: {error}")
             return jsonify({'error': error, 'success': False}), 400
     
     except Exception as e:

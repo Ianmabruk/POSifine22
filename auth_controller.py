@@ -438,9 +438,17 @@ class AuthController:
             if not payload:
                 return jsonify({'error': 'Invalid or expired token'}), 401
             
-            # Get user
-            user = self.ds.get_by_id('users', payload['user_id'])
+            # Get user - pass account_id for proper isolation
+            account_id = payload.get('account_id')
+            user_id = payload.get('user_id')
+            
+            if not account_id or not user_id:
+                logger.error(f"Invalid token payload: account_id={account_id}, user_id={user_id}")
+                return jsonify({'error': 'Invalid token payload'}), 401
+            
+            user = self.ds.get_by_id('users', user_id, account_id)
             if not user:
+                logger.error(f"User not found: user_id={user_id}, account_id={account_id}")
                 return jsonify({'error': 'User not found'}), 401
             
             # Check if user is active
@@ -450,9 +458,9 @@ class AuthController:
             # Map is_active to active for frontend compatibility
             user['active'] = user.get('is_active', True)
             
-            # Inject user into request
+            # Inject user and account_id into request
             request.user = user
-            request.account_id = payload['account_id']
+            request.account_id = account_id
             
             return f(*args, **kwargs)
         
