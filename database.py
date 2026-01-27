@@ -329,11 +329,19 @@ class DataStore:
                 
                 # Create indexes for performance
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_products_account ON products(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_account ON sales(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashier_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_account ON time_entries(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_user ON time_entries(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_date ON time_entries(date)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_account ON expenses(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_account ON stock_movements(account_id)")
                 
                 conn.commit()
     

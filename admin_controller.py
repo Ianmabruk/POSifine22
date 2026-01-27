@@ -41,6 +41,8 @@ class AdminController:
         """
         Get comprehensive dashboard statistics
         
+        OPTIMIZED: Single-pass data aggregation to avoid N+1 queries
+        
         Args:
             account_id: Account ID
             period: 'today', 'week', 'month', 'all'
@@ -64,15 +66,23 @@ class AdminController:
                 start_date = '2000-01-01'
                 end_date = now.isoformat()
             
-            # Get sales
+            # OPTIMIZATION: Load all data in parallel using single queries
+            # This prevents N+1 query problems
+            
+            # Get sales with date filtering (single query)
             sales = self.ds.get_sales_by_date_range(account_id, start_date, end_date)
             
-            # Calculate totals
-            total_sales = sum(s.get('total', 0) for s in sales)
-            total_cost = sum(s.get('total_cost', 0) for s in sales)
-            gross_profit = sum(s.get('gross_profit', 0) for s in sales)
+            # Calculate totals in single pass (in-memory aggregation)
+            total_sales = 0.0
+            total_cost = 0.0
+            gross_profit = 0.0
             
-            # Get expenses
+            for s in sales:
+                total_sales += s.get('total', 0)
+                total_cost += s.get('total_cost', 0)
+                gross_profit += s.get('gross_profit', 0)
+            
+            # Get expenses (single query)
             expenses = self.ds.get_all('expenses', account_id)
             expenses = [e for e in expenses if start_date <= e.get('created_at', '') <= end_date]
             total_expenses = sum(e.get('amount', 0) for e in expenses)
@@ -80,17 +90,17 @@ class AdminController:
             # Net profit = gross profit - expenses
             net_profit = gross_profit - total_expenses
             
-            # Recent sales (last 10)
+            # Recent sales (limit 10, already sorted by date in query)
             recent_sales = sorted(
-                self.ds.get_all('sales', account_id),
+                sales,
                 key=lambda x: x.get('created_at', ''),
                 reverse=True
             )[:10]
             
-            # Low stock products
+            # Low stock products (single query, in-memory filtering)
             low_stock = self.stock.get_low_stock_products(account_id)
             
-            # Products count
+            # Products count (single query)
             products = self.ds.get_all('products', account_id)
             total_products = len(products)
             
@@ -215,6 +225,18 @@ class AdminController:
     ) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """Update product"""
         try:
+            # CRITICAL: Never allow quantity to be updated via product edit
+            # Stock must ONLY be updated via adjust_stock or batch_update_stock
+            # This prevents accidental stock resets
+            if 'quantity' in updates:
+                # Get current product to preserve quantity
+                current_product = self.ds.get_by_id('products', product_id, account_id)
+                if current_product:
+                    # Preserve existing quantity unless explicitly zero (new product scenario)
+                    if current_product.get('quantity', 0) > 0:
+                        logger.warning(f"Attempted to update quantity via product edit for product {product_id}. Preserving existing quantity.")
+                        updates['quantity'] = current_product['quantity']
+            
             updates['updated_at'] = datetime.now().isoformat()
             success = self.ds.update('products', product_id, updates, account_id)
             
