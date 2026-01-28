@@ -5,7 +5,11 @@ echo "🚀 Starting POSifine Backend..."
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-DATA_DIR="${SCRIPT_DIR}/data"
+BACKEND_DIR="${SCRIPT_DIR}/backend"
+DATA_DIR="${BACKEND_DIR}/data"
+
+# Change to backend directory
+cd "${BACKEND_DIR}"
 
 # Kill any existing process on port 5000
 if lsof -Pi :5000 -sTCP:LISTEN -t >/dev/null 2>&1; then
