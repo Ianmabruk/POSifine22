@@ -24,6 +24,10 @@ from flask_sock import Sock
 from datetime import datetime
 import json
 
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file from parent directory
+
 # Import components
 from database import DataStore
 from stock_engine import StockEngine
