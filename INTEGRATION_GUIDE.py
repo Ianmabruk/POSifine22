@@ -1,9 +1,13 @@
+# type: ignore
+# pyright: reportUndefinedVariable=false
+# pylance: disable
 """
 ================================================================================
 INTEGRATION GUIDE FOR POS SYSTEM REBUILD INTO app.py
 ================================================================================
 
 This file shows EXACTLY where to modify app.py to use the new architecture.
+This is a DOCUMENTATION FILE with code examples, not executable code.
 
 KEY CHANGES:
 1. Replace /api/sales POST endpoint with SaleService
