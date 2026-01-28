@@ -389,8 +389,14 @@ class AdminController:
         """Get all users for account"""
         users = self.ds.get_all('users', account_id)
         
-        # Remove password hashes
-        return [{k: v for k, v in u.items() if k != 'password_hash'} for u in users]
+        # Remove password hashes and map is_active to active for frontend compatibility
+        result = []
+        for u in users:
+            user_dict = {k: v for k, v in u.items() if k != 'password_hash'}
+            # Map is_active to active
+            user_dict['active'] = u.get('is_active', True)
+            result.append(user_dict)
+        return result
     
     def get_time_entries(
         self,

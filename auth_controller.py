@@ -395,28 +395,37 @@ class AuthController:
             logger.error(f"Lock screen error: {e}")
             return False, f"Failed to lock screen: {str(e)}"
     
-    def unlock_screen(self, user_id: int, password: str, account_id: str) -> Tuple[bool, Optional[str]]:
+    def unlock_screen(self, user_id: int, pin: str, account_id: str) -> Tuple[bool, Optional[str]]:
         """
-        Unlock user screen with password
+        Unlock user screen with PIN
         
         Args:
             user_id: User ID
-            password: Screen lock password (from account settings)
+            pin: 4-digit PIN
             account_id: Account ID
         
         Returns:
             (success, error_message)
         """
         try:
-            # Get account settings
-            account = self.ds.get_by_id('accounts', account_id)
-            if not account:
-                return False, "Account not found"
+            # Get user
+            user = self.ds.get_by_id('users', user_id, account_id)
+            if not user:
+                return False, "User not found"
             
-            # Verify password
-            screen_lock_password = account.get('screen_lock_password', '2005')
-            if password != screen_lock_password:
-                return False, "Invalid password"
+            # Verify PIN
+            user_pin = user.get('pin')
+            if not user_pin:
+                # If user has no PIN set, try default account PIN
+                account = self.ds.get_by_id('accounts', account_id)
+                if account:
+                    default_pin = account.get('screen_lock_password', '2005')
+                    if pin != default_pin:
+                        return False, "Invalid PIN"
+                else:
+                    return False, "No PIN configured for this user"
+            elif user_pin != pin:
+                return False, "Invalid PIN"
             
             # Unlock screen
             success = self.ds.update('users', user_id, {

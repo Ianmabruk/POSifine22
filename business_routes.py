@@ -254,13 +254,16 @@ def create_business_routes(datastore, auth_controller):
                 return jsonify({'error': 'Email already registered'}), 400
             
             # Create new business user
-            import hashlib
+            import bcrypt
             from datetime import datetime
+            
+            # Hash password using bcrypt
+            password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
             
             user_data = {
                 'account_id': account_id,
                 'email': email,
-                'password_hash': hashlib.sha256(password.encode()).hexdigest(),
+                'password_hash': password_hash,
                 'name': name,
                 'role': 'cashier',  # System role is cashier (not admin)
                 'business_type': admin_business_type,  # Inherit from admin
@@ -268,6 +271,7 @@ def create_business_routes(datastore, auth_controller):
                 'is_active': True,
                 'is_locked': False,
                 'screen_locked': False,
+                'pin': data.get('pin', None),  # Optional PIN for quick login
                 'created_at': datetime.now().isoformat(),
                 'last_login': None,
                 'hourly_rate': data.get('hourly_rate', 0.0)
