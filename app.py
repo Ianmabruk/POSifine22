@@ -17,6 +17,7 @@ All existing API endpoints maintained for frontend compatibility.
 """
 
 import os
+import sys
 import logging
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -24,9 +25,17 @@ from flask_sock import Sock
 from datetime import datetime
 import json
 
+# Add parent directory to path for imports (ai_controller, ai_service, etc.)
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(CURRENT_DIR)
+if PARENT_DIR not in sys.path:
+    sys.path.insert(0, PARENT_DIR)
+
 # Load environment variables
 from dotenv import load_dotenv
-load_dotenv()  # Load .env file from parent directory
+# Load .env from parent directory
+dotenv_path = os.path.join(PARENT_DIR, '.env')
+load_dotenv(dotenv_path)
 
 # Import components
 from database import DataStore
@@ -63,7 +72,14 @@ if not jwt_secret:
 app.config['SECRET_KEY'] = jwt_secret
 
 # CORS Configuration - Restrict in production
-allowed_origins = os.environ.get('CORS_ORIGINS', '*').split(',')
+if IS_PRODUCTION:
+    allowed_origins = os.environ.get('CORS_ORIGINS', 'http://localhost:5173,http://localhost:3000').split(',')
+else:
+    # Development: allow localhost on common ports
+    allowed_origins = ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
+
+logger.info(f"🔒 CORS allowed origins: {allowed_origins}")
+
 CORS(
     app,
     resources={r"/api/*": {"origins": allowed_origins}},
@@ -88,12 +104,14 @@ def handle_preflight():
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
         return response
 
-# Ensure CORS on all responses
+# Ensure CORS on all responses (only in development)
 @app.after_request
 def set_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
+    if not IS_PRODUCTION:
+        # Development only: allow all origins for easier testing
+        response.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
     if not response.headers.get('Content-Type'):
         response.headers['Content-Type'] = 'application/json'
     return response
@@ -103,10 +121,15 @@ def set_cors_headers(response):
 # ============================================================
 
 # Data directory
-DATA_DIR = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data'))
+DATA_DIR = os.environ.get('DATA_DIR', os.path.join(PARENT_DIR, 'data'))
 
 # Check if PostgreSQL should be used
-USE_POSTGRES = os.environ.get('DATABASE_URL') is not None
+USE_POSTGRES = os.environ.get('USE_POSTGRES', 'false').lower() == 'true'
+
+if USE_POSTGRES:
+    logger.info("🐘 Using PostgreSQL database")
+else:
+    logger.info("📁 Using JSON file storage")
 
 # Initialize data store
 datastore = DataStore(data_dir=DATA_DIR, use_postgres=USE_POSTGRES)
