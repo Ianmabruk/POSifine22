@@ -573,26 +573,40 @@ def product_detail(product_id):
 @auth.require_auth
 @auth.require_role('owner', 'admin')
 def adjust_product_stock(product_id):
-    """Adjust product stock"""
+    """Adjust product stock - OPTIMIZED"""
     try:
         data = request.get_json()
         quantity = float(data.get('quantity', 0))
         notes = data.get('notes')
         
+        # Perform stock adjustment
         success, error = admin.adjust_stock(
             product_id, request.account_id, quantity, notes, request.user['id']
         )
         
         if success:
-            # Broadcast stock update
-            sync_manager.broadcast_stock_update(request.account_id, product_id, quantity)
-            return jsonify({'message': 'Stock updated'}), 200
+            # Get updated product data for immediate UI update
+            product = datastore.get_by_id('products', product_id)
+            
+            # Broadcast stock update to all clients (async, non-blocking)
+            try:
+                sync_manager.broadcast_stock_update(request.account_id, product_id, quantity)
+            except Exception as sync_error:
+                logger.warning(f"Sync broadcast failed (non-critical): {sync_error}")
+            
+            # Return updated product data for instant UI refresh
+            return jsonify({
+                'message': 'Stock updated', 
+                'success': True,
+                'product': product,
+                'newStock': product.get('stock', 0) if product else 0
+            }), 200
         else:
-            return jsonify({'error': error}), 400
+            return jsonify({'error': error, 'success': False}), 400
     
     except Exception as e:
         logger.error(f"Adjust stock error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'success': False}), 500
 
 @app.route('/api/products/low-stock-warnings', methods=['GET', 'OPTIONS'])
 @auth.require_auth
@@ -870,7 +884,7 @@ def clock_status():
 @app.route('/api/time-entries', methods=['GET', 'POST', 'OPTIONS'])
 @auth.require_auth
 def time_entries():
-    """Get or create time entries"""
+    """Get or create time entries - OPTIMIZED"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -893,7 +907,7 @@ def time_entries():
             return jsonify(entries), 200
         
         elif request.method == 'POST':
-            # Handle clock in/out via time entries endpoint
+            # Handle clock in/out via time entries endpoint - OPTIMIZED
             data = request.get_json()
             action = data.get('action', 'clock_in')
             
@@ -904,10 +918,17 @@ def time_entries():
             if action == 'clock_in':
                 success, error, entry = cashier.clock_in(account_id, user_id, user_name)
                 if success:
-                    sync_manager.broadcast_clock_in(account_id, user_id, user_name, entry)
+                    # Broadcast async (non-blocking)
+                    try:
+                        sync_manager.broadcast_clock_in(account_id, user_id, user_name, entry)
+                    except Exception as sync_error:
+                        logger.warning(f"Clock-in sync failed (non-critical): {sync_error}")
+                    
                     return jsonify({
                         'success': True,
+                        'id': entry.get('id'),
                         'clockInTime': entry.get('clock_in_time'),
+                        'clock_in_time': entry.get('clock_in_time'),
                         'entry': entry
                     }), 201
                 else:
@@ -916,7 +937,12 @@ def time_entries():
             elif action == 'clock_out':
                 success, error, entry = cashier.clock_out(account_id, user_id)
                 if success:
-                    sync_manager.broadcast_clock_out(account_id, user_id, entry)
+                    # Broadcast async (non-blocking)
+                    try:
+                        sync_manager.broadcast_clock_out(account_id, user_id, entry)
+                    except Exception as sync_error:
+                        logger.warning(f"Clock-out sync failed (non-critical): {sync_error}")
+                    
                     return jsonify({
                         'success': True,
                         'duration': entry.get('duration'),
