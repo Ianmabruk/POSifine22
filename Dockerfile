@@ -8,14 +8,16 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy backend files
-COPY backend/requirements.txt .
+# Copy requirements and install dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
-# Copy all backend application files
-COPY backend/*.py ./
-COPY backend/gunicorn.conf.py ./
-COPY backend/data/ ./data/ 2>/dev/null || mkdir -p ./data
+# Copy application files from root
+COPY *.py ./
+COPY gunicorn.conf.py ./
+
+# Create data directory
+RUN mkdir -p ./data
 
 # Set environment variables
 ENV FLASK_ENV=production
