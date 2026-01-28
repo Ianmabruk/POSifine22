@@ -1,0 +1,17 @@
+[
+  {
+    "id": "f2c97b1f2d2898cd",
+    "owner_email": "test2@test.com",
+    "business_name": "Test User's Business",
+    "plan": "ultra",
+    "is_active": true,
+    "is_locked": false,
+    "trial_ends_at": null,
+    "created_at": "2026-01-25T16:04:39.128813",
+    "currency": "KES",
+    "tax_rate": 0.0,
+    "screen_lock_password": "2005",
+    "days_used": 0,
+    "requested_trial": false
+  }
+]
