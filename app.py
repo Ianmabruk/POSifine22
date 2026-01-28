@@ -47,14 +47,16 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Validate required environment variables in production
-if IS_PRODUCTION:
-    required_vars = ['JWT_SECRET']
-    missing = [var for var in required_vars if not os.environ.get(var)]
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+# JWT Secret configuration
+jwt_secret = os.environ.get('JWT_SECRET')
+if not jwt_secret:
+    # Generate a secure random secret if not provided
+    import secrets
+    jwt_secret = secrets.token_hex(32)
+    if IS_PRODUCTION:
+        logger.warning("⚠️ JWT_SECRET not set! Using auto-generated secret. Set JWT_SECRET env var for persistence.")
 
-app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'ultra-pos-secret-2024')
+app.config['SECRET_KEY'] = jwt_secret
 
 # CORS Configuration - Restrict in production
 allowed_origins = os.environ.get('CORS_ORIGINS', '*').split(',')
