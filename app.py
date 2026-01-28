@@ -73,18 +73,19 @@ app.config['SECRET_KEY'] = jwt_secret
 
 # CORS Configuration - Restrict in production
 if IS_PRODUCTION:
-    allowed_origins = os.environ.get('CORS_ORIGINS', 'http://localhost:5173,http://localhost:3000').split(',')
+    cors_origins_str = os.environ.get('CORS_ORIGINS', 'https://posifine11.netlify.app')
+    allowed_origins = [origin.strip() for origin in cors_origins_str.split(',')]
 else:
     # Development: allow localhost on common ports
-    allowed_origins = ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000']
+    allowed_origins = ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:3002', 'http://127.0.0.1:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:3002']
 
 logger.info(f"🔒 CORS allowed origins: {allowed_origins}")
 
 CORS(
     app,
-    resources={r"/api/*": {"origins": allowed_origins}},
-    supports_credentials=False,
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+    resources={r"/*": {"origins": allowed_origins}},
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     expose_headers=["Content-Type", "Authorization"],
     max_age=86400
@@ -93,25 +94,35 @@ CORS(
 # WebSocket support
 sock = Sock(app)
 
-# Preflight handler
+# Preflight handler for all OPTIONS requests
 @app.before_request
 def handle_preflight():
     if request.method == 'OPTIONS':
         response = jsonify({'status': 'ok'})
         response.status_code = 204
-        response.headers['Access-Control-Allow-Origin'] = '*'
+        origin = request.headers.get('Origin')
+        if origin:
+            response.headers['Access-Control-Allow-Origin'] = origin
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept, Origin'
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
         return response
 
-# Ensure CORS on all responses (only in development)
+# Ensure CORS on all responses
 @app.after_request
 def set_cors_headers(response):
+    origin = request.headers.get('Origin')
     if not IS_PRODUCTION:
-        # Development only: allow all origins for easier testing
-        response.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
+        # Development: allow all origins for easier testing
+        response.headers['Access-Control-Allow-Origin'] = origin or '*'
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+    elif origin and origin in allowed_origins:
+        # Production: only allow configured origins
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+    
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept, Origin'
     if not response.headers.get('Content-Type'):
         response.headers['Content-Type'] = 'application/json'
     return response

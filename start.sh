@@ -5,7 +5,18 @@ echo "🚀 Starting POSifine Backend..."
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 DATA_DIR="${SCRIPT_DIR}/data"
+
+# Detect Python command - use venv if available
+VENV_PYTHON="${PARENT_DIR}/.venv/bin/python"
+if [ -f "$VENV_PYTHON" ]; then
+    PYTHON_CMD="$VENV_PYTHON"
+    echo "✅ Using virtual environment Python"
+else
+    PYTHON_CMD="python3"
+    echo "⚠️ Using system Python (venv not found)"
+fi
 
 # Kill any existing process on port 5000
 if lsof -Pi :5000 -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -16,11 +27,11 @@ fi
 
 # Verify syntax
 echo "✅ Verifying app syntax..."
-python3 -m py_compile app.py
+$PYTHON_CMD -m py_compile app.py
 
 # Test import
 echo "✅ Testing app import..."
-python3 -c "from app import app; print('✅ App imports OK')" 2>&1
+$PYTHON_CMD -c "from app import app; print('✅ App imports OK')" 2>&1
 
 # Create data directory
 mkdir -p "${DATA_DIR}"
@@ -55,7 +66,7 @@ echo "✅ Data files initialized"
 echo "📦 Starting Gunicorn on port $PORT with 2 workers..."
 
 # Start with Gunicorn (reduced workers for stability)
-exec gunicorn -w 2 -b 0.0.0.0:$PORT app:app \
+exec $PYTHON_CMD -m gunicorn -w 2 -b 0.0.0.0:$PORT app:app \
     --timeout 120 \
     --worker-class sync \
     --max-requests 1000 \
