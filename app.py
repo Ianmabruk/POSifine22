@@ -740,24 +740,50 @@ def clock_in():
 @auth.require_auth
 def clock_out():
     """Clock out"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     try:
-        success, error, entry = cashier.clock_out(request.account_id, request.user['id'])
+        # Validate request data
+        account_id = getattr(request, 'account_id', None)
+        user_id = request.user.get('id') if hasattr(request, 'user') and request.user else None
+        user_name = request.user.get('name') if hasattr(request, 'user') and request.user else 'Unknown'
+        
+        if not account_id:
+            logger.error("Clock out failed: Missing account_id")
+            return jsonify({'error': 'Missing account ID', 'success': False}), 400
+        
+        if not user_id:
+            logger.error("Clock out failed: Missing user_id")
+            return jsonify({'error': 'Missing user ID', 'success': False}), 400
+        
+        logger.info(f"Clock out attempt: user_id={user_id}, account_id={account_id}, name={user_name}")
+        
+        success, error, entry = cashier.clock_out(account_id, user_id)
         
         if success:
+            logger.info(f"Clock out successful: entry_id={entry.get('id')}")
             # Broadcast clock out (real-time sync)
             sync_manager.broadcast_clock_out(
-                request.account_id,
-                request.user['id'],
-                request.user['name'],
+                account_id,
+                user_id,
+                user_name,
                 entry
             )
-            return jsonify(entry), 200
+            # Return consistent format
+            return jsonify({
+                'success': True,
+                'clockOutTime': entry.get('clock_out_time'),
+                'duration': entry.get('duration_minutes'),
+                'entry': entry
+            }), 200
         else:
-            return jsonify({'error': error}), 400
+            logger.warning(f"Clock out failed: {error}")
+            return jsonify({'error': error, 'success': False}), 400
     
     except Exception as e:
-        logger.error(f"Clock out error: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Clock out error: {e}", exc_info=True)
+        return jsonify({'error': f'Clock out failed: {str(e)}', 'success': False}), 500
 
 @app.route('/api/clock-status', methods=['GET', 'OPTIONS'])
 @auth.require_auth

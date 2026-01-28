@@ -109,31 +109,57 @@ class CashierController:
         return sorted(sales, key=lambda x: x.get('created_at', ''), reverse=True)
     
     def get_cashier_stats(self, account_id: str, cashier_id: int) -> Dict:
-        """Get statistics for specific cashier"""
+        """Get statistics for specific cashier (Monitor Dashboard)"""
         try:
-            # Get cashier's sales
-            sales = [s for s in self.ds.get_all('sales', account_id) if s.get('cashier_id') == cashier_id]
-            
-            # Today's sales
+            # Get all data for today
             now = datetime.now()
             today_start = now.replace(hour=0, minute=0, second=0).isoformat()
-            today_sales = [s for s in sales if s.get('created_at', '') >= today_start]
+            
+            # Get cashier's sales for today
+            all_sales = self.ds.get_all('sales', account_id)
+            today_sales = [s for s in all_sales if s.get('cashier_id') == cashier_id and s.get('created_at', '') >= today_start]
+            
+            # Get all expenses for today (expenses are shared across cashiers)
+            all_expenses = self.ds.get_all('expenses', account_id)
+            today_expenses = [e for e in all_expenses if e.get('created_at', '') >= today_start]
             
             # Calculate totals
             total_sales = sum(s.get('total', 0) for s in today_sales)
-            total_profit = sum(s.get('gross_profit', 0) for s in today_sales)
+            gross_profit = sum(s.get('gross_profit', 0) for s in today_sales)
+            total_expenses = sum(e.get('amount', 0) for e in today_expenses)
+            net_profit = gross_profit - total_expenses
+            
+            # All-time stats
+            all_cashier_sales = [s for s in all_sales if s.get('cashier_id') == cashier_id]
             
             return {
+                # Today's stats (for Monitor Dashboard)
+                'totalSales': round(total_sales, 2),
+                'totalExpenses': round(total_expenses, 2),
+                'netProfit': round(net_profit, 2),
+                'transactionCount': len(today_sales),
+                
+                # Legacy fields (for backward compatibility)
                 'digital_sales': round(total_sales, 2),
-                'digital_profit': round(total_profit, 2),
+                'digital_profit': round(gross_profit, 2),
                 'sales_count': len(today_sales),
-                'all_time_sales': len(sales),
-                'all_time_total': round(sum(s.get('total', 0) for s in sales), 2)
+                'all_time_sales': len(all_cashier_sales),
+                'all_time_total': round(sum(s.get('total', 0) for s in all_cashier_sales), 2)
             }
             
         except Exception as e:
-            logger.error(f"Error getting cashier stats: {e}")
-            return {}
+            logger.error(f"Error getting cashier stats: {e}", exc_info=True)
+            return {
+                'totalSales': 0,
+                'totalExpenses': 0,
+                'netProfit': 0,
+                'transactionCount': 0,
+                'digital_sales': 0,
+                'digital_profit': 0,
+                'sales_count': 0,
+                'all_time_sales': 0,
+                'all_time_total': 0
+            }
     
     # ============================================================
     # PRODUCT VIEWING
@@ -180,7 +206,8 @@ class CashierController:
             # Check if already clocked in
             active_entry = self.ds.get_active_time_entry(user_id, account_id)
             if active_entry:
-                return False, "Already clocked in", None
+                logger.warning(f"Clock in failed: User {user_id} already has active shift {active_entry.get('id')}")
+                return False, "Already clocked in. Please clock out first.", None
             
             # Create time entry
             entry_data = {
@@ -194,11 +221,18 @@ class CashierController:
                 'notes': None
             }
             
+            logger.info(f"Creating time entry for user_id={user_id}, account_id={account_id}")
             entry = self.ds.create('time_entries', entry_data)
+            
+            if not entry:
+                logger.error(f"Failed to create time entry for user_id={user_id}")
+                return False, "Failed to create time entry", None
+            
+            logger.info(f"✅ Clock in successful: user_id={user_id}, entry_id={entry.get('id')}")
             return True, None, entry
             
         except Exception as e:
-            logger.error(f"Error clocking in: {e}")
+            logger.error(f"Error clocking in: {e}", exc_info=True)
             return False, f"Clock in failed: {str(e)}", None
     
     def clock_out(
@@ -220,7 +254,8 @@ class CashierController:
             # Get active entry
             active_entry = self.ds.get_active_time_entry(user_id, account_id)
             if not active_entry:
-                return False, "Not clocked in", None
+                logger.warning(f"Clock out failed: No active shift found for user_id={user_id}")
+                return False, "Not clocked in. Please clock in first.", None
             
             # Calculate duration
             clock_in = datetime.fromisoformat(active_entry['clock_in_time'])
@@ -233,14 +268,26 @@ class CashierController:
                 'duration_minutes': duration_minutes
             }
             
-            self.ds.update('time_entries', active_entry['id'], updates, account_id)
+            logger.info(f"Updating time entry {active_entry['id']}: clock_out={clock_out.isoformat()}, duration={duration_minutes}min")
+            
+            update_success = self.ds.update('time_entries', active_entry['id'], updates, account_id)
+            
+            if not update_success:
+                logger.error(f"Failed to update time entry {active_entry['id']}")
+                return False, "Failed to update clock out time", None
             
             # Get updated entry
             entry = self.ds.get_by_id('time_entries', active_entry['id'], account_id)
+            
+            if not entry:
+                logger.error(f"Failed to retrieve updated time entry {active_entry['id']}")
+                return False, "Failed to retrieve updated entry", None
+            
+            logger.info(f"✅ Clock out successful: user_id={user_id}, duration={duration_minutes}min")
             return True, None, entry
             
         except Exception as e:
-            logger.error(f"Error clocking out: {e}")
+            logger.error(f"Error clocking out: {e}", exc_info=True)
             return False, f"Clock out failed: {str(e)}", None
     
     def get_clock_status(
