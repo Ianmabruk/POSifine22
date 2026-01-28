@@ -1,0 +1,96 @@
+[
+  {
+    "id": 1,
+    "items": [
+      {
+        "productId": 1,
+        "quantity": 2
+      },
+      {
+        "productId": 3,
+        "quantity": 3
+      }
+    ],
+    "total": 250,
+    "discount": 0,
+    "tax": 0,
+    "taxType": "exclusive",
+    "paymentMethod": "cash",
+    "accountId": "test",
+    "cashierId": 1,
+    "cashierName": "Cashier1",
+    "stockDeductions": {
+      "products": [
+        {
+          "id": 1,
+          "name": "Rice",
+          "before": 10.0,
+          "after": 8.0,
+          "deducted": 2.0,
+          "unit": "kg",
+          "costPerUnit": 25.0,
+          "totalCost": 50.0
+        },
+        {
+          "id": 3,
+          "name": "Bread",
+          "before": 20.0,
+          "after": 17.0,
+          "deducted": 3.0,
+          "unit": "pcs",
+          "costPerUnit": 20.0,
+          "totalCost": 60.0
+        }
+      ],
+      "totalCost": 110.0
+    },
+    "createdAt": "2026-01-22T19:35:52.435896"
+  },
+  {
+    "id": 2,
+    "items": [
+      {
+        "productId": 2,
+        "quantity": 1
+      },
+      {
+        "productId": 3,
+        "quantity": 5
+      }
+    ],
+    "total": 280,
+    "discount": 0,
+    "tax": 0,
+    "taxType": "exclusive",
+    "paymentMethod": "cash",
+    "accountId": "test",
+    "cashierId": 1,
+    "cashierName": "Cashier1",
+    "stockDeductions": {
+      "products": [
+        {
+          "id": 2,
+          "name": "Sugar",
+          "before": 5.0,
+          "after": 4.0,
+          "deducted": 1.0,
+          "unit": "kg",
+          "costPerUnit": 15.0,
+          "totalCost": 15.0
+        },
+        {
+          "id": 3,
+          "name": "Bread",
+          "before": 17.0,
+          "after": 12.0,
+          "deducted": 5.0,
+          "unit": "pcs",
+          "costPerUnit": 20.0,
+          "totalCost": 100.0
+        }
+      ],
+      "totalCost": 115.0
+    },
+    "createdAt": "2026-01-22T19:35:52.442300"
+  }
+]

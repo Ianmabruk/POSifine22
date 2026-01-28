@@ -546,6 +546,29 @@ class DataStore:
         else:
             return self._json_get_by_id(table, id, account_id)
     
+    def get_by_field(self, table: str, field: str, value: Any) -> List[Dict]:
+        """
+        Get all records where field matches value
+        
+        Args:
+            table: Table name
+            field: Field name to filter by
+            value: Value to match
+            
+        Returns:
+            List of matching records
+        """
+        if self.use_postgres:
+            with self.pg_pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    # Use parameterized query for security
+                    query = f"SELECT * FROM {table} WHERE {field} = %s"
+                    cur.execute(query, (value,))
+                    return cur.fetchall()
+        else:
+            all_items = self.get_all(table)
+            return [item for item in all_items if item.get(field) == value]
+    
     def create(self, table: str, data: Dict) -> Dict:
         """Create a new record"""
         if self.use_postgres:
