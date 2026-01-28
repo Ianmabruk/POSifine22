@@ -2,12 +2,33 @@ services:
   - type: web
     name: posifine-backend
     env: python
+    region: oregon
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: bash start.sh
     envVars:
       - key: JWT_SECRET
         generateValue: true
+      - key: SECRET_KEY
+        generateValue: true
       - key: FLASK_ENV
         value: production
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: USE_POSTGRES
+        value: "true"
+      - key: CORS_ORIGINS
+        value: https://posifine11.netlify.app,https://posifine-frontend.netlify.app
+      - key: DATABASE_URL
+        fromDatabase:
+          name: posifine-db
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+
+databases:
+  - name: posifine-db
+    databaseName: universal_pos
+    user: universalpos
+    region: oregon
+    plan: free
