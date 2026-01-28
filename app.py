@@ -21,25 +21,8 @@ import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sock import Sock
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from datetime import datetime
 import json
-
-# Monitoring
-try:
-    import sentry_sdk
-    from sentry_sdk.integrations.flask import FlaskIntegration
-    SENTRY_AVAILABLE = True
-except ImportError:
-    SENTRY_AVAILABLE = False
-
-# Caching
-try:
-    import redis
-    REDIS_AVAILABLE = True
-except ImportError:
-    REDIS_AVAILABLE = False
 
 # Import components
 from database import DataStore
@@ -73,29 +56,6 @@ if IS_PRODUCTION:
 
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'ultra-pos-secret-2024')
 
-# Initialize Sentry for error monitoring
-if SENTRY_AVAILABLE and os.environ.get('SENTRY_DSN'):
-    sentry_sdk.init(
-        dsn=os.environ['SENTRY_DSN'],
-        integrations=[FlaskIntegration()],
-        environment=os.environ.get('FLASK_ENV', 'development'),
-        traces_sample_rate=0.1,  # 10% of transactions for performance monitoring
-        profiles_sample_rate=0.1,
-    )
-    logger.info("✅ Sentry error monitoring initialized")
-
-# Initialize Redis cache
-redis_client = None
-if REDIS_AVAILABLE:
-    redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
-    try:
-        redis_client = redis.from_url(redis_url, decode_responses=True, socket_timeout=5)
-        redis_client.ping()  # Test connection
-        logger.info("✅ Redis cache initialized")
-    except Exception as e:
-        logger.warning(f"⚠️ Redis connection failed: {e}. Running without cache.")
-        redis_client = None
-
 # CORS Configuration - Restrict in production
 allowed_origins = os.environ.get('CORS_ORIGINS', '*').split(',')
 CORS(
@@ -106,15 +66,6 @@ CORS(
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     expose_headers=["Content-Type", "Authorization"],
     max_age=86400
-)
-
-# Rate limiting
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["1000 per hour", "100 per minute"],
-    storage_uri=os.environ.get('REDIS_URL', 'memory://'),
-    strategy="fixed-window"
 )
 
 # WebSocket support
