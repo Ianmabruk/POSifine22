@@ -18,7 +18,7 @@ All existing API endpoints maintained for frontend compatibility.
 
 import os
 import logging
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_sock import Sock
 from datetime import datetime
@@ -192,7 +192,21 @@ def websocket(ws):
 
 @app.route('/')
 def index():
-    """Health check"""
+    """Serve React frontend"""
+    return send_from_directory('static', 'index.html')
+
+@app.route('/<path:path>')
+def serve_static(path):
+    """Serve React static files"""
+    try:
+        return send_from_directory('static', path)
+    except:
+        # For React Router - serve index.html for non-API routes
+        return send_from_directory('static', 'index.html')
+
+@app.route('/api/health')
+def health_check():
+    """API health check"""
     return jsonify({
         'status': 'running',
         'version': '2.0',
