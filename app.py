@@ -132,6 +132,22 @@ try:
 except ImportError as e:
     logger.warning(f"⚠️ Could not load message routes: {e}")
 
+# Import and register AI routes
+try:
+    from ai_controller import create_ai_routes
+    ai_bp = create_ai_routes(datastore, auth.require_auth)
+    app.register_blueprint(ai_bp)
+    logger.info("✅ AI features routes registered")
+    
+    # Initialize alert engine
+    from alert_engine import start_alert_engine
+    alert_engine = start_alert_engine(datastore, auto_start=True)
+    logger.info("✅ AI alert engine started")
+except ImportError as e:
+    logger.warning(f"⚠️ Could not load AI routes: {e}")
+except Exception as e:
+    logger.warning(f"⚠️ AI features initialization failed: {e}")
+
 logger.info("✅ POS Backend initialized successfully")
 logger.info(f"✅ Storage: {'PostgreSQL' if USE_POSTGRES else 'JSON files'}")
 logger.info(f"✅ Data directory: {DATA_DIR}")
