@@ -204,16 +204,6 @@ def serve_static(path):
         # For React Router - serve index.html for non-API routes
         return send_from_directory('static', 'index.html')
 
-@app.route('/api/health')
-def health_check():
-    """API health check"""
-    return jsonify({
-        'status': 'running',
-        'version': '2.0',
-        'storage': 'PostgreSQL' if USE_POSTGRES else 'JSON',
-        'timestamp': datetime.now().isoformat()
-    })
-
 @app.route('/api/auth/signup', methods=['POST', 'OPTIONS'])
 def signup():
     """Create new account and user (owner or admin based on plan)"""
