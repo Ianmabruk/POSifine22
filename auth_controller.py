@@ -135,7 +135,7 @@ class AuthController:
         token = self.generate_token(user)
 
         return True, None, {
-            "user": self._sanitize_user(user),
+            "user": self._build_user_payload(user),
             "token": token
         }
 
@@ -149,6 +149,14 @@ class AuthController:
         if not user:
             return False, "Invalid credentials", None
 
+        account = self.datastore.get_by_id("accounts", user.get("account_id")) if user.get("account_id") else None
+        if not account:
+            return False, "Account not found", None
+        if account.get("is_locked"):
+            return False, "Account locked", None
+        if account.get("is_active") is False:
+            return False, "Account inactive. Please choose a subscription.", None
+
         if user.get("is_locked"):
             return False, "Account locked", None
 
@@ -159,7 +167,7 @@ class AuthController:
         token = self.generate_token(user)
 
         return True, None, {
-            "user": self._sanitize_user(user),
+            "user": self._build_user_payload(user),
             "token": token
         }
 
@@ -206,6 +214,12 @@ class AuthController:
 
             g.user = user
             g.account = self.datastore.get_by_id("accounts", payload.get("account_id"))
+            if not g.account:
+                return jsonify({"error": "Account not found"}), 401
+            if g.account.get("is_locked"):
+                return jsonify({"error": "Account locked"}), 403
+            if g.account.get("is_active") is False:
+                return jsonify({"error": "Account inactive. Please choose a subscription."}), 403
             request.user = {
                 "id": user["id"],
                 "email": user["email"],
@@ -223,4 +237,22 @@ class AuthController:
     def _sanitize_user(user: Dict[str, Any]) -> Dict[str, Any]:
         sanitized = dict(user)
         sanitized.pop("password_hash", None)
+        return sanitized
+
+    def _build_user_payload(self, user: Dict[str, Any]) -> Dict[str, Any]:
+        sanitized = self._sanitize_user(user)
+        account_id = user.get("account_id")
+        account = self.datastore.get_by_id("accounts", account_id) if account_id else None
+
+        if account:
+            sanitized["plan"] = account.get("plan")
+            sanitized["subscription"] = account.get("plan")
+            sanitized["active"] = bool(account.get("is_active", True))
+            sanitized["account_active"] = bool(account.get("is_active", True))
+            if account.get("business_type") and not sanitized.get("business_type"):
+                sanitized["business_type"] = account.get("business_type")
+
+        if "active" not in sanitized:
+            sanitized["active"] = bool(sanitized.get("is_active", True))
+
         return sanitized

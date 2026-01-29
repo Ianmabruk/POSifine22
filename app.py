@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import os
 import logging
+import uuid
+import json
 from datetime import datetime
+import time
 from typing import Dict, Any
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 
 from database import DataStore
@@ -48,9 +51,77 @@ def create_app() -> Flask:
     admin_controller = AdminController(datastore, stock_engine)
     cashier_controller = CashierController(datastore, stock_engine)
 
+    def _safe_float(value: Any) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _apply_fields(items, fields_param: str | None):
+        if not fields_param:
+            return items
+        fields = [f.strip() for f in fields_param.split(",") if f.strip()]
+        if not fields:
+            return items
+        return [{k: item.get(k) for k in fields if k in item} for item in items]
+
+    def _apply_limit(items, limit_param: str | None):
+        if not limit_param:
+            return items
+        try:
+            limit = int(limit_param)
+        except (TypeError, ValueError):
+            return items
+        if limit <= 0:
+            return []
+        return items[:limit]
+
+    def _apply_sort(items, sort_param: str | None):
+        if not sort_param:
+            return items
+        reverse = sort_param.startswith("-")
+        key = sort_param[1:] if reverse else sort_param
+        return sorted(items, key=lambda x: x.get(key) or "", reverse=reverse)
+
     # ============================================================
     # Health
     # ============================================================
+
+    @app.before_request
+    def start_timer():
+        request._start_time = time.time()
+        request._request_id = uuid.uuid4().hex
+
+    @app.after_request
+    def add_timing_headers(response):
+        start_time = getattr(request, "_start_time", None)
+        request_id = getattr(request, "_request_id", None)
+        if start_time is not None:
+            duration_ms = (time.time() - start_time) * 1000
+            response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+            if request_id:
+                response.headers["X-Request-Id"] = request_id
+            if duration_ms > 800:
+                logger.warning("Slow request: %s %s took %.2fms", request.method, request.path, duration_ms)
+
+            account_id = None
+            try:
+                account_id = getattr(request, "user", {}).get("account_id")
+            except Exception:
+                account_id = None
+
+            logger.info(
+                "REQ %s",
+                json.dumps({
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.path,
+                    "status": response.status_code,
+                    "duration_ms": round(duration_ms, 2),
+                    "account_id": account_id
+                })
+            )
+        return response
 
     @app.get("/health")
     def health_check():
@@ -91,6 +162,27 @@ def create_app() -> Flask:
             return jsonify(result), 200
         return jsonify({"error": error or "Invalid credentials"}), 401
 
+    @app.get("/api/auth/me")
+    @auth_controller.require_auth
+    def auth_me():
+        user = getattr(request, "user", None)
+        account_id = user.get("account_id") if user else None
+        account = datastore.get_by_id("accounts", account_id) if account_id else None
+
+        response_user = dict(g.user) if hasattr(g, "user") else dict(user or {})
+        response_user.pop("password_hash", None)
+
+        if account:
+            response_user["plan"] = account.get("plan")
+            response_user["subscription"] = account.get("plan")
+            response_user["active"] = bool(account.get("is_active", True))
+            response_user["account_active"] = bool(account.get("is_active", True))
+
+        if "active" not in response_user:
+            response_user["active"] = bool(response_user.get("is_active", True))
+
+        return jsonify(response_user), 200
+
     # ============================================================
     # Products
     # ============================================================
@@ -100,6 +192,9 @@ def create_app() -> Flask:
     def get_products():
         account_id = request.user.get("account_id")
         products = admin_controller.get_products(account_id)
+        products = _apply_sort(products, request.args.get("sort"))
+        products = _apply_limit(products, request.args.get("limit"))
+        products = _apply_fields(products, request.args.get("fields"))
         return jsonify(products), 200
 
     @app.post("/api/products")
@@ -151,7 +246,31 @@ def create_app() -> Flask:
     def get_sales():
         account_id = request.user.get("account_id")
         sales = admin_controller.get_sales(account_id)
+        sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
+        sales = _apply_limit(sales, request.args.get("limit"))
+        sales = _apply_fields(sales, request.args.get("fields"))
         return jsonify(sales), 200
+
+    @app.get("/api/stats")
+    @auth_controller.require_auth
+    def get_stats():
+        account_id = request.user.get("account_id")
+        products = datastore.get_all("products", account_id)
+        sales = datastore.get_all("sales", account_id)
+        expenses = datastore.get_all("expenses", account_id)
+
+        total_sales = sum(_safe_float(s.get("total")) for s in sales)
+        total_cost = sum(_safe_float(s.get("total_cost")) for s in sales)
+        total_expenses = sum(_safe_float(e.get("amount")) for e in expenses)
+        profit = total_sales - total_cost - total_expenses
+
+        return jsonify({
+            "totalSales": total_sales,
+            "totalExpenses": total_expenses,
+            "profit": profit,
+            "productsCount": len(products),
+            "salesCount": len(sales)
+        }), 200
 
     @app.post("/api/sales")
     @auth_controller.require_auth

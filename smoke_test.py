@@ -4,13 +4,15 @@ import json
 import time
 import urllib.parse
 import websocket
+import uuid
 
 BASE = 'http://127.0.0.1:5000/api'
+EMAIL = f"smoke+{uuid.uuid4().hex[:8]}@example.com"
 
 
 def signup():
     data = {
-        'email': 'smoke+test@example.com',
+        'email': EMAIL,
         'password': 'smoke123',
         'name': 'Smoke Tester'
     }
@@ -30,7 +32,7 @@ def signup():
 
 
 def login():
-    data = {'email': 'smoke+test@example.com', 'password': 'smoke123'}
+    data = {'email': EMAIL, 'password': 'smoke123'}
     try:
         r = requests.post(f"{BASE}/auth/login", json=data, timeout=5)
     except Exception as e:
