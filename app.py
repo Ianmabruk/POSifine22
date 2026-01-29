@@ -187,6 +187,230 @@ def create_app() -> Flask:
         return jsonify(response_user), 200
 
     # ============================================================
+    # Main Admin (Owner)
+    # ============================================================
+
+    def _require_main_admin():
+        token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+        if not token:
+            return None, (jsonify({"error": "Authorization token required"}), 401)
+
+        payload = auth_controller.verify_token(token)
+        if not payload:
+            return None, (jsonify({"error": "Invalid or expired token"}), 401)
+
+        user = datastore.get_by_id("users", payload.get("user_id"), payload.get("account_id"))
+        if not user:
+            return None, (jsonify({"error": "User not found"}), 401)
+
+        if user.get("role") != "owner":
+            return None, (jsonify({"error": "Access denied"}), 403)
+
+        return user, None
+
+    @app.post("/api/main-admin/auth/login")
+    def main_admin_login():
+        data = request.get_json() or {}
+        email = (data.get("email") or "").strip().lower()
+        password = (data.get("password") or "").strip()
+
+        if not email or not password:
+            return jsonify({"error": "Email and password required"}), 400
+
+        success, error, result = auth_controller.login(email=email, password=password)
+        if success:
+            user = result.get("user") if isinstance(result, dict) else None
+            if not user or user.get("role") != "owner":
+                return jsonify({"error": "Access denied"}), 403
+            return jsonify(result), 200
+
+        env_email = os.environ.get("MAIN_ADMIN_EMAIL", "").strip().lower()
+        env_password = os.environ.get("MAIN_ADMIN_PASSWORD", "").strip()
+        if env_email and env_password and email == env_email and password == env_password:
+            owner = datastore.get_user_by_email(email)
+            if not owner or owner.get("role") != "owner":
+                return jsonify({"error": "Owner user not found"}), 401
+            token = auth_controller.generate_token(owner)
+            return jsonify({
+                "user": auth_controller._build_user_payload(owner),
+                "token": token
+            }), 200
+
+        return jsonify({"error": error or "Invalid credentials"}), 401
+
+    @app.get("/api/main-admin/users")
+    def main_admin_users():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        all_users = datastore.get_all("users")
+        accounts = {acc.get("id"): acc for acc in datastore.get_all("accounts")}
+
+        response = []
+        for u in all_users:
+            sanitized = dict(u)
+            sanitized.pop("password_hash", None)
+            account = accounts.get(u.get("account_id"))
+            if account:
+                sanitized["plan"] = account.get("plan")
+                sanitized["subscription"] = account.get("plan")
+                sanitized["active"] = bool(account.get("is_active", True))
+                sanitized["account_active"] = bool(account.get("is_active", True))
+                if account.get("business_type") and not sanitized.get("business_type"):
+                    sanitized["business_type"] = account.get("business_type")
+                if account.get("business_name") and not sanitized.get("business_name"):
+                    sanitized["business_name"] = account.get("business_name")
+            response.append(sanitized)
+
+        return jsonify(response), 200
+
+    @app.post("/api/main-admin/users")
+    def main_admin_create_user():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        data = request.get_json() or {}
+        success, error, result = auth_controller.signup(
+            email=data.get("email"),
+            password=data.get("password"),
+            name=data.get("name"),
+            plan=data.get("plan", "free"),
+            business_type=data.get("business_type")
+        )
+        if success:
+            return jsonify(result), 201
+        return jsonify({"error": error or "Failed to create user"}), 400
+
+    @app.post("/api/main-admin/users/<int:user_id>/lock")
+    def main_admin_lock_user(user_id: int):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        data = request.get_json() or {}
+        locked = bool(data.get("locked", False))
+
+        target = datastore.get_by_id("users", user_id)
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+
+        account_id = target.get("account_id")
+        if account_id:
+            datastore.update("accounts", account_id, {
+                "is_locked": locked,
+                "is_active": not locked
+            })
+
+            # Update all users in the account
+            all_users = datastore.get_all("users")
+            for acct_user in all_users:
+                if acct_user.get("account_id") == account_id:
+                    datastore.update("users", acct_user.get("id"), {
+                        "is_locked": locked,
+                        "is_active": not locked
+                    }, account_id)
+
+        return jsonify({"message": "User lock status updated"}), 200
+
+    @app.post("/api/main-admin/users/<int:user_id>/plan")
+    def main_admin_change_plan(user_id: int):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        data = request.get_json() or {}
+        plan = data.get("plan")
+        if not plan:
+            return jsonify({"error": "Plan is required"}), 400
+
+        target = datastore.get_by_id("users", user_id)
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+
+        account_id = target.get("account_id")
+        if account_id:
+            datastore.update("accounts", account_id, {
+                "plan": plan,
+                "is_active": True
+            })
+
+            profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
+            for profile in profiles:
+                datastore.update("business_profiles", profile.get("id"), {"plan": plan}, account_id)
+
+        return jsonify({"message": "Plan updated", "plan": plan}), 200
+
+    @app.post("/api/main-admin/users/<int:user_id>/reset-password")
+    def main_admin_reset_password(user_id: int):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        data = request.get_json() or {}
+        temp_password = (data.get("temp_password") or data.get("password") or "").strip()
+        if not temp_password:
+            temp_password = uuid.uuid4().hex[:8]
+
+        target = datastore.get_by_id("users", user_id)
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+
+        hashed = auth_controller.hash_password(temp_password)
+        account_id = target.get("account_id")
+        updated = datastore.update("users", user_id, {"password_hash": hashed}, account_id)
+        if not updated:
+            return jsonify({"error": "Failed to reset password"}), 400
+
+        return jsonify({"message": "Password reset", "tempPassword": temp_password}), 200
+
+    @app.get("/api/main-admin/activities")
+    def main_admin_activities():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        return jsonify([]), 200
+
+    @app.get("/api/main-admin/stats")
+    def main_admin_stats():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        all_users = datastore.get_all("users")
+        accounts = datastore.get_all("accounts")
+        sales = datastore.get_all("sales")
+
+        total_users = len(all_users)
+        active_users = len([u for u in all_users if u.get("is_active", True) and not u.get("is_locked")])
+        locked_users = len([u for u in all_users if u.get("is_locked")])
+        total_revenue = sum(_safe_float(sale.get("total")) for sale in sales)
+
+        return jsonify({
+            "totalUsers": total_users,
+            "activeUsers": active_users,
+            "lockedUsers": locked_users,
+            "totalRevenue": total_revenue,
+            "pendingPayments": 0,
+            "overduePayments": 0
+        }), 200
+
+    @app.get("/api/main-admin/sales-all")
+    def main_admin_sales_all():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        return jsonify(datastore.get_all("sales")), 200
+
+    @app.post("/api/main-admin/send-email")
+    def main_admin_send_email():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        return jsonify({"success": True}), 200
+
+    # ============================================================
     # Products
     # ============================================================
 
