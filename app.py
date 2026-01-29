@@ -15,6 +15,7 @@ import time
 from typing import Dict, Any
 
 from flask import Flask, jsonify, request, g
+from flask_sock import Sock
 from flask_cors import CORS
 
 from database import DataStore
@@ -22,6 +23,7 @@ from stock_engine import StockEngine
 from auth_controller import AuthController
 from admin_controller import AdminController
 from cashier_controller import CashierController
+from sync_manager import sync_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    sock = Sock(app)
 
     # Config
     app.config["SECRET_KEY"] = os.environ.get(
@@ -204,6 +207,24 @@ def create_app() -> Flask:
         account_id = request.user.get("account_id")
         created_by = request.user.get("id")
 
+        allowed_fields = {
+            "barcode",
+            "sku",
+            "image",
+            "reorder_level",
+            "max_stock_level",
+            "cost_per_unit",
+            "enable_weight_pricing",
+            "product_type"
+        }
+
+        extra_fields = {k: data.get(k) for k in allowed_fields if k in data}
+        if "enable_weight_pricing" in extra_fields:
+            extra_fields["enable_weight_pricing"] = bool(extra_fields.get("enable_weight_pricing"))
+        for float_field in ("reorder_level", "max_stock_level", "cost_per_unit"):
+            if float_field in extra_fields:
+                extra_fields[float_field] = _safe_float(extra_fields.get(float_field))
+
         success, error, product = admin_controller.create_product(
             account_id=account_id,
             created_by=created_by,
@@ -214,11 +235,13 @@ def create_app() -> Flask:
             category=data.get("category", "general"),
             unit=data.get("unit", "pcs"),
             is_composite=bool(data.get("is_composite") or data.get("isComposite", False)),
-            recipe=data.get("recipe")
+            recipe=data.get("recipe"),
+            **extra_fields
         )
 
         if not success:
             return jsonify({"error": error or "Failed to create product"}), 400
+        sync_manager.broadcast_product_update(account_id, product, action='created')
         return jsonify(product), 201
 
     @app.put("/api/products/<int:product_id>")
@@ -227,14 +250,58 @@ def create_app() -> Flask:
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
 
+        allowed_fields = {
+            "name",
+            "price",
+            "cost",
+            "quantity",
+            "category",
+            "unit",
+            "is_composite",
+            "recipe",
+            "product_type",
+            "barcode",
+            "sku",
+            "image",
+            "reorder_level",
+            "max_stock_level",
+            "cost_per_unit",
+            "enable_weight_pricing"
+        }
+
+        updates = {k: data.get(k) for k in allowed_fields if k in data}
+        if "is_composite" not in updates and "isComposite" in data:
+            updates["is_composite"] = bool(data.get("isComposite"))
+        if "enable_weight_pricing" in updates:
+            updates["enable_weight_pricing"] = bool(updates.get("enable_weight_pricing"))
+
+        for float_field in ("price", "cost", "quantity", "reorder_level", "max_stock_level", "cost_per_unit"):
+            if float_field in updates:
+                updates[float_field] = _safe_float(updates.get(float_field))
+
         success, error, product = admin_controller.update_product(
             product_id=product_id,
             account_id=account_id,
-            **data
+            **updates
         )
 
         if not success:
             return jsonify({"error": error or "Failed to update product"}), 400
+        sync_manager.broadcast_product_update(account_id, product, action='updated')
+        return jsonify(product), 200
+
+    @app.put("/api/products/<int:product_id>/stock")
+    @auth_controller.require_auth
+    def update_product_stock(product_id: int):
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        quantity = _safe_float(data.get("quantity"))
+
+        success, error = admin_controller.update_stock(product_id, account_id, quantity)
+        if not success:
+            return jsonify({"error": error or "Failed to update stock"}), 400
+        product = datastore.get_by_id("products", product_id, account_id)
+        sync_manager.broadcast_stock_update(account_id, product_id, product.get("quantity") if product else 0)
         return jsonify(product), 200
 
     # ============================================================
@@ -294,7 +361,53 @@ def create_app() -> Flask:
 
         if not success:
             return jsonify({"error": error or "Failed to complete sale"}), 400
+        sync_manager.broadcast_sale_completed(account_id, sale)
+
+        for item in data.get("items", []):
+            product_id = item.get("product_id") or item.get("productId")
+            if not product_id:
+                continue
+            product = datastore.get_by_id("products", product_id, account_id)
+            if product:
+                sync_manager.broadcast_stock_update(account_id, product_id, product.get("quantity"))
         return jsonify({"sale": sale}), 201
+
+    # ============================================================
+    # WebSocket
+    # ============================================================
+
+    @sock.route("/api/ws/products")
+    def ws_products(ws):
+        token = request.args.get("token", "").strip()
+        payload = auth_controller.verify_token(token)
+        if not payload:
+            ws.send(json.dumps({"type": "error", "message": "Invalid token"}))
+            return
+
+        account_id = payload.get("account_id")
+        user_id = payload.get("user_id")
+        if not account_id or not user_id:
+            ws.send(json.dumps({"type": "error", "message": "Invalid session"}))
+            return
+
+        sync_manager.register_connection(ws, account_id, user_id)
+
+        products = datastore.get_all("products", account_id)
+        ws.send(json.dumps({
+            "type": "products_snapshot",
+            "data": {"allProducts": products},
+            "timestamp": datetime.utcnow().isoformat()
+        }))
+
+        try:
+            while True:
+                msg = ws.receive()
+                if msg is None:
+                    break
+                if msg == "ping":
+                    ws.send(json.dumps({"type": "pong", "timestamp": datetime.utcnow().isoformat()}))
+        finally:
+            sync_manager.unregister_connection(ws)
 
     return app
 
