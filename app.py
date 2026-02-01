@@ -24,6 +24,8 @@ from auth_controller import AuthController
 from admin_controller import AdminController
 from cashier_controller import CashierController
 from sync_manager import sync_manager
+from services.cache_service import CacheService
+from services.session_store import SessionStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,6 +40,10 @@ def create_app() -> Flask:
         "JWT_SECRET",
         os.environ.get("SECRET_KEY", "dev-secret-change-me")
     )
+    app.config["SESSION_COOKIE_SECURE"] = True
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
+    app.config["PREFERRED_URL_SCHEME"] = "https"
 
     # CORS
     cors_origins = os.environ.get("CORS_ORIGINS", "*")
@@ -50,9 +56,86 @@ def create_app() -> Flask:
     use_postgres = bool(os.environ.get("DATABASE_URL"))
     datastore = DataStore(data_dir=os.environ.get("DATA_DIR"), use_postgres=use_postgres)
     stock_engine = StockEngine(datastore)
-    auth_controller = AuthController(datastore, app.config["SECRET_KEY"])
+    session_store = SessionStore()
+    auth_controller = AuthController(datastore, app.config["SECRET_KEY"], session_store=session_store)
     admin_controller = AdminController(datastore, stock_engine)
     cashier_controller = CashierController(datastore, stock_engine)
+    cache = CacheService()
+
+    # Simple in-memory rate limiting for auth endpoints
+    login_attempts = {}
+    login_blocked_until = {}
+
+    def _rate_limit_key():
+        return request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
+
+    def _is_rate_limited():
+        key = _rate_limit_key()
+        if cache.enabled:
+            blocked_until = cache.get_int(f"rl:block:{key}")
+            if blocked_until and blocked_until > cache.now_ts():
+                return True, int(blocked_until - cache.now_ts())
+            return False, 0
+
+        blocked_until = login_blocked_until.get(key)
+        if blocked_until and blocked_until > time.time():
+            return True, int(blocked_until - time.time())
+        return False, 0
+
+    def _record_failed_login():
+        key = _rate_limit_key()
+        if cache.enabled:
+            attempts = cache.incr_with_ttl(f"rl:fail:{key}", 900)
+            if attempts >= 5:
+                cache.set_int(f"rl:block:{key}", cache.now_ts() + 900, 900)
+            return
+
+        now = time.time()
+        attempts = login_attempts.get(key, [])
+        attempts = [t for t in attempts if now - t < 900]
+        attempts.append(now)
+        login_attempts[key] = attempts
+        if len(attempts) >= 5:
+            login_blocked_until[key] = now + 900
+
+    def _reset_login_attempts():
+        key = _rate_limit_key()
+        if cache.enabled:
+            cache.delete(f"rl:fail:{key}")
+            cache.delete(f"rl:block:{key}")
+            return
+
+        login_attempts.pop(key, None)
+        login_blocked_until.pop(key, None)
+
+    def _log_activity(action: str, account_id: str | None, user_id: int | None, metadata: Dict[str, Any] | None = None):
+        try:
+            datastore.create("activity_logs", {
+                "account_id": account_id,
+                "user_id": user_id,
+                "action": action,
+                "resource": request.path,
+                "metadata": metadata or {},
+                "ip_address": _rate_limit_key(),
+                "created_at": datetime.utcnow().isoformat()
+            })
+        except Exception:
+            pass
+
+    def _log_audit(action: str, actor: Dict[str, Any] | None, target: str, metadata: Dict[str, Any] | None = None):
+        try:
+            datastore.create("audit_logs", {
+                "account_id": actor.get("account_id") if actor else None,
+                "actor_id": actor.get("id") if actor else None,
+                "actor_role": actor.get("role") if actor else None,
+                "action": action,
+                "target": target,
+                "metadata": metadata or {},
+                "ip_address": _rate_limit_key(),
+                "created_at": datetime.utcnow().isoformat()
+            })
+        except Exception:
+            pass
 
     def _safe_float(value: Any) -> float:
         try:
@@ -92,6 +175,19 @@ def create_app() -> Flask:
 
     @app.before_request
     def start_timer():
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            if request.path.startswith("/api/auth") or request.path.startswith("/api/main-admin/auth"):
+                pass
+            else:
+                csrf_cookie = request.cookies.get("csrf_token")
+                csrf_header = request.headers.get("X-CSRF-Token")
+                if csrf_cookie and csrf_header != csrf_cookie:
+                    return jsonify({"error": "Invalid CSRF token"}), 403
+        if os.environ.get("ENFORCE_HTTPS") == "1":
+            proto = request.headers.get("X-Forwarded-Proto", request.scheme)
+            if proto != "https":
+                url = request.url.replace("http://", "https://", 1)
+                return jsonify({"error": "HTTPS required", "redirect": url}), 403
         request._start_time = time.time()
         request._request_id = uuid.uuid4().hex
 
@@ -124,6 +220,13 @@ def create_app() -> Flask:
                     "account_id": account_id
                 })
             )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = "default-src 'self'"
         return response
 
     @app.get("/health")
@@ -151,19 +254,77 @@ def create_app() -> Flask:
             business_type=data.get("business_type")
         )
         if success:
-            return jsonify(result), 201
+            refresh_token = auth_controller.create_refresh_session(
+                user=result.get("user") or {},
+                user_agent=request.headers.get("User-Agent", ""),
+                ip_address=_rate_limit_key()
+            )
+            csrf_token = uuid.uuid4().hex
+            result["refreshToken"] = refresh_token
+            result["csrfToken"] = csrf_token
+            resp = jsonify(result)
+            resp.set_cookie("csrf_token", csrf_token, secure=True, httponly=False, samesite="Strict")
+            return resp, 201
         return jsonify({"error": error or "Signup failed"}), 400
 
     @app.post("/api/auth/login")
     def login():
+        is_limited, retry_after = _is_rate_limited()
+        if is_limited:
+            return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
+
         data = request.get_json() or {}
         success, error, result = auth_controller.login(
             email=data.get("email"),
             password=data.get("password")
         )
         if success:
-            return jsonify(result), 200
+            _reset_login_attempts()
+            refresh_token = auth_controller.create_refresh_session(
+                user=result.get("user") or {},
+                user_agent=request.headers.get("User-Agent", ""),
+                ip_address=_rate_limit_key()
+            )
+            csrf_token = uuid.uuid4().hex
+            result["refreshToken"] = refresh_token
+            result["csrfToken"] = csrf_token
+            _log_activity("login", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
+            resp = jsonify(result)
+            resp.set_cookie("csrf_token", csrf_token, secure=True, httponly=False, samesite="Strict")
+            return resp, 200
+        _record_failed_login()
         return jsonify({"error": error or "Invalid credentials"}), 401
+
+    @app.post("/api/auth/refresh")
+    def refresh_token():
+        data = request.get_json() or {}
+        refresh = data.get("refreshToken")
+        if not refresh:
+            return jsonify({"error": "Refresh token required"}), 400
+
+        rotated = auth_controller.rotate_refresh_session(
+            refresh_token=refresh,
+            user_agent=request.headers.get("User-Agent", ""),
+            ip_address=_rate_limit_key()
+        )
+        if not rotated:
+            return jsonify({"error": "Invalid or expired refresh token"}), 401
+
+        _log_activity("refresh_token", rotated.get("user", {}).get("account_id"), rotated.get("user", {}).get("id"))
+        csrf_token = uuid.uuid4().hex
+        rotated["csrfToken"] = csrf_token
+        resp = jsonify(rotated)
+        resp.set_cookie("csrf_token", csrf_token, secure=True, httponly=False, samesite="Strict")
+        return resp, 200
+
+    @app.post("/api/auth/logout")
+    def logout():
+        data = request.get_json() or {}
+        refresh = data.get("refreshToken")
+        if refresh:
+            auth_controller.revoke_refresh_session(refresh)
+        _log_activity("logout", None, None)
+        return jsonify({"success": True}), 200
 
     @app.get("/api/auth/me")
     @auth_controller.require_auth
@@ -203,13 +364,17 @@ def create_app() -> Flask:
         if not user:
             return None, (jsonify({"error": "User not found"}), 401)
 
-        if user.get("role") != "owner":
+        if user.get("role") != "main_admin":
             return None, (jsonify({"error": "Access denied"}), 403)
 
         return user, None
 
     @app.post("/api/main-admin/auth/login")
     def main_admin_login():
+        is_limited, retry_after = _is_rate_limited()
+        if is_limited:
+            return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
+
         data = request.get_json() or {}
         email = (data.get("email") or "").strip().lower()
         password = (data.get("password") or "").strip()
@@ -217,26 +382,36 @@ def create_app() -> Flask:
         if not email or not password:
             return jsonify({"error": "Email and password required"}), 400
 
-        success, error, result = auth_controller.login(email=email, password=password)
-        if success:
-            user = result.get("user") if isinstance(result, dict) else None
-            if not user or user.get("role") != "owner":
-                return jsonify({"error": "Access denied"}), 403
-            return jsonify(result), 200
+        owner_email = os.environ.get("MAIN_ADMIN_EMAIL", "").strip().lower()
+        owner_hash = os.environ.get("MAIN_ADMIN_HASH", "").strip()
+        if not owner_email or not owner_hash:
+            return jsonify({"error": "Main admin credentials not configured"}), 500
 
-        env_email = os.environ.get("MAIN_ADMIN_EMAIL", "").strip().lower()
-        env_password = os.environ.get("MAIN_ADMIN_PASSWORD", "").strip()
-        if env_email and env_password and email == env_email and password == env_password:
-            owner = datastore.get_user_by_email(email)
-            if not owner or owner.get("role") != "owner":
-                return jsonify({"error": "Owner user not found"}), 401
-            token = auth_controller.generate_token(owner)
-            return jsonify({
-                "user": auth_controller._build_user_payload(owner),
-                "token": token
-            }), 200
+        if email != owner_email or not auth_controller.verify_password(password, owner_hash):
+            _record_failed_login()
+            return jsonify({"error": "Access denied"}), 403
 
-        return jsonify({"error": error or "Invalid credentials"}), 401
+        owner = datastore.get_user_by_email(email)
+        if not owner or owner.get("role") != "main_admin":
+            return jsonify({"error": "Owner user not found"}), 401
+
+        token = auth_controller.generate_token(owner)
+        refresh_token = auth_controller.create_refresh_session(
+            user=owner,
+            user_agent=request.headers.get("User-Agent", ""),
+            ip_address=_rate_limit_key()
+        )
+        csrf_token = uuid.uuid4().hex
+        _reset_login_attempts()
+        _log_activity("main_admin_login", owner.get("account_id"), owner.get("id"))
+        resp = jsonify({
+            "user": auth_controller._build_user_payload(owner),
+            "token": token,
+            "refreshToken": refresh_token,
+            "csrfToken": csrf_token
+        })
+        resp.set_cookie("csrf_token", csrf_token, secure=True, httponly=False, samesite="Strict")
+        return resp, 200
 
     @app.get("/api/main-admin/users")
     def main_admin_users():
@@ -312,6 +487,10 @@ def create_app() -> Flask:
                         "is_active": not locked
                     }, account_id)
 
+        _log_audit("account_lock" if locked else "account_unlock", user, f"user:{user_id}", {
+            "locked": locked
+        })
+
         return jsonify({"message": "User lock status updated"}), 200
 
     @app.post("/api/main-admin/users/<int:user_id>/plan")
@@ -340,6 +519,10 @@ def create_app() -> Flask:
             for profile in profiles:
                 datastore.update("business_profiles", profile.get("id"), {"plan": plan}, account_id)
 
+        _log_audit("plan_change", user, f"user:{user_id}", {
+            "plan": plan
+        })
+
         return jsonify({"message": "Plan updated", "plan": plan}), 200
 
     @app.post("/api/main-admin/users/<int:user_id>/reset-password")
@@ -363,6 +546,8 @@ def create_app() -> Flask:
         if not updated:
             return jsonify({"error": "Failed to reset password"}), 400
 
+        _log_audit("reset_password", user, f"user:{user_id}", {})
+
         return jsonify({"message": "Password reset", "tempPassword": temp_password}), 200
 
     @app.get("/api/main-admin/activities")
@@ -370,7 +555,40 @@ def create_app() -> Flask:
         user, error_response = _require_main_admin()
         if error_response:
             return error_response
-        return jsonify([]), 200
+        activities = datastore.get_all("activity_logs")
+        activities = sorted(activities, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify(activities[:500]), 200
+
+    @app.get("/api/main-admin/audit-logs")
+    def main_admin_audit_logs():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        logs = datastore.get_all("audit_logs")
+        logs = sorted(logs, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify(logs[:500]), 200
+
+    @app.get("/api/main-admin/sessions")
+    def main_admin_sessions():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        sessions = datastore.get_all("sessions")
+        sessions = sorted(sessions, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify(sessions[:500]), 200
+
+    @app.post("/api/main-admin/sessions/<int:session_id>/revoke")
+    def main_admin_revoke_session(session_id: int):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        updated = datastore.update("sessions", session_id, {"revoked_at": datetime.utcnow().isoformat()})
+        if not updated:
+            return jsonify({"error": "Session not found"}), 404
+
+        _log_audit("revoke_session", user, f"session:{session_id}", {})
+        return jsonify({"message": "Session revoked"}), 200
 
     @app.get("/api/main-admin/stats")
     def main_admin_stats():
@@ -418,7 +636,16 @@ def create_app() -> Flask:
     @auth_controller.require_auth
     def get_products():
         account_id = request.user.get("account_id")
+        has_query = bool(request.args)
+        cache_key = f"cache:products:{account_id}"
+        if cache.enabled and not has_query:
+            cached = cache.get_json(cache_key)
+            if cached is not None:
+                return jsonify(cached), 200
+
         products = admin_controller.get_products(account_id)
+        if cache.enabled and not has_query:
+            cache.set_json(cache_key, products, ttl_seconds=15)
         products = _apply_sort(products, request.args.get("sort"))
         products = _apply_limit(products, request.args.get("limit"))
         products = _apply_fields(products, request.args.get("fields"))
@@ -466,6 +693,8 @@ def create_app() -> Flask:
         if not success:
             return jsonify({"error": error or "Failed to create product"}), 400
         sync_manager.broadcast_product_update(account_id, product, action='created')
+        if cache.enabled:
+            cache.delete(f"cache:products:{account_id}")
         return jsonify(product), 201
 
     @app.put("/api/products/<int:product_id>")
@@ -512,6 +741,8 @@ def create_app() -> Flask:
         if not success:
             return jsonify({"error": error or "Failed to update product"}), 400
         sync_manager.broadcast_product_update(account_id, product, action='updated')
+        if cache.enabled:
+            cache.delete(f"cache:products:{account_id}")
         return jsonify(product), 200
 
     @app.put("/api/products/<int:product_id>/stock")
@@ -526,7 +757,78 @@ def create_app() -> Flask:
             return jsonify({"error": error or "Failed to update stock"}), 400
         product = datastore.get_by_id("products", product_id, account_id)
         sync_manager.broadcast_stock_update(account_id, product_id, product.get("quantity") if product else 0)
+        if cache.enabled:
+            cache.delete(f"cache:products:{account_id}")
         return jsonify(product), 200
+
+    @app.get("/api/products/low-stock-warnings")
+    @auth_controller.require_auth
+    def get_low_stock_warnings():
+        account_id = request.user.get("account_id")
+        products = datastore.get_all("products", account_id)
+        warnings = []
+        for product in products:
+            threshold = _safe_float(product.get("reorder_level") or 0)
+            if threshold > 0 and _safe_float(product.get("quantity")) <= threshold:
+                warnings.append(product)
+        return jsonify(warnings), 200
+
+    # ============================================================
+    # Batches (Stock Additions)
+    # ============================================================
+
+    @app.get("/api/batches")
+    @auth_controller.require_auth
+    def get_batches():
+        account_id = request.user.get("account_id")
+        product_id = request.args.get("productId")
+        batches = datastore.get_all("batches", account_id)
+        if product_id is not None:
+            try:
+                product_id_int = int(product_id)
+            except ValueError:
+                return jsonify({"error": "Invalid productId"}), 400
+            batches = [b for b in batches if int(b.get("productId")) == product_id_int]
+        return jsonify(batches), 200
+
+    @app.post("/api/batches")
+    @auth_controller.require_auth
+    def create_batch():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        product_id = data.get("productId")
+        quantity = _safe_float(data.get("quantity"))
+        if not product_id or quantity <= 0:
+            return jsonify({"error": "productId and positive quantity are required"}), 400
+
+        product = datastore.get_by_id("products", int(product_id), account_id)
+        if not product:
+            return jsonify({"error": "Product not found"}), 404
+
+        batch = {
+            "account_id": account_id,
+            "productId": int(product_id),
+            "quantity": quantity,
+            "expiryDate": data.get("expiryDate"),
+            "batchNumber": data.get("batchNumber") or f"BATCH-{uuid.uuid4().hex[:8]}",
+            "cost": _safe_float(data.get("cost")),
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+        created_batch = datastore.create("batches", batch)
+
+        new_quantity = _safe_float(product.get("quantity")) + quantity
+        datastore.update("products", int(product_id), {
+            "quantity": new_quantity,
+            "updated_at": datetime.utcnow().isoformat()
+        }, account_id)
+
+        updated_product = datastore.get_by_id("products", int(product_id), account_id)
+        sync_manager.broadcast_stock_update(account_id, int(product_id), updated_product.get("quantity") if updated_product else new_quantity)
+        if updated_product:
+            sync_manager.broadcast_product_update(account_id, updated_product, action='updated')
+
+        return jsonify(created_batch), 201
 
     # ============================================================
     # Sales
@@ -546,22 +848,133 @@ def create_app() -> Flask:
     @auth_controller.require_auth
     def get_stats():
         account_id = request.user.get("account_id")
+        cashier_id = request.args.get("cashierId")
+        cache_key = f"cache:stats:{account_id}:{cashier_id or 'all'}"
+        cached = cache.get_json(cache_key) if cache.enabled else None
+        if cached is not None:
+            return jsonify(cached), 200
+
         products = datastore.get_all("products", account_id)
         sales = datastore.get_all("sales", account_id)
         expenses = datastore.get_all("expenses", account_id)
 
-        total_sales = sum(_safe_float(s.get("total")) for s in sales)
-        total_cost = sum(_safe_float(s.get("total_cost")) for s in sales)
-        total_expenses = sum(_safe_float(e.get("amount")) for e in expenses)
-        profit = total_sales - total_cost - total_expenses
+        if cashier_id:
+            try:
+                cashier_id_int = int(cashier_id)
+                sales = [s for s in sales if s.get("cashier_id") == cashier_id_int or s.get("cashierId") == cashier_id_int]
+                expenses = [e for e in expenses if e.get("cashier_id") == cashier_id_int or e.get("cashierId") == cashier_id_int]
+            except (TypeError, ValueError):
+                pass
 
-        return jsonify({
+        cashier_id_param = request.args.get("cashierId") or request.args.get("cashier_id")
+        cashier_id = None
+        if cashier_id_param:
+            try:
+                cashier_id = int(cashier_id_param)
+            except (TypeError, ValueError):
+                cashier_id = None
+
+        # If cashier is requesting stats, default to their own ID
+        if request.user.get("role") == "cashier" and cashier_id is None:
+            cashier_id = request.user.get("id")
+
+        if cashier_id is not None:
+            sales = [s for s in sales if int(s.get("cashier_id") or s.get("cashierId") or 0) == cashier_id]
+            expenses = [e for e in expenses if int(e.get("cashier_id") or e.get("cashierId") or 0) == cashier_id]
+
+        total_sales = sum(_safe_float(s.get("total")) for s in sales)
+        total_expenses = sum(_safe_float(e.get("amount")) for e in expenses)
+
+        # Cashier monitor uses sales - expenses, admin uses full cost model
+        if cashier_id is not None:
+            profit = total_sales - total_expenses
+        else:
+            total_cost = sum(_safe_float(s.get("total_cost")) for s in sales)
+            profit = total_sales - total_cost - total_expenses
+
+        response = {
             "totalSales": total_sales,
             "totalExpenses": total_expenses,
             "profit": profit,
             "productsCount": len(products),
             "salesCount": len(sales)
-        }), 200
+        }
+
+        if cache.enabled:
+            cache.set_json(cache_key, response, ttl_seconds=10)
+
+        return jsonify(response), 200
+
+    # ============================================================
+    # Expenses
+    # ============================================================
+
+    @app.get("/api/expenses")
+    @auth_controller.require_auth
+    def get_expenses():
+        account_id = request.user.get("account_id")
+        expenses = datastore.get_all("expenses", account_id)
+        expenses = _apply_sort(expenses, request.args.get("sort") or "-created_at")
+        expenses = _apply_limit(expenses, request.args.get("limit"))
+        return jsonify(expenses), 200
+
+    @app.post("/api/expenses")
+    @auth_controller.require_auth
+    def create_expense():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        cashier_id = request.user.get("id")
+        cashier_name = request.user.get("email")
+
+        amount = _safe_float(data.get("amount"))
+        if amount <= 0:
+            return jsonify({"error": "Amount must be positive"}), 400
+
+        expense = {
+            "account_id": account_id,
+            "name": data.get("name") or data.get("description") or "Expense",
+            "description": data.get("description") or data.get("name") or "",
+            "amount": amount,
+            "category": data.get("category") or "general",
+            "cashier_id": cashier_id,
+            "cashier_name": cashier_name,
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+        created = datastore.create("expenses", expense)
+        sync_manager.broadcast_expense_created(account_id, created)
+        if cache.enabled:
+            cache.delete(f"cache:stats:{account_id}:all")
+            cache.delete(f"cache:stats:{account_id}:{cashier_id}")
+        return jsonify(created), 201
+
+    @app.put("/api/expenses/<int:expense_id>")
+    @auth_controller.require_auth
+    def update_expense(expense_id: int):
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+        data["updated_at"] = datetime.utcnow().isoformat()
+        if "amount" in data:
+            data["amount"] = _safe_float(data.get("amount"))
+
+        ok = datastore.update("expenses", expense_id, data, account_id)
+        if not ok:
+            return jsonify({"error": "Expense not found"}), 404
+        updated = datastore.get_by_id("expenses", expense_id, account_id)
+        if cache.enabled:
+            cache.delete(f"cache:stats:{account_id}:all")
+        return jsonify(updated), 200
+
+    @app.delete("/api/expenses/<int:expense_id>")
+    @auth_controller.require_auth
+    def delete_expense(expense_id: int):
+        account_id = request.user.get("account_id")
+        ok = datastore.delete("expenses", expense_id, account_id)
+        if not ok:
+            return jsonify({"error": "Expense not found"}), 404
+        if cache.enabled:
+            cache.delete(f"cache:stats:{account_id}:all")
+        return jsonify({"success": True}), 200
 
     @app.post("/api/sales")
     @auth_controller.require_auth
@@ -587,6 +1000,11 @@ def create_app() -> Flask:
             return jsonify({"error": error or "Failed to complete sale"}), 400
         sync_manager.broadcast_sale_completed(account_id, sale)
 
+        if cache.enabled:
+            cache.delete(f"cache:stats:{account_id}:all")
+            cache.delete(f"cache:stats:{account_id}:{cashier_id}")
+            cache.delete(f"cache:products:{account_id}")
+
         for item in data.get("items", []):
             product_id = item.get("product_id") or item.get("productId")
             if not product_id:
@@ -595,6 +1013,370 @@ def create_app() -> Flask:
             if product:
                 sync_manager.broadcast_stock_update(account_id, product_id, product.get("quantity"))
         return jsonify({"sale": sale}), 201
+
+    # ============================================================
+    # Sales (V2 Atomic)
+    # ============================================================
+
+    @app.post("/api/v2/sales/complete")
+    @auth_controller.require_auth
+    def complete_sale_v2():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        cashier_id = request.user.get("id")
+        cashier_name = request.user.get("email")
+
+        raw_items = data.get("items", [])
+        items = []
+        for item in raw_items:
+            normalized = dict(item)
+            if "productId" in normalized and "product_id" not in normalized:
+                normalized["product_id"] = normalized.get("productId")
+            items.append(normalized)
+
+        is_valid, error, deduction_plan = stock_engine.validate_and_prepare_sale(items, account_id)
+        if not is_valid:
+            return jsonify({"success": False, "error": error or "Invalid sale"}), 400
+
+        # Derive tax rate from provided tax amount if possible
+        product_map = deduction_plan.get("product_map", {})
+        subtotal = 0.0
+        for item in items:
+            product_id = item.get("product_id") or item.get("id") or item.get("productId")
+            quantity = _safe_float(item.get("quantity"))
+            product = product_map.get(product_id)
+            if product:
+                subtotal += _safe_float(product.get("price")) * quantity
+
+        tax_amount = _safe_float(data.get("tax") or data.get("taxAmount"))
+        tax_rate = (tax_amount / subtotal) * 100 if subtotal > 0 and tax_amount > 0 else 0.0
+
+        success, error, sale = stock_engine.execute_sale(
+            items=items,
+            account_id=account_id,
+            cashier_id=cashier_id,
+            cashier_name=cashier_name,
+            payment_method=data.get("paymentMethod") or data.get("payment_method") or "cash",
+            amount_paid=_safe_float(data.get("amountPaid") or data.get("amount_paid")),
+            tax_rate=tax_rate,
+            discount_amount=_safe_float(data.get("discount")),
+            service_fee=_safe_float(data.get("serviceFee"))
+        )
+
+        if not success:
+            return jsonify({"success": False, "error": error or "Failed to complete sale"}), 400
+
+        product_map = deduction_plan.get("product_map", {})
+        raw_material_map = deduction_plan.get("raw_material_map", {})
+        product_deductions = []
+        for product_id, qty in deduction_plan.get("deductions", {}).items():
+            product = product_map.get(product_id)
+            if not product:
+                continue
+            before = _safe_float(product.get("quantity"))
+            after = round(before - _safe_float(qty), 4)
+            product_deductions.append({
+                "id": product_id,
+                "name": product.get("name"),
+                "before": before,
+                "after": after,
+                "deducted": qty,
+                "unit": product.get("unit", "pcs")
+            })
+
+        raw_material_deductions = []
+        for material_id, qty in deduction_plan.get("raw_material_deductions", {}).items():
+            material = raw_material_map.get(material_id)
+            if not material:
+                continue
+            before = _safe_float(material.get("quantity"))
+            after = round(before - _safe_float(qty), 4)
+            raw_material_deductions.append({
+                "id": material_id,
+                "name": material.get("name"),
+                "before": before,
+                "after": after,
+                "deducted": qty,
+                "unit": material.get("unit", "unit")
+            })
+
+        updated_products = datastore.get_all("products", account_id)
+        low_stock = [
+            {
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "quantity": p.get("quantity"),
+                "unit": p.get("unit", "pcs")
+            }
+            for p in updated_products
+            if _safe_float(p.get("quantity")) <= _safe_float(p.get("reorder_level")) and _safe_float(p.get("reorder_level")) > 0
+        ]
+
+        sync_manager.broadcast_sale_completed(account_id, sale)
+        for deduction in product_deductions:
+            sync_manager.broadcast_stock_update(account_id, deduction.get("id"), deduction.get("after"))
+
+        return jsonify({
+            "success": True,
+            "saleId": sale.get("id"),
+            "sale": sale,
+            "updatedProducts": updated_products,
+            "stockDeductions": {
+                "products": product_deductions,
+                "raw_materials": raw_material_deductions
+            },
+            "lowStockWarnings": low_stock,
+            "timestamp": datetime.utcnow().isoformat(),
+            "processingTime": "ok"
+        }), 201
+
+    # ============================================================
+    # Petroleum Module
+    # ============================================================
+
+    def _require_petroleum_subscription():
+        account = g.account
+        plan = (account or {}).get("plan")
+        if plan != "PRO_PETROLEUM":
+            return jsonify({"error": "Petroleum module requires PRO_PETROLEUM subscription"}), 403
+        return None
+
+    @app.get("/api/petroleum/tanks")
+    @auth_controller.require_auth
+    def get_petroleum_tanks():
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        tanks = datastore.get_all("petroleum_tanks", account_id)
+        return jsonify(tanks), 200
+
+    @app.post("/api/petroleum/tanks")
+    @auth_controller.require_auth
+    def create_petroleum_tank():
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+
+        fuel_type = (data.get("fuel_type") or data.get("fuelType") or "").strip()
+        capacity = _safe_float(data.get("capacity"))
+        current_volume = _safe_float(data.get("current_volume") or data.get("currentVolume"))
+        price_per_liter = _safe_float(data.get("price_per_liter") or data.get("pricePerLiter"))
+
+        if not fuel_type or capacity <= 0 or price_per_liter <= 0:
+            return jsonify({"error": "fuel_type, capacity, price_per_liter are required"}), 400
+
+        tank = {
+            "account_id": account_id,
+            "fuel_type": fuel_type,
+            "capacity": capacity,
+            "current_volume": current_volume,
+            "price_per_liter": price_per_liter,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+        created = datastore.create("petroleum_tanks", tank)
+        return jsonify(created), 201
+
+    @app.put("/api/petroleum/tanks/<int:tank_id>")
+    @auth_controller.require_auth
+    def update_petroleum_tank(tank_id: int):
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+        if "capacity" in data:
+            data["capacity"] = _safe_float(data.get("capacity"))
+        if "current_volume" in data or "currentVolume" in data:
+            data["current_volume"] = _safe_float(data.get("current_volume") or data.get("currentVolume"))
+        if "price_per_liter" in data or "pricePerLiter" in data:
+            data["price_per_liter"] = _safe_float(data.get("price_per_liter") or data.get("pricePerLiter"))
+        if "fuelType" in data and "fuel_type" not in data:
+            data["fuel_type"] = data.get("fuelType")
+        data["updated_at"] = datetime.utcnow().isoformat()
+
+        ok = datastore.update("petroleum_tanks", tank_id, data, account_id)
+        if not ok:
+            return jsonify({"error": "Tank not found"}), 404
+        updated = datastore.get_by_id("petroleum_tanks", tank_id, account_id)
+        return jsonify(updated), 200
+
+    @app.delete("/api/petroleum/tanks/<int:tank_id>")
+    @auth_controller.require_auth
+    def delete_petroleum_tank(tank_id: int):
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        ok = datastore.delete("petroleum_tanks", tank_id, account_id)
+        if not ok:
+            return jsonify({"error": "Tank not found"}), 404
+        return jsonify({"success": True}), 200
+
+    @app.get("/api/petroleum/staff")
+    @auth_controller.require_auth
+    def get_petroleum_staff():
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        staff = datastore.get_all("petroleum_staff", account_id)
+        for s in staff:
+            s.pop("password_hash", None)
+        return jsonify(staff), 200
+
+    @app.post("/api/petroleum/staff")
+    @auth_controller.require_auth
+    def create_petroleum_staff():
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+
+        name = (data.get("name") or "").strip()
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
+        role = data.get("role") or "pump_attendant"
+
+        if not name or not email or not password:
+            return jsonify({"error": "name, email, password are required"}), 400
+
+        password_hash = auth_controller.hash_password(password)
+
+        staff = {
+            "account_id": account_id,
+            "name": name,
+            "email": email,
+            "password_hash": password_hash,
+            "role": role,
+            "is_active": True,
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+        created = datastore.create("petroleum_staff", staff)
+
+        # Create a corresponding user for login
+        user = {
+            "account_id": account_id,
+            "email": email,
+            "password_hash": password_hash,
+            "name": name,
+            "role": "cashier",
+            "pin": None,
+            "cashier_pin": None,
+            "is_active": True,
+            "is_locked": False,
+            "screen_locked": False,
+            "created_at": datetime.utcnow().isoformat(),
+            "created_by": request.user.get("id"),
+            "last_login": None,
+            "hourly_rate": 0.0,
+            "business_type": "petrol",
+            "business_role": role
+        }
+        datastore.create("users", user)
+
+        created.pop("password_hash", None)
+        return jsonify(created), 201
+
+    @app.put("/api/petroleum/staff/<int:staff_id>")
+    @auth_controller.require_auth
+    def update_petroleum_staff(staff_id: int):
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+
+        if "password" in data:
+            data["password_hash"] = auth_controller.hash_password(data.get("password"))
+            data.pop("password", None)
+
+        ok = datastore.update("petroleum_staff", staff_id, data, account_id)
+        if not ok:
+            return jsonify({"error": "Staff not found"}), 404
+        updated = datastore.get_by_id("petroleum_staff", staff_id, account_id)
+        if updated:
+            updated.pop("password_hash", None)
+        return jsonify(updated), 200
+
+    @app.delete("/api/petroleum/staff/<int:staff_id>")
+    @auth_controller.require_auth
+    def delete_petroleum_staff(staff_id: int):
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        ok = datastore.delete("petroleum_staff", staff_id, account_id)
+        if not ok:
+            return jsonify({"error": "Staff not found"}), 404
+        return jsonify({"success": True}), 200
+
+    @app.get("/api/petroleum/sales")
+    @auth_controller.require_auth
+    def get_petroleum_sales():
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        sales = datastore.get_all("petroleum_sales", account_id)
+        sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
+        sales = _apply_limit(sales, request.args.get("limit"))
+        return jsonify(sales), 200
+
+    @app.post("/api/petroleum/sales")
+    @auth_controller.require_auth
+    def create_petroleum_sale():
+        deny = _require_petroleum_subscription()
+        if deny:
+            return deny
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+
+        fuel_type = (data.get("fuel_type") or data.get("fuelType") or "").strip()
+        liters = _safe_float(data.get("liters"))
+        pump_number = data.get("pump_number") or data.get("pumpNumber")
+
+        if not fuel_type or liters <= 0:
+            return jsonify({"error": "fuel_type and liters are required"}), 400
+
+        # Find matching tank by fuel type
+        tanks = datastore.get_all("petroleum_tanks", account_id)
+        tank = next((t for t in tanks if (t.get("fuel_type") or "").lower() == fuel_type.lower()), None)
+        if not tank:
+            return jsonify({"error": "Tank not found for fuel type"}), 404
+
+        current_volume = _safe_float(tank.get("current_volume"))
+        if current_volume < liters:
+            return jsonify({"error": "Insufficient tank volume"}), 400
+
+        amount = round(liters * _safe_float(tank.get("price_per_liter")), 2)
+
+        # Deduct tank volume
+        new_volume = round(current_volume - liters, 4)
+        datastore.update("petroleum_tanks", tank.get("id"), {
+            "current_volume": new_volume,
+            "updated_at": datetime.utcnow().isoformat()
+        }, account_id)
+
+        sale = {
+            "account_id": account_id,
+            "staff_id": request.user.get("id"),
+            "staff_name": request.user.get("email"),
+            "fuel_type": fuel_type,
+            "liters": liters,
+            "amount": amount,
+            "pump_number": pump_number,
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+        created = datastore.create("petroleum_sales", sale)
+        return jsonify(created), 201
 
     # ============================================================
     # WebSocket

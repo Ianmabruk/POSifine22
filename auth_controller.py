@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import uuid
 import logging
+import secrets
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any, Callable
 from functools import wraps
@@ -23,9 +25,10 @@ logger = logging.getLogger(__name__)
 class AuthController:
     """Authentication and authorization controller."""
 
-    def __init__(self, datastore, secret_key: str):
+    def __init__(self, datastore, secret_key: str, session_store=None):
         self.datastore = datastore
         self.secret_key = secret_key
+        self.session_store = session_store
 
     # ============================================================
     # Password hashing
@@ -33,7 +36,7 @@ class AuthController:
 
     def hash_password(self, password: str) -> str:
         """Hash password using bcrypt."""
-        salt = bcrypt.gensalt()
+        salt = bcrypt.gensalt(rounds=12)
         hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
         return hashed.decode("utf-8")
 
@@ -55,9 +58,119 @@ class AuthController:
             "email": user["email"],
             "account_id": user["account_id"],
             "role": user.get("role", "cashier"),
-            "exp": datetime.utcnow() + timedelta(days=7)
+            "exp": datetime.utcnow() + timedelta(minutes=20)
         }
         return jwt.encode(payload, self.secret_key, algorithm="HS256")
+
+    def _hash_refresh_token(self, token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def create_refresh_session(self, user: Dict[str, Any], user_agent: str, ip_address: str) -> str:
+        if self.session_store and getattr(self.session_store, "enabled", False):
+            refresh_token = self.session_store.create(user, user_agent, ip_address)
+            token_hash = self._hash_refresh_token(refresh_token)
+            now = datetime.utcnow()
+            expires_at = now + timedelta(days=7)
+
+            session = {
+                "account_id": user.get("account_id"),
+                "user_id": user.get("id"),
+                "refresh_token_hash": token_hash,
+                "user_agent": user_agent,
+                "ip_address": ip_address,
+                "created_at": now.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "revoked_at": None
+            }
+            self.datastore.create("sessions", session)
+            return refresh_token
+
+        refresh_token = secrets.token_urlsafe(48)
+        token_hash = self._hash_refresh_token(refresh_token)
+        now = datetime.utcnow()
+        expires_at = now + timedelta(days=7)
+
+        session = {
+            "account_id": user.get("account_id"),
+            "user_id": user.get("id"),
+            "refresh_token_hash": token_hash,
+            "user_agent": user_agent,
+            "ip_address": ip_address,
+            "created_at": now.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "revoked_at": None
+        }
+        self.datastore.create("sessions", session)
+        return refresh_token
+
+    def rotate_refresh_session(self, refresh_token: str, user_agent: str, ip_address: str) -> Optional[Dict[str, Any]]:
+        if self.session_store and getattr(self.session_store, "enabled", False):
+            session = self.session_store.get(refresh_token)
+            if not session:
+                return None
+
+            self.session_store.revoke(refresh_token)
+            token_hash = self._hash_refresh_token(refresh_token)
+            sessions = self.datastore.get_by_field("sessions", "refresh_token_hash", token_hash)
+            if sessions:
+                self.datastore.update("sessions", sessions[0].get("id"), {"revoked_at": datetime.utcnow().isoformat()})
+
+            user = self.datastore.get_by_id("users", session.get("user_id"), session.get("account_id"))
+            if not user:
+                return None
+
+            new_refresh = self.create_refresh_session(user, user_agent, ip_address)
+            access_token = self.generate_token(user)
+            return {
+                "user": self._build_user_payload(user),
+                "token": access_token,
+                "refreshToken": new_refresh
+            }
+
+        token_hash = self._hash_refresh_token(refresh_token)
+        sessions = self.datastore.get_by_field("sessions", "refresh_token_hash", token_hash)
+        if not sessions:
+            return None
+
+        session = sessions[0]
+        if session.get("revoked_at"):
+            return None
+
+        expires_at = session.get("expires_at")
+        if expires_at and expires_at < datetime.utcnow().isoformat():
+            return None
+
+        # Revoke existing session
+        self.datastore.update("sessions", session.get("id"), {"revoked_at": datetime.utcnow().isoformat()})
+
+        user = self.datastore.get_by_id("users", session.get("user_id"), session.get("account_id"))
+        if not user:
+            return None
+
+        new_refresh = self.create_refresh_session(user, user_agent, ip_address)
+        access_token = self.generate_token(user)
+        return {
+            "user": self._build_user_payload(user),
+            "token": access_token,
+            "refreshToken": new_refresh
+        }
+
+    def revoke_refresh_session(self, refresh_token: str) -> bool:
+        if self.session_store and getattr(self.session_store, "enabled", False):
+            self.session_store.revoke(refresh_token)
+            token_hash = self._hash_refresh_token(refresh_token)
+            sessions = self.datastore.get_by_field("sessions", "refresh_token_hash", token_hash)
+            if not sessions:
+                return True
+            session = sessions[0]
+            return self.datastore.update("sessions", session.get("id"), {"revoked_at": datetime.utcnow().isoformat()})
+
+        token_hash = self._hash_refresh_token(refresh_token)
+        sessions = self.datastore.get_by_field("sessions", "refresh_token_hash", token_hash)
+        if not sessions:
+            return False
+        session = sessions[0]
+        return self.datastore.update("sessions", session.get("id"), {"revoked_at": datetime.utcnow().isoformat()})
 
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
         """Verify JWT token and return payload."""

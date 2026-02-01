@@ -1,0 +1,12 @@
+[Unit]
+Description=Universal POS Backup Job
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ian-mabruk/universal
+Environment="DATABASE_URL=postgresql://user:pass@localhost:5432/universal"
+Environment="BACKUP_DIR=/home/ian-mabruk/universal/backups"
+Environment="BACKUP_ENCRYPTION_KEY=replace_with_fernet_key"
+Environment="WEEKLY_SNAPSHOT_DAY=6"
+ExecStart=/usr/bin/python3 /home/ian-mabruk/universal/backup_database.py

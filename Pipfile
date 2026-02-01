@@ -7,6 +7,8 @@ name = "pypi"
 flask = "==2.3.3"
 flask-cors = "==4.0.0"
 pyjwt = "==2.8.0"
+redis = "==5.0.4"
+cryptography = "==42.0.8"
 
 [dev-packages]
 

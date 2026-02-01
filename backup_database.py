@@ -22,11 +22,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import argparse
 
+try:
+    from cryptography.fernet import Fernet
+except Exception:
+    Fernet = None
+
 
 # Configuration
 BACKUP_DIR = os.environ.get('BACKUP_DIR', os.path.join(os.path.dirname(__file__), 'backups'))
 RETENTION_DAYS = int(os.environ.get('BACKUP_RETENTION_DAYS', '30'))  # Keep backups for 30 days
 MAX_BACKUPS = int(os.environ.get('MAX_BACKUPS', '100'))  # Maximum number of backups to keep
+BACKUP_ENCRYPTION_KEY = os.environ.get('BACKUP_ENCRYPTION_KEY')
+WEEKLY_SNAPSHOT_DAY = int(os.environ.get('WEEKLY_SNAPSHOT_DAY', '6'))  # 0=Mon ... 6=Sun
 
 # PostgreSQL connection
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -84,6 +91,9 @@ def backup_postgresql():
         if os.path.exists(filepath):
             size_mb = os.path.getsize(filepath) / (1024 * 1024)
             print(f"✅ Backup completed: {filename} ({size_mb:.2f} MB)")
+
+            if BACKUP_ENCRYPTION_KEY and Fernet:
+                encrypt_file(filepath)
             
             # Save metadata
             metadata = {
@@ -129,6 +139,8 @@ def backup_json_files():
         if os.path.exists(filepath):
             size_mb = os.path.getsize(filepath) / (1024 * 1024)
             print(f"✅ JSON backup completed: {backup_name}.tar.gz ({size_mb:.2f} MB)")
+            if BACKUP_ENCRYPTION_KEY and Fernet:
+                encrypt_file(filepath)
             return True
         else:
             print("❌ JSON backup file not created")
@@ -193,6 +205,63 @@ def list_backups():
     return backups
 
 
+def encrypt_file(filepath: str):
+    try:
+        key = BACKUP_ENCRYPTION_KEY
+        if not key or not Fernet:
+            return
+        fernet = Fernet(key.encode('utf-8'))
+        with open(filepath, 'rb') as f:
+            data = f.read()
+        encrypted = fernet.encrypt(data)
+        encrypted_path = f"{filepath}.enc"
+        with open(encrypted_path, 'wb') as f:
+            f.write(encrypted)
+        os.remove(filepath)
+        print(f"🔐 Encrypted backup: {os.path.basename(encrypted_path)}")
+    except Exception as e:
+        print(f"⚠️  Encryption failed: {e}")
+
+
+def weekly_snapshot():
+    try:
+        today = datetime.now().weekday()
+        if today != WEEKLY_SNAPSHOT_DAY:
+            return
+        snapshot_dir = os.environ.get('WEEKLY_SNAPSHOT_DIR', os.path.join(BACKUP_DIR, 'weekly'))
+        Path(snapshot_dir).mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        snapshot_name = f"weekly_snapshot_{timestamp}.sql.gz"
+        snapshot_path = os.path.join(snapshot_dir, snapshot_name)
+
+        if DATABASE_URL:
+            pg_dump_cmd = f"pg_dump {DATABASE_URL}"
+            with open(snapshot_path, 'wb') as f:
+                pg_dump = subprocess.Popen(
+                    pg_dump_cmd,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+
+                gzip_proc = subprocess.Popen(
+                    ['gzip'],
+                    stdin=pg_dump.stdout,
+                    stdout=f,
+                    stderr=subprocess.PIPE
+                )
+
+                pg_dump.stdout.close()
+                gzip_proc.communicate()
+
+            if BACKUP_ENCRYPTION_KEY and Fernet:
+                encrypt_file(snapshot_path)
+
+            print(f"✅ Weekly snapshot created: {snapshot_name}")
+    except Exception as e:
+        print(f"⚠️  Weekly snapshot failed: {e}")
+
+
 def restore_backup(backup_file):
     """Restore database from backup"""
     filepath = os.path.join(BACKUP_DIR, backup_file) if not os.path.isabs(backup_file) else backup_file
@@ -200,6 +269,21 @@ def restore_backup(backup_file):
     if not os.path.exists(filepath):
         print(f"❌ Backup file not found: {filepath}")
         return False
+
+    if filepath.endswith('.enc') and BACKUP_ENCRYPTION_KEY and Fernet:
+        try:
+            fernet = Fernet(BACKUP_ENCRYPTION_KEY.encode('utf-8'))
+            with open(filepath, 'rb') as f:
+                encrypted = f.read()
+            decrypted = fernet.decrypt(encrypted)
+            decrypted_path = filepath.replace('.enc', '')
+            with open(decrypted_path, 'wb') as f:
+                f.write(decrypted)
+            filepath = decrypted_path
+            print("🔓 Backup decrypted for restore")
+        except Exception as e:
+            print(f"❌ Decryption failed: {e}")
+            return False
     
     if not DATABASE_URL:
         print("❌ ERROR: DATABASE_URL not set")
@@ -282,6 +366,7 @@ def main():
             success_pg = True
         
         success_json = backup_json_files()
+        weekly_snapshot()
         
         if not (success_pg or success_json):
             print("❌ All backups failed")

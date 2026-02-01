@@ -158,6 +158,60 @@ class DataStore:
                         UNIQUE(account_id, email)
                     )
                 """)
+
+                # Roles table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS roles (
+                        id SERIAL PRIMARY KEY,
+                        name TEXT UNIQUE NOT NULL,
+                        description TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+
+                # Sessions table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        refresh_token_hash TEXT NOT NULL,
+                        user_agent TEXT,
+                        ip_address TEXT,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        revoked_at TEXT
+                    )
+                """)
+
+                # Activity logs
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS activity_logs (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT,
+                        user_id INTEGER,
+                        action TEXT NOT NULL,
+                        resource TEXT,
+                        metadata JSONB DEFAULT '{}'::jsonb,
+                        ip_address TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+
+                # Audit logs
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT,
+                        actor_id INTEGER,
+                        actor_role TEXT,
+                        action TEXT NOT NULL,
+                        target TEXT,
+                        metadata JSONB DEFAULT '{}'::jsonb,
+                        ip_address TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                """)
                 
                 # Products table
                 cur.execute("""
@@ -185,6 +239,21 @@ class DataStore:
                         updated_at TEXT
                     )
                 """)
+
+                # Raw materials table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS raw_materials (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        quantity REAL DEFAULT 0.0,
+                        unit TEXT DEFAULT 'unit',
+                        cost_per_unit REAL DEFAULT 0.0,
+                        reorder_level REAL DEFAULT 0.0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT
+                    )
+                """)
                 
                 # Sales table
                 cur.execute("""
@@ -206,6 +275,50 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         receipt_number TEXT,
                         notes TEXT
+                    )
+                """)
+
+                # Petroleum tanks
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS petroleum_tanks (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        fuel_type TEXT NOT NULL,
+                        capacity REAL NOT NULL,
+                        current_volume REAL NOT NULL,
+                        price_per_liter REAL NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT
+                    )
+                """)
+
+                # Petroleum staff
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS petroleum_staff (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        email TEXT NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        role TEXT DEFAULT 'pump_attendant',
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(account_id, email)
+                    )
+                """)
+
+                # Petroleum sales
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS petroleum_sales (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        staff_id INTEGER,
+                        staff_name TEXT,
+                        fuel_type TEXT NOT NULL,
+                        liters REAL NOT NULL,
+                        amount REAL NOT NULL,
+                        pump_number TEXT,
+                        created_at TEXT NOT NULL
                     )
                 """)
                 
@@ -439,11 +552,22 @@ class DataStore:
                 # Create indexes for performance
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_logs(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_logs(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_products_account ON products(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_raw_materials_account ON raw_materials(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_account ON sales(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashier_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_account ON petroleum_tanks(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_fuel ON petroleum_tanks(fuel_type)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_account ON petroleum_sales(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_fuel ON petroleum_sales(fuel_type)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_created ON petroleum_sales(created_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_staff_account ON petroleum_staff(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_account ON time_entries(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_user ON time_entries(user_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_date ON time_entries(date)")
@@ -487,7 +611,12 @@ class DataStore:
         self.files = {
             'accounts': os.path.join(self.data_dir, 'accounts.json'),
             'users': os.path.join(self.data_dir, 'users.json'),
+            'roles': os.path.join(self.data_dir, 'roles.json'),
+            'sessions': os.path.join(self.data_dir, 'sessions.json'),
+            'activity_logs': os.path.join(self.data_dir, 'activity_logs.json'),
+            'audit_logs': os.path.join(self.data_dir, 'audit_logs.json'),
             'products': os.path.join(self.data_dir, 'products.json'),
+            'raw_materials': os.path.join(self.data_dir, 'raw_materials.json'),
             'sales': os.path.join(self.data_dir, 'sales.json'),
             'time_entries': os.path.join(self.data_dir, 'time_entries.json'),
             'reminders': os.path.join(self.data_dir, 'reminders.json'),
@@ -503,7 +632,10 @@ class DataStore:
             'appointments': os.path.join(self.data_dir, 'appointments.json'),
             'prescriptions': os.path.join(self.data_dir, 'prescriptions.json'),
             'table_orders': os.path.join(self.data_dir, 'table_orders.json'),
-            'room_bookings': os.path.join(self.data_dir, 'room_bookings.json')
+            'room_bookings': os.path.join(self.data_dir, 'room_bookings.json'),
+            'petroleum_tanks': os.path.join(self.data_dir, 'petroleum_tanks.json'),
+            'petroleum_sales': os.path.join(self.data_dir, 'petroleum_sales.json'),
+            'petroleum_staff': os.path.join(self.data_dir, 'petroleum_staff.json')
         }
         
         # Initialize empty files
@@ -831,6 +963,40 @@ class DataStore:
                     product['updated_at'] = datetime.now().isoformat()
             
             self._write_json(filepath, products)
+            return True
+
+    def batch_update_raw_materials(self, updates: List[Tuple[int, float, str]]) -> bool:
+        """
+        Batch update raw material stock
+
+        Args:
+            updates: List of (raw_material_id, new_quantity, account_id) tuples
+        """
+        if self.use_postgres:
+            with self.pg_pool.connection() as conn:
+                with conn.cursor() as cur:
+                    for material_id, quantity, account_id in updates:
+                        cur.execute("""
+                            UPDATE raw_materials SET quantity = %s, updated_at = %s
+                            WHERE id = %s AND account_id = %s
+                        """, (quantity, datetime.now().isoformat(), material_id, account_id))
+                    conn.commit()
+            return True
+        else:
+            filepath = self.files.get('raw_materials')
+            if not filepath:
+                return False
+
+            materials = self._read_json(filepath)
+            update_map = {(mid, aid): qty for mid, qty, aid in updates}
+
+            for material in materials:
+                key = (material.get('id'), material.get('account_id'))
+                if key in update_map:
+                    material['quantity'] = update_map[key]
+                    material['updated_at'] = datetime.now().isoformat()
+
+            self._write_json(filepath, materials)
             return True
     
     def get_active_time_entry(self, user_id: int, account_id: str) -> Optional[Dict]:

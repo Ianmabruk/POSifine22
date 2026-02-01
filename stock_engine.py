@@ -14,6 +14,7 @@ from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +78,14 @@ class StockEngine:
             # Load all products once
             products = self.ds.get_all('products', account_id)
             product_map = {p['id']: p for p in products}
+
+            # Load raw materials (if any)
+            raw_materials = self.ds.get_all('raw_materials', account_id)
+            raw_material_map = {m['id']: m for m in raw_materials}
             
             # Track required deductions
             deductions = {}  # {product_id: quantity}
+            raw_material_deductions = {}  # {raw_material_id: quantity}
             deduction_details = []  # Detailed info for response
             
             # Process each sale item
@@ -104,22 +110,41 @@ class StockEngine:
                     
                     for ingredient in recipe:
                         ing_id = ingredient.get('product_id') or ingredient.get('id')
+                        raw_id = ingredient.get('raw_material_id') or ingredient.get('rawMaterialId')
+                        is_raw = ingredient.get('type') in ['raw_material', 'raw-material'] or ingredient.get('source') == 'raw_material'
                         ing_qty = safe_float(ingredient.get('quantity', 0))
                         total_ing_qty = round_decimal(ing_qty * quantity)
-                        
-                        # Add to deductions
-                        deductions[ing_id] = deductions.get(ing_id, 0) + total_ing_qty
-                        
-                        # Track details
-                        ing_product = product_map.get(ing_id)
-                        if ing_product:
+
+                        if raw_id or is_raw:
+                            material_id = raw_id or ing_id
+                            raw_material = raw_material_map.get(material_id)
+                            if not raw_material:
+                                return False, f"Raw material ID {material_id} not found", None
+
+                            raw_material_deductions[material_id] = raw_material_deductions.get(material_id, 0) + total_ing_qty
                             deduction_details.append({
-                                'product_id': ing_id,
-                                'name': ing_product['name'],
+                                'raw_material_id': material_id,
+                                'name': raw_material['name'],
                                 'quantity': total_ing_qty,
-                                'unit': ing_product.get('unit', 'unit'),
-                                'parent_product': product['name']
+                                'unit': raw_material.get('unit', 'unit'),
+                                'parent_product': product['name'],
+                                'type': 'raw_material'
                             })
+                        else:
+                            # Add to product deductions
+                            deductions[ing_id] = deductions.get(ing_id, 0) + total_ing_qty
+
+                            # Track details
+                            ing_product = product_map.get(ing_id)
+                            if ing_product:
+                                deduction_details.append({
+                                    'product_id': ing_id,
+                                    'name': ing_product['name'],
+                                    'quantity': total_ing_qty,
+                                    'unit': ing_product.get('unit', 'unit'),
+                                    'parent_product': product['name'],
+                                    'type': 'product'
+                                })
                 else:
                     # Regular product - deduct directly
                     deductions[product_id] = deductions.get(product_id, 0) + quantity
@@ -127,7 +152,8 @@ class StockEngine:
                         'product_id': product_id,
                         'name': product['name'],
                         'quantity': quantity,
-                        'unit': product.get('unit', 'pcs')
+                        'unit': product.get('unit', 'pcs'),
+                        'type': 'product'
                     })
             
             # Validate sufficient stock for all deductions
@@ -140,12 +166,25 @@ class StockEngine:
                 
                 if current_qty < required_qty:
                     return False, f"Insufficient stock for '{product['name']}'. Required: {required_qty}, Available: {current_qty}", None
+
+            # Validate sufficient stock for all raw material deductions
+            for material_id, required_qty in raw_material_deductions.items():
+                material = raw_material_map.get(material_id)
+                if not material:
+                    return False, f"Raw material ID {material_id} not found", None
+
+                current_qty = safe_float(material.get('quantity', 0))
+
+                if current_qty < required_qty:
+                    return False, f"Insufficient raw material for '{material['name']}'. Required: {required_qty}, Available: {current_qty}", None
             
             # Prepare deduction plan
             deduction_plan = {
                 'deductions': deductions,  # {product_id: quantity}
+                'raw_material_deductions': raw_material_deductions,  # {raw_material_id: quantity}
                 'details': deduction_details,  # Detailed info
-                'product_map': product_map  # For quick access
+                'product_map': product_map,  # For quick access
+                'raw_material_map': raw_material_map
             }
             
             return True, None, deduction_plan
@@ -200,6 +239,7 @@ class StockEngine:
             
             # Step 2: Calculate sale totals
             product_map = deduction_plan['product_map']
+            raw_material_map = deduction_plan.get('raw_material_map', {})
             sale_items = []
             subtotal = 0.0
             total_cost = 0.0
@@ -223,11 +263,20 @@ class StockEngine:
                     item_cost = 0.0
                     for ingredient in recipe:
                         ing_id = ingredient.get('product_id') or ingredient.get('id')
+                        raw_id = ingredient.get('raw_material_id') or ingredient.get('rawMaterialId')
+                        is_raw = ingredient.get('type') in ['raw_material', 'raw-material'] or ingredient.get('source') == 'raw_material'
                         ing_qty = safe_float(ingredient.get('quantity', 0))
-                        ing_product = product_map.get(ing_id)
-                        if ing_product:
-                            ing_cost = safe_float(ing_product.get('cost', 0))
-                            item_cost += ing_cost * ing_qty * quantity
+                        if raw_id or is_raw:
+                            material_id = raw_id or ing_id
+                            raw_material = raw_material_map.get(material_id)
+                            if raw_material:
+                                ing_cost = safe_float(raw_material.get('cost_per_unit') or raw_material.get('cost', 0))
+                                item_cost += ing_cost * ing_qty * quantity
+                        else:
+                            ing_product = product_map.get(ing_id)
+                            if ing_product:
+                                ing_cost = safe_float(ing_product.get('cost', 0))
+                                item_cost += ing_cost * ing_qty * quantity
                 else:
                     item_cost = safe_float(product.get('cost', 0)) * quantity
                 
@@ -255,6 +304,11 @@ class StockEngine:
                 (product_id, round_decimal(product_map[product_id]['quantity'] - qty), account_id)
                 for product_id, qty in deduction_plan['deductions'].items()
             ]
+            raw_material_updates = [
+                (material_id, round_decimal(raw_material_map[material_id]['quantity'] - qty), account_id)
+                for material_id, qty in deduction_plan.get('raw_material_deductions', {}).items()
+                if material_id in raw_material_map
+            ]
             
             logger.info(f"📦 Deducting stock for {len(stock_updates)} products")
             for product_id, new_qty, _ in stock_updates:
@@ -264,28 +318,124 @@ class StockEngine:
                     deducted = old_qty - new_qty
                     logger.info(f"  - {product['name']}: {old_qty} → {new_qty} (-{deducted})")
             
-            self.ds.batch_update_stock(stock_updates)
-            logger.info(f"✅ Stock deduction completed successfully")
-            
-            # Step 4: Create sale record
-            sale_data = {
-                'account_id': account_id,
-                'items': sale_items,
-                'total': total,
-                'total_cost': total_cost,
-                'gross_profit': gross_profit,
-                'payment_method': payment_method,
-                'amount_paid': amount_paid,
-                'change': change,
-                'tax_amount': tax_amount,
-                'discount_amount': discount_amount,
-                'service_fee': service_fee,
-                'cashier_id': cashier_id,
-                'cashier_name': cashier_name,
-                'created_at': datetime.now().isoformat(),
-                'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            }
-            sale = self.ds.create('sales', sale_data)
+            if self.ds.use_postgres and self.ds.pg_pool:
+                with self.ds.pg_pool.connection() as conn:
+                    try:
+                        with conn.cursor() as cur:
+                            conn.execute("BEGIN")
+                            timestamp = datetime.now().isoformat()
+
+                            # Update product stock (delta)
+                            for product_id, qty in deduction_plan['deductions'].items():
+                                cur.execute(
+                                    """
+                                    UPDATE products SET quantity = quantity - %s, updated_at = %s
+                                    WHERE id = %s AND account_id = %s
+                                    """,
+                                    (round_decimal(qty), timestamp, product_id, account_id)
+                                )
+
+                            # Update raw materials stock (delta)
+                            for material_id, qty in deduction_plan.get('raw_material_deductions', {}).items():
+                                cur.execute(
+                                    """
+                                    UPDATE raw_materials SET quantity = quantity - %s, updated_at = %s
+                                    WHERE id = %s AND account_id = %s
+                                    """,
+                                    (round_decimal(qty), timestamp, material_id, account_id)
+                                )
+
+                            # Create sale record
+                            sale_data = {
+                                'account_id': account_id,
+                                'items': sale_items,
+                                'total': total,
+                                'total_cost': total_cost,
+                                'gross_profit': gross_profit,
+                                'payment_method': payment_method,
+                                'amount_paid': amount_paid,
+                                'change': change,
+                                'tax_amount': tax_amount,
+                                'discount_amount': discount_amount,
+                                'service_fee': service_fee,
+                                'cashier_id': cashier_id,
+                                'cashier_name': cashier_name,
+                                'created_at': timestamp,
+                                'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                            }
+
+                            cur.execute(
+                                """
+                                INSERT INTO sales (
+                                    account_id, items, total, total_cost, gross_profit,
+                                    payment_method, amount_paid, change, tax_amount,
+                                    discount_amount, service_fee, cashier_id, cashier_name,
+                                    created_at, receipt_number
+                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                RETURNING id
+                                """,
+                                (
+                                    sale_data['account_id'],
+                                    json.dumps(sale_data['items']),
+                                    sale_data['total'],
+                                    sale_data['total_cost'],
+                                    sale_data['gross_profit'],
+                                    sale_data['payment_method'],
+                                    sale_data['amount_paid'],
+                                    sale_data['change'],
+                                    sale_data['tax_amount'],
+                                    sale_data['discount_amount'],
+                                    sale_data['service_fee'],
+                                    sale_data['cashier_id'],
+                                    sale_data['cashier_name'],
+                                    sale_data['created_at'],
+                                    sale_data['receipt_number']
+                                )
+                            )
+                            sale_id = cur.fetchone()[0]
+                            conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+
+                sale = {
+                    'id': sale_id,
+                    **sale_data
+                }
+            else:
+                self.ds.batch_update_stock(stock_updates)
+                if raw_material_updates:
+                    try:
+                        self.ds.batch_update_raw_materials(raw_material_updates)
+                    except Exception:
+                        # Fallback: update individually
+                        for material_id, new_qty, _ in raw_material_updates:
+                            self.ds.update('raw_materials', material_id, {
+                                'quantity': new_qty,
+                                'updated_at': datetime.now().isoformat()
+                            }, account_id)
+
+                logger.info(f"✅ Stock deduction completed successfully")
+                
+                # Step 4: Create sale record
+                sale_data = {
+                    'account_id': account_id,
+                    'items': sale_items,
+                    'total': total,
+                    'total_cost': total_cost,
+                    'gross_profit': gross_profit,
+                    'payment_method': payment_method,
+                    'amount_paid': amount_paid,
+                    'change': change,
+                    'tax_amount': tax_amount,
+                    'discount_amount': discount_amount,
+                    'service_fee': service_fee,
+                    'cashier_id': cashier_id,
+                    'cashier_name': cashier_name,
+                    'created_at': datetime.now().isoformat(),
+                    'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                }
+                sale = self.ds.create('sales', sale_data)
             
             # Step 5: Create expense records for ingredients
             self._create_auto_expenses(deduction_plan, account_id, sale['id'])
@@ -311,32 +461,56 @@ class StockEngine:
         """
         try:
             product_map = deduction_plan['product_map']
+            raw_material_map = deduction_plan.get('raw_material_map', {})
             
             for detail in deduction_plan['details']:
                 # Only create expenses for ingredients (not final products)
                 if 'parent_product' in detail:
-                    product_id = detail['product_id']
-                    product = product_map.get(product_id)
-                    
-                    if product:
-                        cost_per_unit = safe_float(product.get('cost_per_unit') or product.get('cost', 0))
-                        quantity = detail['quantity']
-                        total_cost = round_decimal(cost_per_unit * quantity)
+                    if detail.get('type') == 'raw_material':
+                        material_id = detail.get('raw_material_id')
+                        material = raw_material_map.get(material_id)
+                        if material:
+                            cost_per_unit = safe_float(material.get('cost_per_unit') or material.get('cost', 0))
+                            quantity = detail['quantity']
+                            total_cost = round_decimal(cost_per_unit * quantity)
+
+                            if total_cost > 0:
+                                expense_data = {
+                                    'account_id': account_id,
+                                    'name': f"Auto: {material['name']} for {detail['parent_product']}",
+                                    'amount': total_cost,
+                                    'quantity': quantity,
+                                    'unit': material.get('unit', 'unit'),
+                                    'category': 'ingredient',
+                                    'description': f"Auto-deducted from sale #{sale_id}",
+                                    'source': 'auto-deduction',
+                                    'linked_raw_material_id': material_id,
+                                    'created_at': datetime.now().isoformat()
+                                }
+                                self.ds.create('expenses', expense_data)
+                    else:
+                        product_id = detail['product_id']
+                        product = product_map.get(product_id)
                         
-                        if total_cost > 0:
-                            expense_data = {
-                                'account_id': account_id,
-                                'name': f"Auto: {product['name']} for {detail['parent_product']}",
-                                'amount': total_cost,
-                                'quantity': quantity,
-                                'unit': product.get('unit', 'unit'),
-                                'category': 'ingredient',
-                                'description': f"Auto-deducted from sale #{sale_id}",
-                                'source': 'auto-deduction',
-                                'linked_product_id': product_id,
-                                'created_at': datetime.now().isoformat()
-                            }
-                            self.ds.create('expenses', expense_data)
+                        if product:
+                            cost_per_unit = safe_float(product.get('cost_per_unit') or product.get('cost', 0))
+                            quantity = detail['quantity']
+                            total_cost = round_decimal(cost_per_unit * quantity)
+                            
+                            if total_cost > 0:
+                                expense_data = {
+                                    'account_id': account_id,
+                                    'name': f"Auto: {product['name']} for {detail['parent_product']}",
+                                    'amount': total_cost,
+                                    'quantity': quantity,
+                                    'unit': product.get('unit', 'unit'),
+                                    'category': 'ingredient',
+                                    'description': f"Auto-deducted from sale #{sale_id}",
+                                    'source': 'auto-deduction',
+                                    'linked_product_id': product_id,
+                                    'created_at': datetime.now().isoformat()
+                                }
+                                self.ds.create('expenses', expense_data)
         except Exception as e:
             logger.error(f"Error creating auto expenses: {e}")
     
