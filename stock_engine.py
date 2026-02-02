@@ -103,23 +103,36 @@ class StockEngine:
                 # Check if composite product (support both is_composite and isComposite)
                 is_composite = product.get('is_composite') or product.get('isComposite', False)
                 if is_composite:
-                    # Deduct ingredients from recipe
+                    # 🔥 CRITICAL FIX: Enhanced composite product handling
                     recipe = product.get('recipe', [])
                     if not recipe:
-                        return False, f"Composite product '{product['name']}' has no recipe", None
+                        return False, f"Composite product '{product['name']}' has no recipe defined", None
+                    
+                    logger.info(f"🍳 [StockEngine] Processing composite product: {product['name']} (qty: {quantity})")
+                    logger.info(f"   Recipe has {len(recipe)} ingredients")
                     
                     for ingredient in recipe:
-                        ing_id = ingredient.get('product_id') or ingredient.get('id')
-                        raw_id = ingredient.get('raw_material_id') or ingredient.get('rawMaterialId')
-                        is_raw = ingredient.get('type') in ['raw_material', 'raw-material'] or ingredient.get('source') == 'raw_material'
+                        # Support multiple ingredient formats
+                        ing_id = ingredient.get('product_id') or ingredient.get('id') or ingredient.get('productId')
+                        raw_id = ingredient.get('raw_material_id') or ingredient.get('rawMaterialId') or ingredient.get('materialId')
+                        is_raw = (
+                            ingredient.get('type') in ['raw_material', 'raw-material', 'material'] or 
+                            ingredient.get('source') == 'raw_material' or
+                            ingredient.get('category') == 'raw_material' or
+                            bool(raw_id)
+                        )
                         ing_qty = safe_float(ingredient.get('quantity', 0))
                         total_ing_qty = round_decimal(ing_qty * quantity)
+                        
+                        logger.info(f"   - Ingredient: {ingredient.get('name', 'Unknown')} (qty: {ing_qty} x {quantity} = {total_ing_qty})")
+                        logger.info(f"     Type: {'Raw Material' if is_raw else 'Product'}, ID: {raw_id or ing_id}")
 
-                        if raw_id or is_raw:
+                        if is_raw and (raw_id or ing_id):
+                            # Raw material ingredient
                             material_id = raw_id or ing_id
                             raw_material = raw_material_map.get(material_id)
                             if not raw_material:
-                                return False, f"Raw material ID {material_id} not found", None
+                                return False, f"Raw material ID {material_id} not found for ingredient in '{product['name']}'s recipe", None
 
                             raw_material_deductions[material_id] = raw_material_deductions.get(material_id, 0) + total_ing_qty
                             deduction_details.append({
@@ -130,8 +143,9 @@ class StockEngine:
                                 'parent_product': product['name'],
                                 'type': 'raw_material'
                             })
-                        else:
-                            # Add to product deductions
+                            logger.info(f"     ✅ Added to raw material deductions: {raw_material['name']} (-{total_ing_qty})")
+                        elif ing_id:
+                            # Product ingredient
                             deductions[ing_id] = deductions.get(ing_id, 0) + total_ing_qty
 
                             # Track details
@@ -145,6 +159,11 @@ class StockEngine:
                                     'parent_product': product['name'],
                                     'type': 'product'
                                 })
+                                logger.info(f"     ✅ Added to product deductions: {ing_product['name']} (-{total_ing_qty})")
+                            else:
+                                return False, f"Product ingredient ID {ing_id} not found for '{product['name']}'s recipe", None
+                        else:
+                            logger.warning(f"     ⚠️ Warning: Ingredient has no valid ID - skipping")
                 else:
                     # Regular product - deduct directly
                     deductions[product_id] = deductions.get(product_id, 0) + quantity

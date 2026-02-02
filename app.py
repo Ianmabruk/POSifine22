@@ -26,6 +26,10 @@ from cashier_controller import CashierController
 from sync_manager import sync_manager
 from services.cache_service import CacheService
 from services.session_store import SessionStore
+from time_tracking_controller import TimeTrackingController
+from reminders_controller import RemindersController
+from credit_requests_controller import CreditRequestsController
+from discounts_service_fees_controller import DiscountsController, ServiceFeesController
 
 # Optional optimization imports - graceful fallback if not available
 try:
@@ -72,6 +76,13 @@ def create_app() -> Flask:
     admin_controller = AdminController(datastore, stock_engine)
     cashier_controller = CashierController(datastore, stock_engine)
     cache = CacheService()
+    
+    # 🔥 NEW COMPREHENSIVE CONTROLLERS
+    time_tracking = TimeTrackingController(datastore)
+    reminders = RemindersController(datastore)
+    credit_requests = CreditRequestsController(datastore)
+    discounts = DiscountsController(datastore)
+    service_fees = ServiceFeesController(datastore)
     
     # Optional optimization services
     if OPTIMIZATIONS_AVAILABLE:
@@ -1422,8 +1433,334 @@ def create_app() -> Flask:
         return jsonify(created), 201
 
     # ============================================================
-    # WebSocket
+    # TIME TRACKING SYSTEM
     # ============================================================
+    
+    @app.post("/api/clock-in")
+    @auth_controller.require_auth
+    def clock_in():
+        account_id = request.user.get("account_id")
+        user_id = request.user.get("id")
+        user_name = request.user.get("name") or request.user.get("email")
+        
+        success, error, time_entry = time_tracking.clock_in(user_id, user_name, account_id)
+        
+        if success:
+            # Broadcast clock in event
+            sync_manager.broadcast_clock_in(account_id, user_id, user_name, time_entry)
+            return jsonify(time_entry), 201
+        else:
+            return jsonify({"error": error}), 400
+    
+    @app.post("/api/clock-out")
+    @auth_controller.require_auth
+    def clock_out():
+        account_id = request.user.get("account_id")
+        user_id = request.user.get("id")
+        user_name = request.user.get("name") or request.user.get("email")
+        
+        success, error, time_entry = time_tracking.clock_out(user_id, user_name, account_id)
+        
+        if success:
+            # Broadcast clock out event
+            sync_manager.broadcast_clock_out(account_id, user_id, user_name, time_entry)
+            return jsonify(time_entry), 200
+        else:
+            return jsonify({"error": error}), 400
+    
+    @app.get("/api/clock-status")
+    @auth_controller.require_auth
+    def get_clock_status():
+        account_id = request.user.get("account_id")
+        user_id = request.user.get("id")
+        
+        status = time_tracking.get_clock_status(user_id, account_id)
+        return jsonify(status), 200
+    
+    @app.get("/api/time-entries")
+    @auth_controller.require_auth
+    def get_time_entries():
+        account_id = request.user.get("account_id")
+        user_id = request.args.get("userId")
+        date = request.args.get("date")
+        
+        if user_id:
+            try:
+                user_id = int(user_id)
+            except ValueError:
+                return jsonify({"error": "Invalid userId"}), 400
+        
+        entries = time_tracking.get_time_entries(account_id, user_id, date)
+        return jsonify(entries), 200
+    
+    @app.get("/api/clock-entries")
+    @auth_controller.require_auth
+    def get_clock_entries():
+        # Alias for time-entries
+        return get_time_entries()
+    
+    # ============================================================
+    # REMINDERS SYSTEM
+    # ============================================================
+    
+    @app.get("/api/reminders")
+    @auth_controller.require_auth
+    def get_reminders():
+        account_id = request.user.get("account_id")
+        include_expired = request.args.get("includeExpired") == "true"
+        
+        all_reminders = reminders.get_all_reminders(account_id, include_expired)
+        return jsonify(all_reminders), 200
+    
+    @app.post("/api/reminders")
+    @auth_controller.require_auth
+    def create_reminder():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        created_by = request.user.get("id")
+        
+        # Only admins can create reminders
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can create reminders"}), 403
+        
+        success, error, reminder = reminders.create_reminder(
+            account_id=account_id,
+            created_by=created_by,
+            title=data.get("title"),
+            message=data.get("message"),
+            priority=data.get("priority", "normal"),
+            expires_at=data.get("expiresAt"),
+            target_users=data.get("targetUsers")
+        )
+        
+        if success:
+            # Broadcast new reminder
+            sync_manager.broadcast_reminder(account_id, reminder)
+            return jsonify(reminder), 201
+        else:
+            return jsonify({"error": error}), 400
+    
+    @app.get("/api/reminders/today")
+    @auth_controller.require_auth
+    def get_todays_reminders():
+        account_id = request.user.get("account_id")
+        user_id = request.user.get("id")
+        
+        unseen_reminders = reminders.get_unseen_reminders(account_id, user_id)
+        return jsonify(unseen_reminders), 200
+    
+    @app.put("/api/reminders/<int:reminder_id>")
+    @auth_controller.require_auth
+    def mark_reminder_seen(reminder_id: int):
+        account_id = request.user.get("account_id")
+        user_id = request.user.get("id")
+        
+        success = reminders.mark_reminder_seen(reminder_id, user_id, account_id)
+        
+        if success:
+            return jsonify({"success": True}), 200
+        else:
+            return jsonify({"error": "Failed to mark reminder as seen"}), 400
+    
+    @app.delete("/api/reminders/<int:reminder_id>")
+    @auth_controller.require_auth
+    def delete_reminder(reminder_id: int):
+        account_id = request.user.get("account_id")
+        
+        # Only admins can delete reminders
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can delete reminders"}), 403
+        
+        success = reminders.delete_reminder(reminder_id, account_id)
+        
+        if success:
+            return jsonify({"success": True}), 200
+        else:
+            return jsonify({"error": "Reminder not found"}), 404
+    
+    # ============================================================
+    # CREDIT REQUESTS SYSTEM
+    # ============================================================
+    
+    @app.get("/api/credit-requests")
+    @auth_controller.require_auth
+    def get_credit_requests():
+        account_id = request.user.get("account_id")
+        user_role = request.user.get("role")
+        user_id = request.user.get("id")
+        
+        if user_role in ["admin", "owner"]:
+            # Admins see all requests
+            requests = credit_requests.get_all_requests(account_id)
+        else:
+            # Cashiers see only their requests
+            requests = credit_requests.get_cashier_requests(account_id, user_id)
+        
+        return jsonify(requests), 200
+    
+    @app.post("/api/credit-requests")
+    @auth_controller.require_auth
+    def create_credit_request():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        cashier_id = request.user.get("id")
+        cashier_name = request.user.get("name") or request.user.get("email")
+        
+        success, error, credit_request = credit_requests.create_request(
+            account_id=account_id,
+            cashier_id=cashier_id,
+            cashier_name=cashier_name,
+            customer_name=data.get("customerName"),
+            amount=_safe_float(data.get("amount")),
+            reason=data.get("reason"),
+            notes=data.get("notes")
+        )
+        
+        if success:
+            # Broadcast credit request to admins
+            sync_manager.broadcast_credit_request(account_id, credit_request)
+            return jsonify(credit_request), 201
+        else:
+            return jsonify({"error": error}), 400
+    
+    @app.put("/api/credit-requests/<int:request_id>")
+    @auth_controller.require_auth
+    def update_credit_request(request_id: int):
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        admin_id = request.user.get("id")
+        
+        # Only admins can approve/reject
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can approve/reject credit requests"}), 403
+        
+        action = data.get("action")  # 'approve' or 'reject'
+        admin_notes = data.get("adminNotes")
+        
+        if action == "approve":
+            success, error, updated_request = credit_requests.approve_request(
+                request_id, account_id, admin_id, admin_notes
+            )
+        elif action == "reject":
+            success, error, updated_request = credit_requests.reject_request(
+                request_id, account_id, admin_id, admin_notes
+            )
+        else:
+            return jsonify({"error": "Action must be 'approve' or 'reject'"}), 400
+        
+        if success:
+            # Broadcast response to cashier
+            cashier_id = updated_request.get("cashier_id")
+            sync_manager.broadcast_credit_response(account_id, cashier_id, updated_request)
+            return jsonify(updated_request), 200
+        else:
+            return jsonify({"error": error}), 400
+    
+    @app.delete("/api/credit-requests/<int:request_id>")
+    @auth_controller.require_auth
+    def delete_credit_request(request_id: int):
+        account_id = request.user.get("account_id")
+        
+        # Only admins can delete
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can delete credit requests"}), 403
+        
+        success = credit_requests.delete_request(request_id, account_id)
+        
+        if success:
+            return jsonify({"success": True}), 200
+        else:
+            return jsonify({"error": "Credit request not found"}), 404
+    
+    # ============================================================
+    # DISCOUNTS SYSTEM
+    # ============================================================
+    
+    @app.get("/api/discounts")
+    @auth_controller.require_auth
+    def get_discounts():
+        account_id = request.user.get("account_id")
+        active_only = request.args.get("activeOnly") == "true"
+        
+        if active_only:
+            discount_list = discounts.get_active_discounts(account_id)
+        else:
+            discount_list = datastore.get_all("discounts", account_id)
+        
+        return jsonify(discount_list), 200
+    
+    @app.post("/api/discounts")
+    @auth_controller.require_auth
+    def create_discount():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        created_by = request.user.get("id")
+        
+        # Only admins can create discounts
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can create discounts"}), 403
+        
+        success, error, discount = discounts.create_discount(
+            account_id=account_id,
+            name=data.get("name"),
+            discount_type=data.get("type"),
+            value=_safe_float(data.get("value")),
+            valid_from=data.get("validFrom"),
+            valid_to=data.get("validTo"),
+            product_ids=data.get("productIds"),
+            min_purchase_amount=_safe_float(data.get("minPurchaseAmount")) if data.get("minPurchaseAmount") else None,
+            max_discount_amount=_safe_float(data.get("maxDiscountAmount")) if data.get("maxDiscountAmount") else None,
+            usage_limit=int(data.get("usageLimit")) if data.get("usageLimit") else None,
+            created_by=created_by
+        )
+        
+        if success:
+            return jsonify(discount), 201
+        else:
+            return jsonify({"error": error}), 400
+    
+    # ============================================================
+    # SERVICE FEES SYSTEM
+    # ============================================================
+    
+    @app.get("/api/service-fees")
+    @auth_controller.require_auth
+    def get_service_fees():
+        account_id = request.user.get("account_id")
+        active_only = request.args.get("activeOnly") == "true"
+        
+        if active_only:
+            fees = service_fees.get_active_service_fees(account_id)
+        else:
+            fees = service_fees.get_all_service_fees(account_id)
+        
+        return jsonify(fees), 200
+    
+    @app.post("/api/service-fees")
+    @auth_controller.require_auth
+    def create_service_fee():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        created_by = request.user.get("id")
+        
+        # Only admins can create service fees
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can create service fees"}), 403
+        
+        success, error, service_fee = service_fees.create_service_fee(
+            account_id=account_id,
+            name=data.get("name"),
+            amount=_safe_float(data.get("amount")),
+            fee_type=data.get("type", "fixed"),
+            description=data.get("description"),
+            is_active=data.get("isActive", True),
+            created_by=created_by
+        )
+        
+        if success:
+            return jsonify(service_fee), 201
+        else:
+            return jsonify({"error": error}), 400
 
     @sock.route("/api/ws/products")
     def ws_products(ws):
