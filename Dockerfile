@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 # Copy application files from root
 COPY *.py ./
 COPY gunicorn.conf.py ./
+COPY services/ ./services/
 
 # Create data directory
 RUN mkdir -p ./data
