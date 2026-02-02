@@ -71,7 +71,7 @@ class RemindersController:
                 'target_users': target_users or [],  # Empty list = all users
                 'seen_by': [],  # List of user IDs who have seen this reminder
                 'is_active': True
-            }\n            
+            }
             created_reminder = self.ds.create('reminders', reminder)
             
             logger.info(f"✅ Reminder created: '{title}' by user {created_by}")
@@ -222,5 +222,114 @@ class RemindersController:
                 else:
                     # All users in account
                     all_users = self.ds.get_all('users', account_id)
-                    total_targets = len([u for u in all_users if u.get('role') != 'admin'])\n                
-                reminder_with_stats = {\n                    **reminder,\n                    'is_expired': is_expired,\n                    'seen_count': len(seen_by),\n                    'total_targets': total_targets,\n                    'completion_rate': (len(seen_by) / max(total_targets, 1)) * 100\n                }\n                \n                result.append(reminder_with_stats)\n            \n            # Sort by creation date (newest first)\n            result.sort(key=lambda r: r.get('created_at', ''), reverse=True)\n            \n            return result\n            \n        except Exception as e:\n            logger.error(f\"❌ Failed to get all reminders: {e}\")\n            return []\n    \n    def update_reminder(self, reminder_id: int, account_id: str, updates: Dict) -> Tuple[bool, Optional[str]]:\n        \"\"\"\n        Update a reminder\n        \n        Args:\n            reminder_id: Reminder ID\n            account_id: Account ID\n            updates: Fields to update\n        \n        Returns:\n            (success, error_message)\n        \"\"\"\n        try:\n            # Add updated timestamp\n            updates['updated_at'] = datetime.now().isoformat()\n            \n            success = self.ds.update('reminders', reminder_id, updates, account_id)\n            \n            if success:\n                logger.info(f\"✅ Reminder {reminder_id} updated\")\n                return True, None\n            else:\n                return False, \"Reminder not found\"\n                \n        except Exception as e:\n            logger.error(f\"❌ Failed to update reminder {reminder_id}: {e}\")\n            return False, f\"Update failed: {str(e)}\"\n    \n    def delete_reminder(self, reminder_id: int, account_id: str) -> bool:\n        \"\"\"\n        Delete a reminder\n        \n        Args:\n            reminder_id: Reminder ID\n            account_id: Account ID\n        \n        Returns:\n            Success status\n        \"\"\"\n        try:\n            success = self.ds.delete('reminders', reminder_id, account_id)\n            \n            if success:\n                logger.info(f\"✅ Reminder {reminder_id} deleted\")\n            else:\n                logger.warning(f\"Reminder {reminder_id} not found for deletion\")\n            \n            return success\n            \n        except Exception as e:\n            logger.error(f\"❌ Failed to delete reminder {reminder_id}: {e}\")\n            return False\n    \n    def cleanup_expired_reminders(self, account_id: str) -> int:\n        \"\"\"\n        Clean up expired reminders (optional maintenance task)\n        \n        Args:\n            account_id: Account ID\n        \n        Returns:\n            Number of reminders cleaned up\n        \"\"\"\n        try:\n            reminders = self.ds.get_all('reminders', account_id)\n            now = datetime.now()\n            cleaned_count = 0\n            \n            for reminder in reminders:\n                expires_at = reminder.get('expires_at')\n                if expires_at:\n                    try:\n                        expiry_date = datetime.fromisoformat(expires_at)\n                        # Delete reminders expired more than 30 days ago\n                        if now > expiry_date + timedelta(days=30):\n                            if self.ds.delete('reminders', reminder['id'], account_id):\n                                cleaned_count += 1\n                    except ValueError:\n                        # Invalid date, delete it\n                        if self.ds.delete('reminders', reminder['id'], account_id):\n                            cleaned_count += 1\n            \n            if cleaned_count > 0:\n                logger.info(f\"🧹 Cleaned up {cleaned_count} expired reminders\")\n            \n            return cleaned_count\n            \n        except Exception as e:\n            logger.error(f\"❌ Failed to cleanup expired reminders: {e}\")\n            return 0
+                    total_targets = len([u for u in all_users if u.get('role') != 'admin'])
+
+                reminder_with_stats = {
+                    **reminder,
+                    'is_expired': is_expired,
+                    'seen_count': len(seen_by),
+                    'total_targets': total_targets,
+                    'completion_rate': (len(seen_by) / max(total_targets, 1)) * 100
+                }
+
+                result.append(reminder_with_stats)
+
+            # Sort by creation date (newest first)
+            result.sort(key=lambda r: r.get('created_at', ''), reverse=True)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get all reminders: {e}")
+            return []
+
+    def update_reminder(self, reminder_id: int, account_id: str, updates: Dict) -> Tuple[bool, Optional[str]]:
+        """
+        Update a reminder
+
+        Args:
+            reminder_id: Reminder ID
+            account_id: Account ID
+            updates: Fields to update
+
+        Returns:
+            (success, error_message)
+        """
+        try:
+            # Add updated timestamp
+            updates['updated_at'] = datetime.now().isoformat()
+
+            success = self.ds.update('reminders', reminder_id, updates, account_id)
+
+            if success:
+                logger.info(f"✅ Reminder {reminder_id} updated")
+                return True, None
+            else:
+                return False, "Reminder not found"
+
+        except Exception as e:
+            logger.error(f"❌ Failed to update reminder {reminder_id}: {e}")
+            return False, f"Update failed: {str(e)}"
+
+    def delete_reminder(self, reminder_id: int, account_id: str) -> bool:
+        """
+        Delete a reminder
+
+        Args:
+            reminder_id: Reminder ID
+            account_id: Account ID
+
+        Returns:
+            Success status
+        """
+        try:
+            success = self.ds.delete('reminders', reminder_id, account_id)
+
+            if success:
+                logger.info(f"✅ Reminder {reminder_id} deleted")
+            else:
+                logger.warning(f"Reminder {reminder_id} not found for deletion")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"❌ Failed to delete reminder {reminder_id}: {e}")
+            return False
+
+    def cleanup_expired_reminders(self, account_id: str) -> int:
+        """
+        Clean up expired reminders (optional maintenance task)
+
+        Args:
+            account_id: Account ID
+
+        Returns:
+            Number of reminders cleaned up
+        """
+        try:
+            reminders = self.ds.get_all('reminders', account_id)
+            now = datetime.now()
+            cleaned_count = 0
+
+            for reminder in reminders:
+                expires_at = reminder.get('expires_at')
+                if expires_at:
+                    try:
+                        expiry_date = datetime.fromisoformat(expires_at)
+                        # Delete reminders expired more than 30 days ago
+                        if now > expiry_date + timedelta(days=30):
+                            if self.ds.delete('reminders', reminder['id'], account_id):
+                                cleaned_count += 1
+                    except ValueError:
+                        # Invalid date, delete it
+                        if self.ds.delete('reminders', reminder['id'], account_id):
+                            cleaned_count += 1
+
+            if cleaned_count > 0:
+                logger.info(f"🧹 Cleaned up {cleaned_count} expired reminders")
+
+            return cleaned_count
+
+        except Exception as e:
+            logger.error(f"❌ Failed to cleanup expired reminders: {e}")
+            return 0
