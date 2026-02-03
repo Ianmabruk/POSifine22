@@ -209,7 +209,7 @@ def mark_as_read(message_id):
         return jsonify({'error': str(e)}), 500
 
 
-@message_bp.route('/available-roles', methods=['GET'])
+@message_bp.route('/available-roles', methods=['GET'], endpoint='available_roles')
 @require_auth
 def get_available_roles():
     """Get available business roles for current user's business type"""
