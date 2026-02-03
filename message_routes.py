@@ -240,7 +240,7 @@ def get_sent_messages():
     
     GET /api/messages/sent?limit=50
     """
-    from backend.database import DataStore
+    from database import DataStore
     ds = DataStore()
     
     try:
@@ -269,72 +269,3 @@ def get_sent_messages():
         return jsonify({'error': str(e)}), 500
 
 
-@message_bp.route('/available-roles', methods=['GET'])
-@require_auth
-def get_available_roles():
-    """
-    Get list of roles that current user can message
-    
-    GET /api/messages/available-roles
-    """
-    from backend.database import DataStore
-    ds = DataStore()
-    
-    try:
-        user = request.user
-        user_id = user.get('id')
-        
-        # Get user details
-        user_data = ds.get_by_id('users', user_id)
-        if not user_data:
-            return jsonify({'error': 'User not found'}), 404
-        
-        user_role = user_data.get('business_role') or user_data.get('role')
-        business_type = user_data.get('business_type')
-        
-        if not business_type:
-            return jsonify({'roles': []}), 200
-        
-        # Define role messaging permissions by business type
-        role_permissions = {
-            'clinic': {
-                'doctor': ['registrar', 'pharmacist', 'cashier'],
-                'registrar': ['doctor', 'pharmacist'],
-                'pharmacist': ['doctor', 'registrar'],
-                'cashier': ['doctor', 'pharmacist', 'registrar'],
-                'admin': ['doctor', 'registrar', 'pharmacist', 'cashier']
-            },
-            'bar': {
-                'bartender': ['cashier', 'store'],
-                'cashier': ['bartender', 'store'],
-                'store': ['bartender', 'cashier'],
-                'admin': ['bartender', 'cashier', 'store']
-            },
-            'hotel': {
-                'reception': ['housekeeping'],
-                'housekeeping': ['reception'],
-                'admin': ['reception', 'housekeeping']
-            },
-            'supermarket': {
-                'cashier': ['store'],
-                'store': ['cashier'],
-                'admin': ['cashier', 'store']
-            }
-        }
-        
-        available_roles = role_permissions.get(business_type, {}).get(user_role, [])
-        
-        return jsonify({
-            'roles': available_roles,
-            'currentRole': user_role,
-            'businessType': business_type
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-def register_message_routes(app):
-    """Register message routes with Flask app"""
-    app.register_blueprint(message_bp)
-    print("✅ Message routes registered at /api/messages")
