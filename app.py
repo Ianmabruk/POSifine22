@@ -30,6 +30,8 @@ from time_tracking_controller import TimeTrackingController
 from reminders_controller import RemindersController
 from credit_requests_controller import CreditRequestsController
 from discounts_service_fees_controller import DiscountsController, ServiceFeesController
+from business_routes import create_business_routes
+from message_routes import message_bp
 
 # Optional optimization imports - graceful fallback if not available
 try:
@@ -115,6 +117,11 @@ def create_app() -> Flask:
         if OPTIMIZATIONS_AVAILABLE:
             return cache_api_response(cache_manager, ttl)
         return lambda f: f
+
+    # Register business management routes
+    business_bp = create_business_routes(datastore, auth_controller)
+    app.register_blueprint(business_bp, url_prefix="/api/business")
+    app.register_blueprint(message_bp)
 
     # Simple in-memory rate limiting for auth endpoints
     login_attempts = {}
@@ -906,7 +913,10 @@ def create_app() -> Flask:
         cache_key = f"cache:stats:{account_id}:{cashier_id or 'all'}"
         cached = cache.get_json(cache_key) if cache.enabled else None
         if cached is not None:
-            return jsonify(cached), 200
+            response = jsonify(cached)
+            response.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
+            response.headers["X-Cache"] = "HIT"
+            return response, 200
 
         products = datastore.get_all("products", account_id)
         sales = datastore.get_all("sales", account_id)
@@ -957,7 +967,63 @@ def create_app() -> Flask:
         if cache.enabled:
             cache.set_json(cache_key, response, ttl_seconds=10)
 
-        return jsonify(response), 200
+        response_payload = jsonify(response)
+        response_payload.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
+        response_payload.headers["X-Cache"] = "MISS"
+        return response_payload, 200
+
+    @app.get("/api/v2/monitor/stats")
+    @auth_controller.require_auth
+    def get_monitor_stats_v2():
+        account_id = request.user.get("account_id")
+        today = datetime.utcnow().date()
+        cache_key = f"cache:monitor_stats:{account_id}:{today.isoformat()}"
+        cached = cache.get_json(cache_key) if cache.enabled else None
+        if cached is not None:
+            response = jsonify(cached)
+            response.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=30"
+            response.headers["X-Cache"] = "HIT"
+            return response, 200
+
+        sales = datastore.get_all("sales", account_id)
+        expenses = datastore.get_all("expenses", account_id)
+
+        def _is_today(item):
+            value = item.get("created_at") or item.get("createdAt")
+            if not value:
+                return False
+            try:
+                if isinstance(value, (int, float)):
+                    return datetime.utcfromtimestamp(value).date() == today
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                return parsed.date() == today
+            except Exception:
+                return False
+
+        today_sales = [s for s in sales if _is_today(s)]
+        today_expenses = [e for e in expenses if _is_today(e)]
+
+        total_sales = sum(_safe_float(s.get("total")) for s in today_sales)
+        total_expenses = sum(_safe_float(e.get("amount")) for e in today_expenses)
+        transaction_count = len(today_sales)
+        avg_transaction = (total_sales / transaction_count) if transaction_count else 0
+
+        response_data = {
+            "totalSales": total_sales,
+            "totalExpenses": total_expenses,
+            "netProfit": total_sales - total_expenses,
+            "transactionCount": transaction_count,
+            "avgTransaction": avg_transaction,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        if cache.enabled:
+            cache.set_json(cache_key, response_data, ttl_seconds=5)
+
+        response_payload = jsonify(response_data)
+        response_payload.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=30"
+        response_payload.headers["X-Cache"] = "MISS"
+        return response_payload, 200
 
     # ============================================================
     # Expenses

@@ -13,6 +13,12 @@ import os
 # Create Blueprint
 message_bp = Blueprint('messages', __name__, url_prefix='/api/messages')
 
+try:
+    from business_types import get_roles_for_business_type
+except Exception:
+    def get_roles_for_business_type(_business_type):
+        return []
+
 def require_auth(f):
     """Decorator to require authentication"""
     @wraps(f)
@@ -56,7 +62,7 @@ def send_message():
         "priority": "normal"
     }
     """
-    from backend.database import DataStore
+    from database import DataStore
     ds = DataStore()
     init_messages_table(ds)
     
@@ -119,7 +125,7 @@ def get_inbox():
     
     GET /api/messages/inbox?status=unread&limit=50
     """
-    from backend.database import DataStore
+    from database import DataStore
     ds = DataStore()
     init_messages_table(ds)
     
@@ -180,7 +186,7 @@ def mark_as_read(message_id):
     
     PUT /api/messages/{message_id}/read
     """
-    from backend.database import DataStore
+    from database import DataStore
     ds = DataStore()
     
     try:
@@ -199,6 +205,29 @@ def mark_as_read(message_id):
             'message': 'Message marked as read'
         }), 200
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@message_bp.route('/available-roles', methods=['GET'])
+@require_auth
+def get_available_roles():
+    """Get available business roles for current user's business type"""
+    from database import DataStore
+    ds = DataStore()
+    init_messages_table(ds)
+
+    try:
+        user = request.user
+        user_id = user.get('id')
+        user_data = ds.get_by_id('users', user_id)
+        if not user_data:
+            return jsonify({'roles': []}), 200
+
+        business_type = user_data.get('business_type')
+        roles = get_roles_for_business_type(business_type) if business_type else []
+
+        return jsonify({'roles': roles}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
