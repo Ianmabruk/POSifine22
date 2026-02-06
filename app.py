@@ -66,9 +66,19 @@ def create_app() -> Flask:
     # CORS
     cors_origins = os.environ.get("CORS_ORIGINS", "*")
     if cors_origins == "*":
-        CORS(app)
+        CORS(app, supports_credentials=True)
     else:
-        CORS(app, resources={r"/*": {"origins": [o.strip() for o in cors_origins.split(",") if o.strip()]}})
+        allowed_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+        # Always allow Netlify production frontend if not explicitly set
+        if "https://posifine11.netlify.app" not in allowed_origins:
+            allowed_origins.append("https://posifine11.netlify.app")
+        CORS(
+            app,
+            resources={r"/*": {"origins": allowed_origins}},
+            supports_credentials=True,
+            allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        )
 
     # Services
     use_postgres = bool(os.environ.get("DATABASE_URL"))

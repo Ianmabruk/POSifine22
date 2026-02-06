@@ -313,6 +313,9 @@ class AuthController:
         """Decorator to require valid JWT auth."""
         @wraps(f)
         def decorated(*args, **kwargs):
+            # Allow CORS preflight requests without auth
+            if request.method == "OPTIONS":
+                return ("", 200)
             token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
             if not token:
                 return jsonify({"error": "Authorization token required"}), 401
