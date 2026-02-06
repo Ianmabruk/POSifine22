@@ -32,6 +32,7 @@ from reminders_controller import RemindersController
 from credit_requests_controller import CreditRequestsController
 from discounts_service_fees_controller import DiscountsController, ServiceFeesController
 from business_routes import create_business_routes
+from ai_controller import create_ai_routes
 from message_routes import message_bp
 
 # Optional optimization imports - graceful fallback if not available
@@ -79,6 +80,12 @@ def create_app() -> Flask:
             allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
             methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
         )
+
+    # Global preflight handler (avoid non-OK preflight responses)
+    @app.before_request
+    def handle_options_preflight():
+        if request.method == "OPTIONS":
+            return ("", 200)
 
     # Services
     use_postgres = bool(os.environ.get("DATABASE_URL"))
@@ -133,6 +140,10 @@ def create_app() -> Flask:
     business_bp = create_business_routes(datastore, auth_controller)
     app.register_blueprint(business_bp, url_prefix="/api/business")
     app.register_blueprint(message_bp)
+
+    # Register AI routes
+    ai_bp = create_ai_routes(datastore, auth_controller.require_auth)
+    app.register_blueprint(ai_bp)
 
     # Simple in-memory rate limiting for auth endpoints
     login_attempts = {}
@@ -763,6 +774,46 @@ def create_app() -> Flask:
         if error_response:
             return error_response
         return jsonify({"success": True}), 200
+
+    # ============================================================
+    # Settings
+    # ============================================================
+
+    @app.get("/api/settings")
+    @auth_controller.require_auth
+    def get_settings():
+        account_id = request.user.get("account_id")
+        profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
+        if profiles:
+            return jsonify(profiles[0].get("settings") or {}), 200
+        return jsonify({}), 200
+
+    @app.put("/api/settings")
+    @auth_controller.require_auth
+    def update_settings():
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+        profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
+        now = datetime.utcnow().isoformat()
+
+        if profiles:
+            profile = profiles[0]
+            merged = {**(profile.get("settings") or {}), **data}
+            datastore.update("business_profiles", profile.get("id"), {
+                "settings": merged,
+                "updated_at": now
+            }, account_id)
+            return jsonify(merged), 200
+
+        profile = {
+            "account_id": account_id,
+            "business_type": (g.account or {}).get("business_type") or "general",
+            "plan": (g.account or {}).get("plan") or "basic",
+            "created_at": now,
+            "settings": data
+        }
+        created = datastore.create("business_profiles", profile)
+        return jsonify(created.get("settings") or {}), 200
 
     # ============================================================
     # Products
