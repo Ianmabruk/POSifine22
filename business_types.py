@@ -20,6 +20,8 @@ class BusinessType(Enum):
     PHARMACY = "pharmacy"
     PETROL_STATION = "petrol"
     SCHOOL = "school"
+    KIOSK = "kiosk"
+    SHOES = "shoes"
     GYM = "gym"
     SALON = "salon"
     RETAIL = "retail"
@@ -225,6 +227,63 @@ BUSINESS_TYPES_CONFIG: Dict[str, Dict[str, Any]] = {
             "Loyalty Programs"
         ],
         "dashboard_route": "/pro-dashboard/supermarket"
+    },
+
+    "kiosk": {
+        "id": "kiosk",
+        "name": "Kiosk/Mini Shop",
+        "description": "Small retail kiosk with fast sales and stock tracking",
+        "icon": "Store",
+        "roles": [
+            {
+                "id": "admin",
+                "name": "Kiosk Owner",
+                "permissions": ["manage_inventory", "view_reports", "manage_staff"]
+            },
+            {
+                "id": "cashier",
+                "name": "Cashier",
+                "permissions": ["process_sales", "process_payments", "view_stock"]
+            }
+        ],
+        "features": [
+            "Quick Sales",
+            "Stock Alerts",
+            "Daily Summary",
+            "Supplier Tracking"
+        ],
+        "dashboard_route": "/pro-dashboard/kiosk"
+    },
+
+    "shoes": {
+        "id": "shoes",
+        "name": "Shoe Store",
+        "description": "Shoe retail with size variants and inventory tracking",
+        "icon": "ShoppingCart",
+        "roles": [
+            {
+                "id": "admin",
+                "name": "Store Manager",
+                "permissions": ["manage_inventory", "view_reports", "manage_staff", "manage_suppliers"]
+            },
+            {
+                "id": "cashier",
+                "name": "Cashier",
+                "permissions": ["process_sales", "process_payments", "view_stock"]
+            },
+            {
+                "id": "stock_clerk",
+                "name": "Stock Clerk",
+                "permissions": ["update_inventory", "receive_stock", "stock_check"]
+            }
+        ],
+        "features": [
+            "Size Variants",
+            "Supplier Management",
+            "Stock Alerts",
+            "Sales Analytics"
+        ],
+        "dashboard_route": "/pro-dashboard/shoes"
     },
     
     "restaurant": {

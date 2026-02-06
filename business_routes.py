@@ -109,7 +109,10 @@ def create_business_routes(datastore, auth_controller):
             
             # Verify user is on Pro or Custom plan
             account = datastore.get_by_id('accounts', account_id)
-            if not account or account.get('plan') not in ['pro', 'custom']:
+            plan_value = account.get('plan') if account else ''
+            plan = str(plan_value).lower()
+            is_pro_plan = plan in ['pro', 'custom', 'pro_petroleum', 'pro-petroleum', 'propetroleum', '3000', '3400']
+            if not account or not is_pro_plan:
                 return jsonify({'error': 'Business type selection is only available for Pro and Custom plans'}), 403
             
             data = request.get_json()
@@ -223,7 +226,10 @@ def create_business_routes(datastore, auth_controller):
             
             # Get account and verify Pro/Custom plan
             account = datastore.get_by_id('accounts', account_id)
-            if not account or account.get('plan') not in ['pro', 'custom']:
+            plan_value = account.get('plan') if account else ''
+            plan = str(plan_value).lower()
+            is_pro_plan = plan in ['pro', 'custom', 'pro_petroleum', 'pro-petroleum', 'propetroleum', '3000', '3400']
+            if not account or not is_pro_plan:
                 return jsonify({'error': 'Business users are only available for Pro and Custom plans'}), 403
             
             # Get admin's business type

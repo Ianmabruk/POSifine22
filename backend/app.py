@@ -7,10 +7,10 @@ Unified entrypoint for API endpoints.
 from __future__ import annotations
 
 import os
+import secrets
 import logging
 import uuid
 import json
-import secrets
 from datetime import datetime
 import time
 from typing import Dict, Any
@@ -32,7 +32,6 @@ from reminders_controller import RemindersController
 from credit_requests_controller import CreditRequestsController
 from discounts_service_fees_controller import DiscountsController, ServiceFeesController
 from business_routes import create_business_routes
-from ai_controller import create_ai_routes
 from message_routes import message_bp
 
 # Optional optimization imports - graceful fallback if not available
@@ -67,31 +66,9 @@ def create_app() -> Flask:
     # CORS
     cors_origins = os.environ.get("CORS_ORIGINS", "*")
     if cors_origins == "*":
-        CORS(app, supports_credentials=True)
+        CORS(app)
     else:
-        allowed_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
-        # Always allow Netlify production frontend if not explicitly set
-        if "https://posifine11.netlify.app" not in allowed_origins:
-            allowed_origins.append("https://posifine11.netlify.app")
-        CORS(
-            app,
-            resources={r"/*": {"origins": allowed_origins}},
-            supports_credentials=True,
-            allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
-            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-        )
-
-    # Global preflight handler
-    @app.before_request
-    def _handle_preflight():
-        if request.method == "OPTIONS":
-            return ("", 200)
-
-    # Global preflight handler (avoid non-OK preflight responses)
-    @app.before_request
-    def handle_options_preflight():
-        if request.method == "OPTIONS":
-            return ("", 200)
+        CORS(app, resources={r"/*": {"origins": [o.strip() for o in cors_origins.split(",") if o.strip()]}})
 
     # Services
     use_postgres = bool(os.environ.get("DATABASE_URL"))
@@ -146,10 +123,6 @@ def create_app() -> Flask:
     business_bp = create_business_routes(datastore, auth_controller)
     app.register_blueprint(business_bp, url_prefix="/api/business")
     app.register_blueprint(message_bp)
-
-    # AI routes
-    ai_bp = create_ai_routes(datastore, auth_controller.require_auth)
-    app.register_blueprint(ai_bp)
 
     # Simple in-memory rate limiting for auth endpoints
     login_attempts = {}
@@ -772,46 +745,6 @@ def create_app() -> Flask:
         return jsonify({"success": True}), 200
 
     # ============================================================
-    # Settings
-    # ============================================================
-
-    @app.get("/api/settings")
-    @auth_controller.require_auth
-    def get_settings():
-        account_id = request.user.get("account_id")
-        profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
-        if profiles:
-            return jsonify(profiles[0].get("settings") or {}), 200
-        return jsonify({}), 200
-
-    @app.put("/api/settings")
-    @auth_controller.require_auth
-    def update_settings():
-        account_id = request.user.get("account_id")
-        data = request.get_json() or {}
-        profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
-        now = datetime.utcnow().isoformat()
-
-        if profiles:
-            profile = profiles[0]
-            merged = {**(profile.get("settings") or {}), **data}
-            datastore.update("business_profiles", profile.get("id"), {
-                "settings": merged,
-                "updated_at": now
-            }, account_id)
-            return jsonify(merged), 200
-
-        profile = {
-            "account_id": account_id,
-            "business_type": (g.account or {}).get("business_type") or "general",
-            "plan": (g.account or {}).get("plan") or "basic",
-            "created_at": now,
-            "settings": data
-        }
-        created = datastore.create("business_profiles", profile)
-        return jsonify(created.get("settings") or {}), 200
-
-    # ============================================================
     # Products
     # ============================================================
 
@@ -951,22 +884,9 @@ def create_app() -> Flask:
         products = datastore.get_all("products", account_id)
         warnings = []
         for product in products:
-            threshold = _safe_float(product.get("reorder_level") or product.get("reorderLevel") or 0)
-            quantity = _safe_float(product.get("quantity"))
-            if threshold > 0 and quantity <= threshold:
-                warnings.append({
-                    "id": product.get("id"),
-                    "productId": product.get("id"),
-                    "name": product.get("name"),
-                    "productName": product.get("name"),
-                    "quantity": quantity,
-                    "current": quantity,
-                    "currentStock": quantity,
-                    "unit": product.get("unit") or "pcs",
-                    "threshold": threshold,
-                    "category": product.get("category") or "general",
-                    "reorder_level": threshold,
-                })
+            threshold = _safe_float(product.get("reorder_level") or 0)
+            if threshold > 0 and _safe_float(product.get("quantity")) <= threshold:
+                warnings.append(product)
         return jsonify(warnings), 200
 
     # ============================================================
@@ -1083,19 +1003,17 @@ def create_app() -> Flask:
 
         total_sales = sum(_safe_float(s.get("total")) for s in sales)
         total_expenses = sum(_safe_float(e.get("amount")) for e in expenses)
-        total_cogs = sum(_safe_float(s.get("total_cost")) for s in sales)
 
         # Cashier monitor uses sales - expenses, admin uses full cost model
         if cashier_id is not None:
             profit = total_sales - total_expenses
         else:
-            profit = total_sales - total_cogs - total_expenses
+            total_cost = sum(_safe_float(s.get("total_cost")) for s in sales)
+            profit = total_sales - total_cost - total_expenses
 
         response = {
             "totalSales": total_sales,
             "totalExpenses": total_expenses,
-            "totalCOGS": total_cogs,
-            "grossProfit": total_sales - total_cogs,
             "profit": profit,
             "productsCount": len(products),
             "salesCount": len(sales)
@@ -1232,47 +1150,6 @@ def create_app() -> Flask:
         if cache.enabled:
             cache.delete(f"cache:stats:{account_id}:all")
         return jsonify({"success": True}), 200
-
-    # ============================================================
-    # School - Students
-    # ============================================================
-
-    @app.get("/api/students")
-    @auth_controller.require_auth
-    def get_students():
-        account_id = request.user.get("account_id")
-        students = datastore.get_all("students", account_id)
-        students = _apply_sort(students, request.args.get("sort") or "-created_at")
-        return jsonify(students), 200
-
-    @app.post("/api/students")
-    @auth_controller.require_auth
-    def create_student():
-        data = request.get_json() or {}
-        account_id = request.user.get("account_id")
-        created_by = request.user.get("id")
-
-        name = (data.get("name") or "").strip()
-        admission_no = (data.get("admissionNumber") or data.get("admission_number") or "").strip()
-        class_name = (data.get("className") or data.get("class_name") or "").strip()
-
-        if not name:
-            return jsonify({"error": "Student name is required"}), 400
-
-        student = {
-            "account_id": account_id,
-            "name": name,
-            "admission_number": admission_no,
-            "class_name": class_name,
-            "parent_name": data.get("parentName") or data.get("parent_name") or "",
-            "parent_phone": data.get("parentPhone") or data.get("parent_phone") or "",
-            "notes": data.get("notes") or "",
-            "created_by": created_by,
-            "created_at": datetime.utcnow().isoformat()
-        }
-
-        created_student = datastore.create("students", student)
-        return jsonify(created_student), 201
 
     @app.post("/api/sales")
     @auth_controller.require_auth
@@ -1413,11 +1290,6 @@ def create_app() -> Flask:
         sync_manager.broadcast_sale_completed(account_id, sale)
         for deduction in product_deductions:
             sync_manager.broadcast_stock_update(account_id, deduction.get("id"), deduction.get("after"))
-
-        if cache.enabled:
-            cache.delete(f"cache:products:{account_id}")
-            cache.delete(f"cache:stats:{account_id}:all")
-            cache.delete(f"cache:stats:{account_id}:{cashier_id}")
 
         return jsonify({
             "success": True,

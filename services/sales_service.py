@@ -245,9 +245,13 @@ class SalesService:
                 if not product:
                     continue
                 
-                # Calculate cost
-                cost_per_unit = safe_round(float(product.get('cost_per_unit', 
-                                                              product.get('costPerUnit', 0))))
+                # Calculate cost (fallback to cost if cost_per_unit missing)
+                cost_per_unit = safe_round(float(
+                    product.get('cost_per_unit')
+                    or product.get('costPerUnit')
+                    or product.get('cost')
+                    or 0
+                ))
                 total_cost = safe_round(qty_deducted * cost_per_unit)
                 
                 if total_cost > 0:
@@ -262,9 +266,11 @@ class SalesService:
                         'category': 'ingredient',
                         'accountId': account_id,
                         'source': 'auto-deduction',
+                        'automatic': True,
                         'linkedProductId': product_id,
                         'linkedSaleId': None,  # Set by caller if needed
                         'createdAt': datetime.now().isoformat(),
+                        'created_at': datetime.now().isoformat(),
                         'description': f"Auto-deducted from sale - {qty_deducted}{product.get('unit', 'unit')} @ {cost_per_unit} KES"
                     }
                     expenses.append(auto_expense)
@@ -286,16 +292,25 @@ class SalesService:
                     continue
                 
                 quantity = safe_round(float(product.get('quantity', 0)))
+                product_threshold = safe_round(float(
+                    product.get('reorder_level')
+                    or product.get('reorderLevel')
+                    or threshold
+                ))
                 
                 # Only warn for non-zero stock below threshold
-                if 0 < quantity < threshold:
-                    severity = 'CRITICAL' if quantity < 0.1 else 'WARNING'
+                if product_threshold > 0 and 0 < quantity <= product_threshold:
+                    severity = 'CRITICAL' if quantity < max(product_threshold * 0.2, 0.1) else 'WARNING'
                     warnings.append({
                         'productId': product['id'],
+                        'id': product['id'],
                         'productName': product['name'],
+                        'name': product['name'],
                         'currentStock': quantity,
+                        'current': quantity,
+                        'quantity': quantity,
                         'unit': product.get('unit', 'pcs'),
-                        'threshold': threshold,
+                        'threshold': product_threshold,
                         'severity': severity,
                         'category': product.get('category', 'general')
                     })

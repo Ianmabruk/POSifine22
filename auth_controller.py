@@ -368,6 +368,14 @@ class AuthController:
             if account.get("business_type") and not sanitized.get("business_type"):
                 sanitized["business_type"] = account.get("business_type")
 
+        if account_id and not sanitized.get("business_type"):
+            try:
+                profiles = self.datastore.get_by_field("business_profiles", "account_id", account_id)
+                if profiles:
+                    sanitized["business_type"] = profiles[0].get("business_type")
+            except Exception:
+                pass
+
         if "active" not in sanitized:
             sanitized["active"] = bool(sanitized.get("is_active", True))
 
