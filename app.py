@@ -33,6 +33,7 @@ from credit_requests_controller import CreditRequestsController
 from discounts_service_fees_controller import DiscountsController, ServiceFeesController
 from business_routes import create_business_routes
 from ai_controller import create_ai_routes
+from ai_controller import create_ai_routes
 from message_routes import message_bp
 
 # Optional optimization imports - graceful fallback if not available
@@ -80,6 +81,12 @@ def create_app() -> Flask:
             allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
             methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
         )
+
+    # Global preflight handler
+    @app.before_request
+    def _handle_preflight():
+        if request.method == "OPTIONS":
+            return ("", 200)
 
     # Global preflight handler (avoid non-OK preflight responses)
     @app.before_request
@@ -140,6 +147,10 @@ def create_app() -> Flask:
     business_bp = create_business_routes(datastore, auth_controller)
     app.register_blueprint(business_bp, url_prefix="/api/business")
     app.register_blueprint(message_bp)
+
+    # AI routes
+    ai_bp = create_ai_routes(datastore, auth_controller.require_auth)
+    app.register_blueprint(ai_bp)
 
     # Register AI routes
     ai_bp = create_ai_routes(datastore, auth_controller.require_auth)
@@ -1074,17 +1085,19 @@ def create_app() -> Flask:
 
         total_sales = sum(_safe_float(s.get("total")) for s in sales)
         total_expenses = sum(_safe_float(e.get("amount")) for e in expenses)
+        total_cogs = sum(_safe_float(s.get("total_cost")) for s in sales)
 
         # Cashier monitor uses sales - expenses, admin uses full cost model
         if cashier_id is not None:
             profit = total_sales - total_expenses
         else:
-            total_cost = sum(_safe_float(s.get("total_cost")) for s in sales)
-            profit = total_sales - total_cost - total_expenses
+            profit = total_sales - total_cogs - total_expenses
 
         response = {
             "totalSales": total_sales,
             "totalExpenses": total_expenses,
+            "totalCOGS": total_cogs,
+            "grossProfit": total_sales - total_cogs,
             "profit": profit,
             "productsCount": len(products),
             "salesCount": len(sales)
