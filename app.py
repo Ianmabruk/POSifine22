@@ -33,7 +33,6 @@ from credit_requests_controller import CreditRequestsController
 from discounts_service_fees_controller import DiscountsController, ServiceFeesController
 from business_routes import create_business_routes
 from ai_controller import create_ai_routes
-from ai_controller import create_ai_routes
 from message_routes import message_bp
 
 # Optional optimization imports - graceful fallback if not available
@@ -149,10 +148,6 @@ def create_app() -> Flask:
     app.register_blueprint(message_bp)
 
     # AI routes
-    ai_bp = create_ai_routes(datastore, auth_controller.require_auth)
-    app.register_blueprint(ai_bp)
-
-    # Register AI routes
     ai_bp = create_ai_routes(datastore, auth_controller.require_auth)
     app.register_blueprint(ai_bp)
 
