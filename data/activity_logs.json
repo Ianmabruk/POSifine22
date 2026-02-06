@@ -1,1 +1,122 @@
-[]
+[
+  {
+    "account_id": "acc_7f9812780666",
+    "user_id": 44,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:39:25.515016",
+    "id": 1
+  },
+  {
+    "account_id": "acc_7f9812780666",
+    "user_id": 44,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:39:25.519785",
+    "id": 2
+  },
+  {
+    "account_id": "acc_7f9812780666",
+    "user_id": 44,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:39:25.533000",
+    "id": 3
+  },
+  {
+    "account_id": "acc_7f9812780666",
+    "user_id": 44,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:39:25.543522",
+    "id": 5
+  },
+  {
+    "account_id": "acc_7f9812780666",
+    "user_id": 44,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:39:25.685666",
+    "id": 6
+  },
+  {
+    "account_id": "acc_e30cc06d4aee",
+    "user_id": 45,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:59:50.041939",
+    "id": 7
+  },
+  {
+    "account_id": "acc_e30cc06d4aee",
+    "user_id": 45,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:59:50.071129",
+    "id": 8
+  },
+  {
+    "account_id": "acc_e30cc06d4aee",
+    "user_id": 45,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:59:50.077749",
+    "id": 9
+  },
+  {
+    "account_id": "acc_e30cc06d4aee",
+    "user_id": 45,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T15:59:50.115350",
+    "id": 10
+  },
+  {
+    "account_id": "acc_0a654b4d9674",
+    "user_id": 47,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T17:44:05.054733",
+    "id": 11
+  },
+  {
+    "account_id": "acc_e30cc06d4aee",
+    "user_id": 45,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T18:03:13.699302",
+    "id": 12
+  },
+  {
+    "account_id": "acc_d37e0270b372",
+    "user_id": 50,
+    "action": "refresh_token",
+    "resource": "/api/auth/refresh",
+    "metadata": {},
+    "ip_address": "127.0.0.1",
+    "created_at": "2026-02-06T18:48:16.642486",
+    "id": 13
+  }
+]

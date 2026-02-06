@@ -187,5 +187,16 @@
     "date": "2026-01-27",
     "notes": null,
     "id": 16
+  },
+  {
+    "account_id": "acc_e30cc06d4aee",
+    "user_id": 45,
+    "user_name": "jhsd@gmail.com",
+    "clock_in_time": "2026-02-06T18:41:07.670722",
+    "clock_out_time": null,
+    "duration_minutes": 0,
+    "date": "2026-02-06",
+    "notes": null,
+    "id": 17
   }
 ]
