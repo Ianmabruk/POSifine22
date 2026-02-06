@@ -10,6 +10,7 @@ import os
 import logging
 import uuid
 import json
+import secrets
 from datetime import datetime
 import time
 from typing import Dict, Any
@@ -445,16 +446,80 @@ def create_app() -> Flask:
 
         owner_email = os.environ.get("MAIN_ADMIN_EMAIL", "").strip().lower()
         owner_hash = os.environ.get("MAIN_ADMIN_HASH", "").strip()
-        if not owner_email or not owner_hash:
+        owner_password = os.environ.get("MAIN_ADMIN_PASSWORD", "").strip()
+        if not owner_email or (not owner_hash and not owner_password):
             return jsonify({"error": "Main admin credentials not configured"}), 500
 
-        if email != owner_email or not auth_controller.verify_password(password, owner_hash):
+        def _is_bcrypt_hash(value: str) -> bool:
+            return value.startswith("$2a$") or value.startswith("$2b$") or value.startswith("$2y$")
+
+        def _password_valid(candidate: str) -> bool:
+            if owner_hash:
+                if _is_bcrypt_hash(owner_hash):
+                    return auth_controller.verify_password(candidate, owner_hash)
+                if not owner_password:
+                    return secrets.compare_digest(candidate, owner_hash)
+            if owner_password:
+                return secrets.compare_digest(candidate, owner_password)
+            return False
+
+        if email != owner_email or not _password_valid(password):
             _record_failed_login()
             return jsonify({"error": "Access denied"}), 403
 
         owner = datastore.get_user_by_email(email)
-        if not owner or owner.get("role") != "main_admin":
-            return jsonify({"error": "Owner user not found"}), 401
+        if not owner:
+            account = datastore.get_account_by_email(owner_email)
+            if not account:
+                account_id = f"acc_{uuid.uuid4().hex[:12]}"
+                account = {
+                    "id": account_id,
+                    "owner_email": owner_email,
+                    "business_name": "Main Admin",
+                    "plan": "owner",
+                    "is_active": True,
+                    "is_locked": False,
+                    "trial_ends_at": None,
+                    "subscription_ends_at": None,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "business_logo": None,
+                    "currency": "KES",
+                    "tax_rate": 0.0,
+                    "screen_lock_password": "2005",
+                    "days_used": 0,
+                    "last_activity_date": None,
+                    "requested_trial": False,
+                    "business_type": "main_admin"
+                }
+                datastore.create("accounts", account)
+            account_id = account.get("id")
+
+            if owner_hash and _is_bcrypt_hash(owner_hash):
+                password_hash = owner_hash
+            else:
+                password_hash = auth_controller.hash_password(owner_password or owner_hash)
+
+            owner = datastore.create("users", {
+                "account_id": account_id,
+                "email": owner_email,
+                "password_hash": password_hash,
+                "name": "Main Admin",
+                "role": "main_admin",
+                "pin": None,
+                "cashier_pin": None,
+                "is_active": True,
+                "is_locked": False,
+                "screen_locked": False,
+                "created_at": datetime.utcnow().isoformat(),
+                "created_by": None,
+                "last_login": None,
+                "hourly_rate": 0.0,
+                "business_type": "main_admin",
+                "business_role": "main_admin"
+            })
+        elif owner.get("role") != "main_admin":
+            datastore.update("users", owner.get("id"), {"role": "main_admin", "business_role": "main_admin"}, owner.get("account_id"))
+            owner = datastore.get_user_by_email(email)
 
         token = auth_controller.generate_token(owner)
         refresh_token = auth_controller.create_refresh_session(
@@ -1235,6 +1300,11 @@ def create_app() -> Flask:
         sync_manager.broadcast_sale_completed(account_id, sale)
         for deduction in product_deductions:
             sync_manager.broadcast_stock_update(account_id, deduction.get("id"), deduction.get("after"))
+
+        if cache.enabled:
+            cache.delete(f"cache:products:{account_id}")
+            cache.delete(f"cache:stats:{account_id}:all")
+            cache.delete(f"cache:stats:{account_id}:{cashier_id}")
 
         return jsonify({
             "success": True,
