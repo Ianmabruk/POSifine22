@@ -16,13 +16,20 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# Try OpenAI first, fallback to basic AI
+# Try Gemini/OpenAI, fallback to basic AI
 try:
     import openai
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
     logger.warning("OpenAI not installed. AI features will use fallback mode.")
+
+try:
+    import google.generativeai as genai
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+    logger.warning("Google Generative AI not installed. Gemini features unavailable.")
 
 
 class AIService:
@@ -33,8 +40,14 @@ class AIService:
     def __init__(self, api_key: Optional[str] = None):
         """Initialize AI service"""
         self.api_key = api_key or os.environ.get('OPENAI_API_KEY')
+        self.gemini_api_key = os.environ.get('GEMINI_API_KEY')
         
-        if HAS_OPENAI and self.api_key:
+        if HAS_GEMINI and self.gemini_api_key:
+            genai.configure(api_key=self.gemini_api_key)
+            self.client = genai.GenerativeModel("gemini-1.5-flash")
+            self.mode = 'gemini'
+            logger.info("AI Service initialized with Gemini")
+        elif HAS_OPENAI and self.api_key:
             # Use new OpenAI client (v1.0+)
             from openai import OpenAI
             self.client = OpenAI(api_key=self.api_key)
@@ -57,6 +70,8 @@ class AIService:
             AI response as string
         """
         try:
+            if self.mode == 'gemini':
+                return await self._ask_gemini(prompt, json_mode)
             if self.mode == 'openai':
                 return await self._ask_openai(prompt, json_mode)
             if allow_fallback:
@@ -85,6 +100,15 @@ class AIService:
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
+            return self._fallback_response(prompt)
+
+    async def _ask_gemini(self, prompt: str, json_mode: bool) -> str:
+        """Send request to Gemini API"""
+        try:
+            response = self.client.generate_content(prompt)
+            return response.text or ""
+        except Exception as e:
+            logger.error(f"Gemini API error: {e}")
             return self._fallback_response(prompt)
     
     def _fallback_response(self, prompt: str) -> str:
@@ -148,7 +172,7 @@ Consider:
 - Recent performance
 """
         
-        if self.mode != 'openai':
+        if self.mode not in ['openai', 'gemini']:
             return self._heuristic_forecast(aggregated, periods)
 
         try:
