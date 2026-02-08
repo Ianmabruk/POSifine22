@@ -91,12 +91,12 @@ def create_ai_routes(datastore, auth_middleware):
             sales = datastore.get_by_field('sales', 'account_id', account_id)
 
             if not sales:
-                return jsonify(ApiResponse.success(data={
+                return ApiResponse.success(data={
                     'labels': [f'Period {i+1}' for i in range(periods)],
                     'revenue': [0] * periods,
                     'profit': [0] * periods,
                     'note': 'No historical data available'
-                }).to_dict()), 200
+                }).to_dict(), 200
 
             def _run_async(coro):
                 try:
@@ -114,19 +114,19 @@ def create_ai_routes(datastore, auth_middleware):
             # Generate forecast with AI (safe across event loop contexts)
             forecast_data = _run_async(ai_service.forecast_sales(sales, periods=periods))
 
-            return jsonify(ApiResponse.success(
+            return ApiResponse.success(
                 data=forecast_data,
                 message="Forecast generated successfully"
-            ).to_dict()), 200
+            ).to_dict(), 200
 
         except Exception as e:
             logger.exception("Forecast generation failed")
-            return jsonify(ApiResponse.success(data={
+            return ApiResponse.success(data={
                 'labels': [f'Period {i+1}' for i in range(periods)],
                 'revenue': [0] * periods,
                 'profit': [0] * periods,
                 'note': f'Forecast unavailable: {str(e)}'
-            }).to_dict()), 200
+            }).to_dict(), 200
     
     # ============================================================
     # PRO PLAN AI ASSISTANT
@@ -158,10 +158,10 @@ def create_ai_routes(datastore, auth_middleware):
         context = data.get('context')
         
         if not question:
-            return jsonify(ApiResponse.error(
+            return ApiResponse.error(
                 message="Question is required",
                 errors=[{'field': 'question', 'message': 'Cannot be empty'}]
-            ).to_dict()), 400
+            ).to_dict(), 400
         
         try:
             # Get business type from account
@@ -178,17 +178,17 @@ def create_ai_routes(datastore, auth_middleware):
                 )
             )
             
-            return jsonify(ApiResponse.success(data={
+            return ApiResponse.success(data={
                 'answer': answer,
                 'business_type': business_type,
                 'timestamp': ApiResponse.success().timestamp
-            }).to_dict()), 200
+            }).to_dict(), 200
             
         except Exception as e:
             logger.exception("AI assistant failed")
-            return jsonify(ApiResponse.error(
+            return ApiResponse.error(
                 message=f"Assistant failed: {str(e)}"
-            ).to_dict()), 500
+            ).to_dict(), 500
 
     # ============================================================
     # ADMIN AI ASSISTANT
@@ -220,10 +220,10 @@ def create_ai_routes(datastore, auth_middleware):
         context = data.get('context') or {}
 
         if not question:
-            return jsonify(ApiResponse.error(
+            return ApiResponse.error(
                 message="Question is required",
                 errors=[{'field': 'question', 'message': 'Cannot be empty'}]
-            ).to_dict()), 400
+            ).to_dict(), 400
 
         def _run_async(coro):
             try:
@@ -258,11 +258,11 @@ def create_ai_routes(datastore, auth_middleware):
                     profit = forecast.get('profit', [0] * 4)[i]
                     lines.append(f"- {label}: revenue {revenue}, profit {profit}")
 
-                return jsonify(ApiResponse.success(data={
+                return ApiResponse.success(data={
                     'answer': "\n".join(lines),
                     'business_type': business_type,
                     'timestamp': ApiResponse.success().timestamp
-                }).to_dict()), 200
+                }).to_dict(), 200
 
             prompt = f"""
 You are a helpful AI business assistant for a {business_type}.
@@ -277,17 +277,17 @@ Context: {json.dumps(context)}
 
             answer = _run_async(ai_service.ask_ai(prompt, json_mode=False))
 
-            return jsonify(ApiResponse.success(data={
+            return ApiResponse.success(data={
                 'answer': answer,
                 'business_type': business_type,
                 'timestamp': ApiResponse.success().timestamp
-            }).to_dict()), 200
+            }).to_dict(), 200
 
         except Exception as e:
             logger.exception("Admin AI assistant failed")
-            return jsonify(ApiResponse.error(
+            return ApiResponse.error(
                 message=f"Assistant failed: {str(e)}"
-            ).to_dict()), 500
+            ).to_dict(), 500
     
     # ============================================================
     # EMPLOYEE PERFORMANCE SCORING
@@ -315,27 +315,27 @@ Context: {json.dumps(context)}
             time_entries = datastore.get_by_field('time_tracking', 'account_id', account_id)
             
             if not sales and not time_entries:
-                return jsonify(ApiResponse.success(data={
+                return ApiResponse.success(data={
                     'scores': [],
                     'note': 'No employee data available'
-                }).to_dict()), 200
+                }).to_dict(), 200
             
             # Generate scores with AI
             scores = asyncio.run(
                 ai_service.score_staff_performance(sales, time_entries)
             )
             
-            return jsonify(ApiResponse.success(data={
+            return ApiResponse.success(data={
                 'scores': scores,
                 'total_employees': len(scores),
                 'timestamp': ApiResponse.success().timestamp
-            }).to_dict()), 200
+            }).to_dict(), 200
             
         except Exception as e:
             logger.exception("Staff scoring failed")
-            return jsonify(ApiResponse.error(
+            return ApiResponse.error(
                 message=f"Scoring failed: {str(e)}"
-            ).to_dict()), 500
+            ).to_dict(), 500
     
     # ============================================================
     # ALERT MANAGEMENT
@@ -358,26 +358,26 @@ Context: {json.dumps(context)}
         try:
             alert_engine = get_alert_engine(datastore)
             if not alert_engine:
-                return jsonify(ApiResponse.error(
+                return ApiResponse.error(
                     message="Alert engine not initialized"
-                ).to_dict()), 500
+                ).to_dict(), 500
             
             # Run check
             alerts = asyncio.run(
                 alert_engine.check_account_now(account_id)
             )
             
-            return jsonify(ApiResponse.success(data={
+            return ApiResponse.success(data={
                 'alerts': alerts,
                 'count': len(alerts),
                 'timestamp': ApiResponse.success().timestamp
-            }).to_dict()), 200
+            }).to_dict(), 200
             
         except Exception as e:
             logger.exception("Alert check failed")
-            return jsonify(ApiResponse.error(
+            return ApiResponse.error(
                 message=f"Alert check failed: {str(e)}"
-            ).to_dict()), 500
+            ).to_dict(), 500
     
     @ai_bp.route('/alerts/config', methods=['GET', 'POST'])
     @auth_middleware
@@ -393,15 +393,15 @@ Context: {json.dumps(context)}
         """
         alert_engine = get_alert_engine(datastore)
         if not alert_engine:
-            return jsonify(ApiResponse.error(
+            return ApiResponse.error(
                 message="Alert engine not initialized"
-            ).to_dict()), 500
+            ).to_dict(), 500
         
         if request.method == 'GET':
             # Return current config
-            return jsonify(ApiResponse.success(
+            return ApiResponse.success(
                 data=alert_engine.alert_config
-            ).to_dict()), 200
+            ).to_dict(), 200
         
         else:  # POST
             data = request.get_json()
@@ -413,10 +413,10 @@ Context: {json.dumps(context)}
                 channels=data.get('enabled_channels')
             )
             
-            return jsonify(ApiResponse.success(
+            return ApiResponse.success(
                 data=alert_engine.alert_config,
                 message="Alert configuration updated"
-            ).to_dict()), 200
+            ).to_dict(), 200
     
     # ============================================================
     # AI SERVICE STATUS
@@ -433,7 +433,7 @@ Context: {json.dumps(context)}
         Returns:
             Service status information
         """
-        return jsonify(ApiResponse.success(data={
+        return ApiResponse.success(data={
             'mode': ai_service.mode,
             'available': ai_service.mode in ['openai', 'fallback'],
             'features': {
@@ -442,6 +442,6 @@ Context: {json.dumps(context)}
                 'scoring': True,
                 'alerts': get_alert_engine(datastore) is not None
             }
-        }).to_dict()), 200
+        }).to_dict(), 200
     
     return ai_bp
