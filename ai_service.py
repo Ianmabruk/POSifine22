@@ -45,7 +45,7 @@ class AIService:
             self.mode = 'fallback'
             logger.info("AI Service initialized in fallback mode")
     
-    async def ask_ai(self, prompt: str, json_mode: bool = True) -> str:
+    async def ask_ai(self, prompt: str, json_mode: bool = True, allow_fallback: bool = True) -> str:
         """
         Send prompt to AI and get response
         
@@ -59,11 +59,14 @@ class AIService:
         try:
             if self.mode == 'openai':
                 return await self._ask_openai(prompt, json_mode)
-            else:
+            if allow_fallback:
                 return self._fallback_response(prompt)
+            raise RuntimeError("AI service unavailable")
         except Exception as e:
             logger.error(f"AI request failed: {e}")
-            return self._fallback_response(prompt)
+            if allow_fallback:
+                return self._fallback_response(prompt)
+            raise
     
     async def _ask_openai(self, prompt: str, json_mode: bool) -> str:
         """Send request to OpenAI API"""
@@ -145,7 +148,13 @@ Consider:
 - Recent performance
 """
         
-        response = await self.ask_ai(prompt, json_mode=True)
+        if self.mode != 'openai':
+            return self._heuristic_forecast(aggregated, periods)
+
+        try:
+            response = await self.ask_ai(prompt, json_mode=True, allow_fallback=False)
+        except Exception:
+            return self._heuristic_forecast(aggregated, periods)
         
         try:
             return json.loads(response)
@@ -155,7 +164,7 @@ Consider:
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group())
-            return self._default_forecast(periods)
+            return self._heuristic_forecast(aggregated, periods)
     
     def _aggregate_sales(self, sales_data: List[Dict]) -> List[Dict]:
         """Aggregate sales data by week"""
@@ -184,13 +193,29 @@ Consider:
             for week, data in sorted(weekly.items())[-12:]  # Last 12 weeks
         ]
     
-    def _default_forecast(self, periods: int) -> Dict[str, List]:
-        """Default forecast when AI unavailable"""
-        return {
-            "labels": [f"Period {i+1}" for i in range(periods)],
-            "revenue": [10000 * (1 + i * 0.1) for i in range(periods)],
-            "profit": [3000 * (1 + i * 0.1) for i in range(periods)]
-        }
+    def _heuristic_forecast(self, aggregated: List[Dict], periods: int) -> Dict[str, List]:
+        """Heuristic forecast based on recent sales when AI is unavailable"""
+        labels = [f"Period {i+1}" for i in range(periods)]
+
+        if not aggregated:
+            return {"labels": labels, "revenue": [0] * periods, "profit": [0] * periods}
+
+        recent = aggregated[-min(4, len(aggregated)) :]
+        revs = [r.get('revenue', 0) for r in recent]
+        profits = [r.get('profit', 0) for r in recent]
+
+        avg_rev = sum(revs) / max(len(revs), 1)
+        avg_profit = sum(profits) / max(len(profits), 1)
+
+        growth = 0.0
+        if len(revs) >= 2 and revs[-2] > 0:
+            growth = (revs[-1] - revs[-2]) / revs[-2]
+        growth = max(min(growth, 0.3), -0.3)
+
+        revenue = [round(avg_rev * (1 + growth * (i + 1)), 2) for i in range(periods)]
+        profit = [round(avg_profit * (1 + growth * (i + 1)), 2) for i in range(periods)]
+
+        return {"labels": labels, "revenue": revenue, "profit": profit}
     
     # ============================================================
     # ANOMALY DETECTION
