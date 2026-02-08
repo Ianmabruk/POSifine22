@@ -90,7 +90,7 @@ class StockEngine:
             
             # Process each sale item
             for item in items:
-                product_id = item.get('product_id') or item.get('id')
+                product_id = item.get('product_id') or item.get('productId') or item.get('id')
                 quantity = safe_float(item.get('quantity', 0))
                 
                 if quantity <= 0:
@@ -264,7 +264,7 @@ class StockEngine:
             total_cost = 0.0
             
             for item in items:
-                product_id = item.get('product_id') or item.get('id')
+                product_id = item.get('product_id') or item.get('productId') or item.get('id')
                 quantity = safe_float(item.get('quantity', 0))
                 
                 product = product_map.get(product_id)
@@ -297,7 +297,8 @@ class StockEngine:
                                 ing_cost = safe_float(ing_product.get('cost', 0))
                                 item_cost += ing_cost * ing_qty * quantity
                 else:
-                    item_cost = safe_float(product.get('cost', 0)) * quantity
+                    unit_cost = safe_float(product.get('cost_per_unit') or product.get('costPerUnit') or product.get('cost', 0))
+                    item_cost = unit_cost * quantity
                 
                 sale_items.append({
                     'product_id': product_id,

@@ -15,6 +15,8 @@ from datetime import datetime
 import time
 from typing import Dict, Any
 
+from dotenv import load_dotenv
+
 from flask import Flask, jsonify, request, g
 from flask_sock import Sock
 from flask_cors import CORS
@@ -45,6 +47,8 @@ try:
 except ImportError:
     OPTIMIZATIONS_AVAILABLE = False
     print("Optimization modules not available - running in basic mode")
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1024,6 +1028,9 @@ def create_app() -> Flask:
         if updated_product:
             sync_manager.broadcast_product_update(account_id, updated_product, action='updated')
 
+        if cache.enabled:
+            cache.delete(f"cache:products:{account_id}")
+
         return jsonify(created_batch), 201
 
     # ============================================================
@@ -1844,6 +1851,28 @@ def create_app() -> Flask:
     def mark_reminder_seen(reminder_id: int):
         account_id = request.user.get("account_id")
         user_id = request.user.get("id")
+        role = request.user.get("role")
+        data = request.get_json(silent=True) or {}
+
+        updates = {}
+        if "status" in data:
+            updates["status"] = data.get("status")
+
+        if role in ["admin", "owner"]:
+            if "note" in data:
+                updates["admin_note"] = data.get("note")
+            if "signature" in data:
+                updates["admin_signature"] = data.get("signature")
+                updates["admin_signed_at"] = datetime.utcnow().isoformat()
+        else:
+            if "note" in data:
+                updates["cashier_note"] = data.get("note")
+            if "signature" in data:
+                updates["cashier_signature"] = data.get("signature")
+                updates["cashier_signed_at"] = datetime.utcnow().isoformat()
+
+        if updates:
+            reminders.update_reminder(reminder_id, account_id, updates)
         
         success = reminders.mark_reminder_seen(reminder_id, user_id, account_id)
         

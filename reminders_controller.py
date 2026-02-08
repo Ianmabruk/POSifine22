@@ -70,7 +70,14 @@ class RemindersController:
                 'expires_at': expires_at,
                 'target_users': target_users or [],  # Empty list = all users
                 'seen_by': [],  # List of user IDs who have seen this reminder
-                'is_active': True
+                'is_active': True,
+                'status': 'pending',
+                'admin_note': '',
+                'cashier_note': '',
+                'admin_signature': '',
+                'cashier_signature': '',
+                'admin_signed_at': None,
+                'cashier_signed_at': None
             }
             created_reminder = self.ds.create('reminders', reminder)
             

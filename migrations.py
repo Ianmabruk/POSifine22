@@ -46,7 +46,7 @@ def run_migrations():
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS shifts (
                         id SERIAL PRIMARY KEY,
-                        accountid INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+                        accountid TEXT REFERENCES accounts(id) ON DELETE CASCADE,
                         userid INTEGER REFERENCES users(id) ON DELETE CASCADE,
                         username TEXT,
                         clockintime TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -55,13 +55,13 @@ def run_migrations():
                         totalexpenses REAL DEFAULT 0,
                         status TEXT DEFAULT 'open',
                         notes TEXT,
-                        createdat TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        CONSTRAINT unique_open_shift UNIQUE (userid, accountid) WHERE status = 'open'
+                        createdat TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     );
                     
                     CREATE INDEX IF NOT EXISTS idx_shifts_userid ON shifts(userid);
                     CREATE INDEX IF NOT EXISTS idx_shifts_accountid ON shifts(accountid);
                     CREATE INDEX IF NOT EXISTS idx_shifts_status ON shifts(status);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_shifts_unique_open ON shifts(userid, accountid) WHERE status = 'open';
                 ''')
                 
                 # 3. Create stock_logs table
@@ -69,7 +69,7 @@ def run_migrations():
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS stock_logs (
                         id SERIAL PRIMARY KEY,
-                        accountid INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+                        accountid TEXT REFERENCES accounts(id) ON DELETE CASCADE,
                         productid INTEGER REFERENCES products(id) ON DELETE CASCADE,
                         quantitychanged REAL NOT NULL,
                         logtype TEXT NOT NULL CHECK (logtype IN ('add', 'deduct', 'adjust', 'sale')),
@@ -93,7 +93,7 @@ def run_migrations():
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS roles (
                         id SERIAL PRIMARY KEY,
-                        accountid INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+                        accountid TEXT REFERENCES accounts(id) ON DELETE CASCADE,
                         name TEXT NOT NULL,
                         permissions TEXT NOT NULL DEFAULT '[]',
                         description TEXT,
@@ -126,7 +126,7 @@ def run_migrations():
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS monitor_cache (
                         id SERIAL PRIMARY KEY,
-                        accountid INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+                        accountid TEXT REFERENCES accounts(id) ON DELETE CASCADE,
                         key TEXT NOT NULL,
                         value TEXT,
                         expirat TIMESTAMP WITH TIME ZONE,
@@ -136,6 +136,21 @@ def run_migrations():
                     );
                     
                     CREATE INDEX IF NOT EXISTS idx_monitor_cache_accountid ON monitor_cache(accountid);
+                ''')
+
+                # 7. Extend reminders table
+                print("📍 Updating reminders table...")
+                cursor.execute('''
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'normal';
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS expires_at TEXT;
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS target_users JSONB DEFAULT '[]';
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS admin_note TEXT;
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS cashier_note TEXT;
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS admin_signature TEXT;
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS cashier_signature TEXT;
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS admin_signed_at TEXT;
+                    ALTER TABLE reminders ADD COLUMN IF NOT EXISTS cashier_signed_at TEXT;
                 ''')
                 
                 # 7. Add transaction support columns to sales
@@ -148,7 +163,7 @@ def run_migrations():
                     
                     CREATE INDEX IF NOT EXISTS idx_sales_shiftid ON sales(shiftid);
                     CREATE INDEX IF NOT EXISTS idx_sales_transactionstatus ON sales(transactionstatus);
-                    CREATE INDEX IF NOT EXISTS idx_sales_createdat ON sales(createdat);
+                    CREATE INDEX IF NOT EXISTS idx_sales_createdat ON sales(created_at);
                 ''')
                 
                 # 8. Create audit_log table for compliance
@@ -156,7 +171,7 @@ def run_migrations():
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS audit_log (
                         id SERIAL PRIMARY KEY,
-                        accountid INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+                        accountid TEXT REFERENCES accounts(id) ON DELETE CASCADE,
                         userid INTEGER REFERENCES users(id) ON DELETE SET NULL,
                         action TEXT NOT NULL,
                         entitytype TEXT NOT NULL,

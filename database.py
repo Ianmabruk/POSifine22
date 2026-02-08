@@ -344,8 +344,18 @@ class DataStore:
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
                         title TEXT NOT NULL,
                         message TEXT NOT NULL,
+                        priority TEXT DEFAULT 'normal',
+                        status TEXT DEFAULT 'pending',
                         created_by INTEGER NOT NULL,
                         created_at TEXT NOT NULL,
+                        expires_at TEXT,
+                        target_users JSONB DEFAULT '[]',
+                        admin_note TEXT,
+                        cashier_note TEXT,
+                        admin_signature TEXT,
+                        cashier_signature TEXT,
+                        admin_signed_at TEXT,
+                        cashier_signed_at TEXT,
                         seen_by JSONB DEFAULT '[]'
                     )
                 """)
