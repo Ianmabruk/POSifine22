@@ -10,6 +10,7 @@ API endpoints for AI-powered features:
 
 import asyncio
 import logging
+import json
 from flask import Blueprint, request, jsonify, g
 from functools import wraps
 from typing import Dict, Any
@@ -185,6 +186,105 @@ def create_ai_routes(datastore, auth_middleware):
             
         except Exception as e:
             logger.exception("AI assistant failed")
+            return jsonify(ApiResponse.error(
+                message=f"Assistant failed: {str(e)}"
+            ).to_dict()), 500
+
+    # ============================================================
+    # ADMIN AI ASSISTANT
+    # ============================================================
+
+    @ai_bp.route('/ask', methods=['POST'])
+    @auth_middleware
+    @require_admin
+    @error_handler
+    @standardize_response
+    def admin_assistant():
+        """
+        AI assistant for admin users
+
+        Request body:
+            {
+                "question": "Draft an email to staff about schedule changes",
+                "context": {}  // Optional business context
+            }
+
+        Returns:
+            AI-generated response
+        """
+        user = g.user
+        account = g.account
+        data = request.get_json() or {}
+
+        question = (data.get('question') or '').strip()
+        context = data.get('context') or {}
+
+        if not question:
+            return jsonify(ApiResponse.error(
+                message="Question is required",
+                errors=[{'field': 'question', 'message': 'Cannot be empty'}]
+            ).to_dict()), 400
+
+        def _run_async(coro):
+            try:
+                loop = asyncio.get_running_loop()
+                if loop and loop.is_running():
+                    new_loop = asyncio.new_event_loop()
+                    try:
+                        return new_loop.run_until_complete(coro)
+                    finally:
+                        new_loop.close()
+            except RuntimeError:
+                pass
+            return asyncio.run(coro)
+
+        try:
+            business_type = (
+                context.get('businessType')
+                or (account.get('business_type') if account else None)
+                or 'general'
+            )
+            role = user.get('role', 'admin')
+
+            lower_q = question.lower()
+            if ("forecast" in lower_q or "predict" in lower_q) and ("sale" in lower_q or "revenue" in lower_q):
+                account_id = user.get('account_id')
+                sales = datastore.get_by_field('sales', 'account_id', account_id)
+                forecast = _run_async(ai_service.forecast_sales(sales, periods=4))
+
+                lines = ["Sales forecast (next 4 periods):"]
+                for i, label in enumerate(forecast.get('labels', [])):
+                    revenue = forecast.get('revenue', [0] * 4)[i]
+                    profit = forecast.get('profit', [0] * 4)[i]
+                    lines.append(f"- {label}: revenue {revenue}, profit {profit}")
+
+                return jsonify(ApiResponse.success(data={
+                    'answer': "\n".join(lines),
+                    'business_type': business_type,
+                    'timestamp': ApiResponse.success().timestamp
+                }).to_dict()), 200
+
+            prompt = f"""
+You are a helpful AI business assistant for a {business_type}.
+Respond clearly and concisely.
+If the user asks to write an email, provide a subject line and a full email body.
+If the user asks about sales forecasting, provide a brief forecast explanation.
+
+User role: {role}
+Question: {question}
+Context: {json.dumps(context)}
+"""
+
+            answer = _run_async(ai_service.ask_ai(prompt, json_mode=False))
+
+            return jsonify(ApiResponse.success(data={
+                'answer': answer,
+                'business_type': business_type,
+                'timestamp': ApiResponse.success().timestamp
+            }).to_dict()), 200
+
+        except Exception as e:
+            logger.exception("Admin AI assistant failed")
             return jsonify(ApiResponse.error(
                 message=f"Assistant failed: {str(e)}"
             ).to_dict()), 500
