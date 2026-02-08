@@ -83,8 +83,11 @@ def create_ai_routes(datastore, auth_middleware):
         Returns:
             JSON with labels, revenue, and profit predictions
         """
-        account_id = g.user.get('account_id')
         periods = int(request.args.get('periods', 4))
+        user = g.get('user')
+        if not user:
+            return ApiResponse.error(message="Authentication required").to_dict(), 401
+        account_id = user.get('account_id')
         
         try:
             # Get historical sales
@@ -305,7 +308,10 @@ Context: {json.dumps(context)}
         Returns:
             List of employees with scores and reasons
         """
-        account_id = g.user.get('account_id')
+        user = g.get('user')
+        if not user:
+            return ApiResponse.error(message="Authentication required").to_dict(), 401
+        account_id = user.get('account_id')
         
         try:
             # Get sales data with cashier info
@@ -353,7 +359,10 @@ Context: {json.dumps(context)}
         Returns:
             List of detected alerts
         """
-        account_id = g.user.get('account_id')
+        user = g.get('user')
+        if not user:
+            return ApiResponse.error(message="Authentication required").to_dict(), 401
+        account_id = user.get('account_id')
         
         try:
             alert_engine = get_alert_engine(datastore)
