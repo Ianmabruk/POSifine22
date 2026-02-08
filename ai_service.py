@@ -44,7 +44,7 @@ class AIService:
         
         if HAS_GEMINI and self.gemini_api_key:
             genai.configure(api_key=self.gemini_api_key)
-            self.client = genai.GenerativeModel("gemini-1.5-flash")
+            self.client = genai.GenerativeModel("models/gemini-2.5-flash")
             self.mode = 'gemini'
             logger.info("AI Service initialized with Gemini")
         elif HAS_OPENAI and self.api_key:
