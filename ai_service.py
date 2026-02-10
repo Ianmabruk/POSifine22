@@ -131,6 +131,186 @@ class AIService:
             })
         else:
             return "AI service temporarily unavailable. Please check configuration."
+
+    # ============================================================
+    # POSIFNE PROF INSIGHTS
+    # ============================================================
+
+    def _posifne_prof_prompt(self, data: Dict[str, Any]) -> str:
+        """Build POSIFNE PROF prompt with strict JSON response format."""
+        payload = json.dumps(data, indent=2, default=str)
+        return f"""
+You are POSIFNE PROF — an advanced AI retail intelligence engine.
+
+You are analyzing real POS business data from a store, including:
+• Sales transactions
+• Inventory stock levels
+• Customer behavior
+• Cashier activity
+• Time-based performance
+
+Your job is to:
+1. Predict future sales (7, 14, 30 days)
+2. Detect anomalies (theft, data errors, abnormal patterns)
+3. Identify HOT items and DEAD stock
+4. Recommend promotions and bundles
+5. Give business strategy advice
+
+Analyze this business data:
+{payload}
+
+You must return ONLY JSON in this exact format:
+
+{{
+  "forecast": {{
+    "next_7_days": "...",
+    "next_14_days": "...",
+    "next_30_days": "..."
+  }},
+  "anomalies": [
+    {{ "type": "...", "description": "...", "risk_level": "low|medium|high" }}
+  ],
+  "inventory": {{
+    "hot_items": ["..."],
+    "dead_stock": ["..."],
+    "reorder_suggestions": ["..."]
+  }},
+  "promotions": [
+    {{ "bundle": "...", "reason": "..." }}
+  ],
+  "strategy": {{
+    "staffing": "...",
+    "pricing": "...",
+    "operations": "..."
+  }}
+}}
+
+Return only strict JSON.
+"""
+
+    async def generate_posifne_insights(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate POSIFNE PROF insights using Gemini/OpenAI with strict JSON output."""
+        prompt = self._posifne_prof_prompt(data)
+
+        if self.mode not in ['openai', 'gemini']:
+            return self._default_posifne_insights()
+
+        try:
+            response = await self.ask_ai(prompt, json_mode=True, allow_fallback=False)
+        except Exception:
+            return self._default_posifne_insights()
+
+        try:
+            parsed = json.loads(response)
+            if isinstance(parsed, dict):
+                return self._validate_posifne_insights(parsed)
+        except json.JSONDecodeError:
+            import re
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group())
+                    return self._validate_posifne_insights(parsed)
+                except Exception:
+                    pass
+
+        return self._default_posifne_insights()
+
+    def _validate_posifne_insights(self, data: Any) -> Dict[str, Any]:
+        """Validate and normalize POSIFNE PROF insights JSON."""
+        defaults = self._default_posifne_insights()
+        if not isinstance(data, dict):
+            return defaults
+
+        forecast = data.get("forecast") if isinstance(data.get("forecast"), dict) else {}
+        anomalies = data.get("anomalies") if isinstance(data.get("anomalies"), list) else []
+        inventory = data.get("inventory") if isinstance(data.get("inventory"), dict) else {}
+        promotions = data.get("promotions") if isinstance(data.get("promotions"), list) else []
+        strategy = data.get("strategy") if isinstance(data.get("strategy"), dict) else {}
+
+        normalized_anomalies = []
+        for item in anomalies:
+            if not isinstance(item, dict):
+                continue
+            risk = (item.get("risk_level") or "low").lower()
+            if risk not in ["low", "medium", "high"]:
+                risk = "low"
+            normalized_anomalies.append({
+                "type": str(item.get("type") or "unknown"),
+                "description": str(item.get("description") or ""),
+                "risk_level": risk
+            })
+
+        normalized_inventory = {
+            "hot_items": [str(x) for x in inventory.get("hot_items", []) if x is not None],
+            "dead_stock": [str(x) for x in inventory.get("dead_stock", []) if x is not None],
+            "reorder_suggestions": [str(x) for x in inventory.get("reorder_suggestions", []) if x is not None]
+        }
+
+        normalized_promotions = []
+        for item in promotions:
+            if not isinstance(item, dict):
+                continue
+            normalized_promotions.append({
+                "bundle": str(item.get("bundle") or ""),
+                "reason": str(item.get("reason") or "")
+            })
+
+        normalized_strategy = {
+            "staffing": str(strategy.get("staffing") or ""),
+            "pricing": str(strategy.get("pricing") or ""),
+            "operations": str(strategy.get("operations") or "")
+        }
+
+        normalized_forecast = {
+            "next_7_days": str(forecast.get("next_7_days") or ""),
+            "next_14_days": str(forecast.get("next_14_days") or ""),
+            "next_30_days": str(forecast.get("next_30_days") or "")
+        }
+
+        normalized = {
+            "forecast": normalized_forecast,
+            "anomalies": normalized_anomalies,
+            "inventory": normalized_inventory,
+            "promotions": normalized_promotions,
+            "strategy": normalized_strategy
+        }
+
+        # Fill missing sections with defaults if normalization emptied them
+        if not normalized["forecast"]:
+            normalized["forecast"] = defaults["forecast"]
+        if normalized["anomalies"] is None:
+            normalized["anomalies"] = defaults["anomalies"]
+        if not normalized["inventory"]:
+            normalized["inventory"] = defaults["inventory"]
+        if normalized["promotions"] is None:
+            normalized["promotions"] = defaults["promotions"]
+        if not normalized["strategy"]:
+            normalized["strategy"] = defaults["strategy"]
+
+        return normalized
+
+    def _default_posifne_insights(self) -> Dict[str, Any]:
+        """Fallback POSIFNE PROF response when AI is unavailable."""
+        return {
+            "forecast": {
+                "next_7_days": "unavailable",
+                "next_14_days": "unavailable",
+                "next_30_days": "unavailable"
+            },
+            "anomalies": [],
+            "inventory": {
+                "hot_items": [],
+                "dead_stock": [],
+                "reorder_suggestions": []
+            },
+            "promotions": [],
+            "strategy": {
+                "staffing": "unavailable",
+                "pricing": "unavailable",
+                "operations": "unavailable"
+            }
+        }
     
     # ============================================================
     # SALES FORECASTING

@@ -11,6 +11,7 @@ API endpoints for AI-powered features:
 import asyncio
 import logging
 import json
+from datetime import datetime
 from flask import Blueprint, request, jsonify, g
 from functools import wraps
 from typing import Dict, Any
@@ -290,6 +291,138 @@ Context: {json.dumps(context)}
             logger.exception("Admin AI assistant failed")
             return ApiResponse.error(
                 message=f"Assistant failed: {str(e)}"
+            ).to_dict(), 500
+
+    # ============================================================
+    # POSIFNE PROF AI INSIGHTS
+    # ============================================================
+
+    @ai_bp.route('/insights', methods=['POST'])
+    @auth_middleware
+    @require_admin
+    @error_handler
+    @standardize_response
+    def posifne_insights():
+        """
+        Generate POSIFNE PROF AI insights
+
+        Request body (optional):
+            {
+                "data": { ... }  // If provided, used directly
+            }
+        """
+        user = g.get('user')
+        if not user:
+            return ApiResponse.error(message="Authentication required").to_dict(), 401
+
+        account_id = user.get('account_id')
+        payload = request.get_json(silent=True) or {}
+        provided_data = payload.get('data') if isinstance(payload, dict) else None
+
+        def _run_async(coro):
+            try:
+                loop = asyncio.get_running_loop()
+                if loop and loop.is_running():
+                    new_loop = asyncio.new_event_loop()
+                    try:
+                        return new_loop.run_until_complete(coro)
+                    finally:
+                        new_loop.close()
+            except RuntimeError:
+                pass
+            return asyncio.run(coro)
+
+        def _safe_iso_date(value):
+            try:
+                return datetime.fromisoformat(value).date().isoformat()
+            except Exception:
+                return None
+
+        if provided_data and isinstance(provided_data, dict):
+            data = provided_data
+        else:
+            sales = datastore.get_by_field('sales', 'account_id', account_id) or []
+            products = datastore.get_by_field('products', 'account_id', account_id) or []
+            customers = datastore.get_by_field('customers', 'account_id', account_id) or []
+            users = datastore.get_by_field('users', 'account_id', account_id) or []
+            time_entries = datastore.get_by_field('time_tracking', 'account_id', account_id) or []
+
+            # Sales summary (last 60 records)
+            sales_summary = []
+            for sale in sales[-60:]:
+                sales_summary.append({
+                    'date': _safe_iso_date(sale.get('created_at', '')),
+                    'amount': sale.get('total', 0),
+                    'gross_profit': sale.get('gross_profit', 0),
+                    'cashier': sale.get('cashier_name') or sale.get('cashier_email')
+                })
+
+            inventory_status = [
+                {
+                    'id': p.get('id'),
+                    'name': p.get('name'),
+                    'category': p.get('category'),
+                    'current_stock': p.get('quantity', p.get('current_stock')),
+                    'reorder_level': p.get('reorder_level')
+                }
+                for p in products[:200]
+            ]
+
+            customer_patterns = {
+                'total_customers': len(customers),
+                'recent_customers': [
+                    {
+                        'id': c.get('id'),
+                        'name': c.get('name'),
+                        'email': c.get('email')
+                    }
+                    for c in customers[:50]
+                ]
+            }
+
+            cashier_activity = []
+            cashier_sales = {}
+            for sale in sales:
+                cashier = sale.get('cashier_name') or sale.get('cashier_email') or 'Unknown'
+                cashier_sales[cashier] = cashier_sales.get(cashier, 0) + 1
+            for cashier, count in cashier_sales.items():
+                cashier_activity.append({'cashier': cashier, 'sales_count': count})
+
+            data = {
+                'sales_summary': sales_summary,
+                'inventory_status': inventory_status,
+                'customer_patterns': customer_patterns,
+                'cashier_activity': cashier_activity,
+                'historical_trends': sales_summary,
+                'time_series': [
+                    {
+                        'cashier': t.get('cashier_name'),
+                        'date': _safe_iso_date(t.get('clock_in') or t.get('created_at') or ''),
+                        'duration_minutes': t.get('duration_minutes')
+                    }
+                    for t in time_entries[:100]
+                ],
+                'staff': [
+                    {
+                        'id': u.get('id'),
+                        'name': u.get('name'),
+                        'email': u.get('email'),
+                        'role': u.get('role')
+                    }
+                    for u in users if u.get('role') in ['cashier', 'admin', 'owner']
+                ]
+            }
+
+        try:
+            insights = _run_async(ai_service.generate_posifne_insights(data))
+            return ApiResponse.success(data={
+                'insights': insights,
+                'timestamp': ApiResponse.success().timestamp
+            }).to_dict(), 200
+        except Exception as e:
+            logger.exception("POSIFNE insights generation failed")
+            return ApiResponse.error(
+                message=f"Insights failed: {str(e)}"
             ).to_dict(), 500
     
     # ============================================================
