@@ -483,12 +483,58 @@ def create_app() -> Flask:
         # Fallback: allow existing main_admin user to authenticate if env credentials are missing
         if not owner_email or (not owner_hash and not owner_password):
             fallback_owner = datastore.get_user_by_email(email)
-            if not fallback_owner or fallback_owner.get("role") != "main_admin":
-                return jsonify({"error": "Main admin credentials not configured"}), 500
-            if not auth_controller.verify_password(password, fallback_owner.get("password_hash", "")):
-                _record_failed_login()
-                return jsonify({"error": "Access denied"}), 403
-            owner = fallback_owner
+            if fallback_owner and fallback_owner.get("role") == "main_admin":
+                if not auth_controller.verify_password(password, fallback_owner.get("password_hash", "")):
+                    _record_failed_login()
+                    return jsonify({"error": "Access denied"}), 403
+                owner = fallback_owner
+            else:
+                # Bootstrap only when no users exist (fresh system) to avoid hijack
+                existing_users = datastore.get_all("users")
+                if existing_users:
+                    return jsonify({"error": "Main admin credentials not configured"}), 401
+
+                account_id = f"acc_{uuid.uuid4().hex[:12]}"
+                account = {
+                    "id": account_id,
+                    "owner_email": email,
+                    "business_name": "Main Admin",
+                    "plan": "owner",
+                    "is_active": True,
+                    "is_locked": False,
+                    "trial_ends_at": None,
+                    "subscription_ends_at": None,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "business_logo": None,
+                    "currency": "KES",
+                    "tax_rate": 0.0,
+                    "screen_lock_password": "2005",
+                    "days_used": 0,
+                    "last_activity_date": None,
+                    "requested_trial": False,
+                    "business_type": "main_admin"
+                }
+                datastore.create("accounts", account)
+
+                password_hash = auth_controller.hash_password(password)
+                owner = datastore.create("users", {
+                    "account_id": account_id,
+                    "email": email,
+                    "password_hash": password_hash,
+                    "name": "Main Admin",
+                    "role": "main_admin",
+                    "pin": None,
+                    "cashier_pin": None,
+                    "is_active": True,
+                    "is_locked": False,
+                    "screen_locked": False,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "created_by": None,
+                    "last_login": None,
+                    "hourly_rate": 0.0,
+                    "business_type": "main_admin",
+                    "business_role": "main_admin"
+                })
         else:
             def _is_bcrypt_hash(value: str) -> bool:
                 return value.startswith("$2a$") or value.startswith("$2b$") or value.startswith("$2y$")
