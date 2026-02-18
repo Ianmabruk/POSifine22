@@ -479,27 +479,36 @@ def create_app() -> Flask:
         owner_email = os.environ.get("MAIN_ADMIN_EMAIL", "").strip().lower()
         owner_hash = os.environ.get("MAIN_ADMIN_HASH", "").strip()
         owner_password = os.environ.get("MAIN_ADMIN_PASSWORD", "").strip()
+
+        # Fallback: allow existing main_admin user to authenticate if env credentials are missing
         if not owner_email or (not owner_hash and not owner_password):
-            return jsonify({"error": "Main admin credentials not configured"}), 500
+            fallback_owner = datastore.get_user_by_email(email)
+            if not fallback_owner or fallback_owner.get("role") != "main_admin":
+                return jsonify({"error": "Main admin credentials not configured"}), 500
+            if not auth_controller.verify_password(password, fallback_owner.get("password_hash", "")):
+                _record_failed_login()
+                return jsonify({"error": "Access denied"}), 403
+            owner = fallback_owner
+        else:
+            def _is_bcrypt_hash(value: str) -> bool:
+                return value.startswith("$2a$") or value.startswith("$2b$") or value.startswith("$2y$")
 
-        def _is_bcrypt_hash(value: str) -> bool:
-            return value.startswith("$2a$") or value.startswith("$2b$") or value.startswith("$2y$")
+            def _password_valid(candidate: str) -> bool:
+                if owner_hash:
+                    if _is_bcrypt_hash(owner_hash):
+                        return auth_controller.verify_password(candidate, owner_hash)
+                    if not owner_password:
+                        return secrets.compare_digest(candidate, owner_hash)
+                if owner_password:
+                    return secrets.compare_digest(candidate, owner_password)
+                return False
 
-        def _password_valid(candidate: str) -> bool:
-            if owner_hash:
-                if _is_bcrypt_hash(owner_hash):
-                    return auth_controller.verify_password(candidate, owner_hash)
-                if not owner_password:
-                    return secrets.compare_digest(candidate, owner_hash)
-            if owner_password:
-                return secrets.compare_digest(candidate, owner_password)
-            return False
+            if email != owner_email or not _password_valid(password):
+                _record_failed_login()
+                return jsonify({"error": "Access denied"}), 403
 
-        if email != owner_email or not _password_valid(password):
-            _record_failed_login()
-            return jsonify({"error": "Access denied"}), 403
+            owner = datastore.get_user_by_email(email)
 
-        owner = datastore.get_user_by_email(email)
         if not owner:
             account = datastore.get_account_by_email(owner_email)
             if not account:
@@ -526,7 +535,7 @@ def create_app() -> Flask:
                 datastore.create("accounts", account)
             account_id = account.get("id")
 
-            if owner_hash and _is_bcrypt_hash(owner_hash):
+            if owner_hash and owner_hash.startswith(("$2a$", "$2b$", "$2y$")):
                 password_hash = owner_hash
             else:
                 password_hash = auth_controller.hash_password(owner_password or owner_hash)
