@@ -212,6 +212,40 @@ class DataStore:
                         created_at TEXT NOT NULL
                     )
                 """)
+
+                # Admin support messages
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS admin_support_messages (
+                        id TEXT PRIMARY KEY,
+                        account_id TEXT,
+                        admin_user_id INTEGER,
+                        admin_email TEXT,
+                        admin_name TEXT,
+                        subject TEXT,
+                        message TEXT,
+                        category TEXT,
+                        priority TEXT,
+                        status TEXT,
+                        response TEXT,
+                        responded_at TEXT,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+
+                # Email templates (main admin)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS email_templates (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        subject TEXT,
+                        text TEXT,
+                        html TEXT,
+                        created_by TEXT,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
                 
                 # Products table
                 cur.execute("""
@@ -646,7 +680,9 @@ class DataStore:
             'petroleum_tanks': os.path.join(self.data_dir, 'petroleum_tanks.json'),
             'petroleum_sales': os.path.join(self.data_dir, 'petroleum_sales.json'),
             'petroleum_staff': os.path.join(self.data_dir, 'petroleum_staff.json'),
-            'settings': os.path.join(self.data_dir, 'settings.json')
+            'settings': os.path.join(self.data_dir, 'settings.json'),
+            'admin_support_messages': os.path.join(self.data_dir, 'admin_support_messages.json'),
+            'email_templates': os.path.join(self.data_dir, 'email_templates.json')
         }
         
         # Initialize empty files

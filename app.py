@@ -13,6 +13,7 @@ import json
 import secrets
 from datetime import datetime
 import time
+import asyncio
 from typing import Dict, Any
 
 from dotenv import load_dotenv
@@ -36,6 +37,7 @@ from discounts_service_fees_controller import DiscountsController, ServiceFeesCo
 from business_routes import create_business_routes
 from ai_controller import create_ai_routes
 from message_routes import message_bp
+from notify_service import get_notification_service
 
 # Optional optimization imports - graceful fallback if not available
 try:
@@ -106,6 +108,7 @@ def create_app() -> Flask:
     admin_controller = AdminController(datastore, stock_engine)
     cashier_controller = CashierController(datastore, stock_engine)
     cache = CacheService()
+    notify_service = get_notification_service()
     
     # 🔥 NEW COMPREHENSIVE CONTROLLERS
     time_tracking = TimeTrackingController(datastore)
@@ -229,6 +232,19 @@ def create_app() -> Flask:
             })
         except Exception:
             pass
+
+    def _render_template(text: str | None, variables: Dict[str, Any] | None) -> str | None:
+        if not text:
+            return text
+        if not variables:
+            return text
+        rendered = text
+        for key, value in variables.items():
+            placeholder = f"{{{{{key}}}}}"
+            placeholder_spaced = f"{{{{ {key} }}}}"
+            rendered = rendered.replace(placeholder, str(value))
+            rendered = rendered.replace(placeholder_spaced, str(value))
+        return rendered
 
     def _safe_float(value: Any) -> float:
         try:
@@ -569,6 +585,15 @@ def create_app() -> Flask:
         all_users = datastore.get_all("users")
         accounts = {acc.get("id"): acc for acc in datastore.get_all("accounts")}
 
+        def _days_since(date_str: str | None) -> int | None:
+            if not date_str:
+                return None
+            try:
+                parsed = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                return (datetime.utcnow() - parsed).days
+            except Exception:
+                return None
+
         response = []
         for u in all_users:
             sanitized = dict(u)
@@ -583,6 +608,10 @@ def create_app() -> Flask:
                     sanitized["business_type"] = account.get("business_type")
                 if account.get("business_name") and not sanitized.get("business_name"):
                     sanitized["business_name"] = account.get("business_name")
+                billing_anchor = account.get("subscription_ends_at") or account.get("created_at")
+                days_since = _days_since(billing_anchor)
+                sanitized["days_since_plan_start"] = days_since
+                sanitized["billing_due"] = bool(days_since is not None and days_since >= 31 and (account.get("plan") or "free") not in ["free", "trial"])
             response.append(sanitized)
 
         return jsonify(response), 200
@@ -773,6 +802,237 @@ def create_app() -> Flask:
         user, error_response = _require_main_admin()
         if error_response:
             return error_response
+        data = request.get_json() or {}
+        user_ids = data.get("userIds") or []
+        direct_emails = data.get("emails") or []
+        template_id = data.get("templateId")
+        variables = data.get("variables") or {}
+
+        if not user_ids and not direct_emails:
+            return jsonify({"error": "Recipients are required"}), 400
+
+        template = None
+        if template_id:
+            template = datastore.get_by_id("email_templates", template_id)
+            if not template:
+                return jsonify({"error": "Template not found"}), 404
+
+        subject = data.get("subject") or (template.get("subject") if template else None)
+        text_message = data.get("message") or data.get("text") or (template.get("text") if template else None)
+        html_message = data.get("html") or (template.get("html") if template else None)
+
+        subject = _render_template(subject, variables)
+        text_message = _render_template(text_message, variables)
+        html_message = _render_template(html_message, variables)
+
+        if not subject or not (text_message or html_message):
+            return jsonify({"error": "Subject and message are required"}), 400
+
+        recipients = []
+        if user_ids:
+            for user_id in user_ids:
+                target = datastore.get_by_id("users", user_id)
+                if target and target.get("email"):
+                    recipients.append(target.get("email"))
+        recipients.extend([email for email in direct_emails if email])
+        recipients = list(dict.fromkeys(recipients))
+
+        if not recipients:
+            return jsonify({"error": "No valid recipient emails found"}), 400
+
+        if not notify_service.email_enabled:
+            return jsonify({"error": "Email service is not configured"}), 503
+
+        sent = []
+        failed = []
+        for recipient in recipients:
+            try:
+                success = asyncio.run(notify_service.send_email_alert(
+                    to=recipient,
+                    subject=subject,
+                    message=text_message or html_message,
+                    html=html_message
+                ))
+                if success:
+                    sent.append(recipient)
+                else:
+                    failed.append(recipient)
+            except Exception:
+                failed.append(recipient)
+
+        _log_audit("send_email", user, "email", {
+            "recipients": recipients,
+            "template_id": template_id,
+            "sent": len(sent),
+            "failed": len(failed)
+        })
+
+        return jsonify({
+            "success": len(failed) == 0,
+            "sent": sent,
+            "failed": failed
+        }), 200
+
+    @app.get("/api/main-admin/email-templates")
+    def main_admin_get_email_templates():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        templates = datastore.get_all("email_templates")
+        templates = sorted(templates, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify(templates), 200
+
+    @app.post("/api/main-admin/email-templates")
+    def main_admin_create_email_template():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "Template name is required"}), 400
+
+        now = datetime.utcnow().isoformat()
+        template = {
+            "id": f"tmpl_{uuid.uuid4().hex[:12]}",
+            "name": name,
+            "subject": data.get("subject") or "",
+            "text": data.get("text") or data.get("message") or "",
+            "html": data.get("html") or "",
+            "created_by": user.get("email"),
+            "created_at": now,
+            "updated_at": now
+        }
+        created = datastore.create("email_templates", template)
+        _log_audit("create_email_template", user, f"email_template:{created.get('id')}")
+        return jsonify(created), 201
+
+    @app.put("/api/main-admin/email-templates/<template_id>")
+    def main_admin_update_email_template(template_id: str):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        data = request.get_json() or {}
+        updates = {}
+        for field in ["name", "subject", "text", "html"]:
+            if field in data:
+                updates[field] = data.get(field)
+        if not updates:
+            return jsonify({"error": "No updates provided"}), 400
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        updated = datastore.update("email_templates", template_id, updates)
+        if not updated:
+            return jsonify({"error": "Template not found"}), 404
+        _log_audit("update_email_template", user, f"email_template:{template_id}")
+        return jsonify({"success": True}), 200
+
+    @app.delete("/api/main-admin/email-templates/<template_id>")
+    def main_admin_delete_email_template(template_id: str):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        deleted = datastore.delete("email_templates", template_id)
+        if not deleted:
+            return jsonify({"error": "Template not found"}), 404
+        _log_audit("delete_email_template", user, f"email_template:{template_id}")
+        return jsonify({"success": True}), 200
+
+    # ============================================================
+    # Admin Support Messaging (Admin -> Main Admin)
+    # ============================================================
+
+    @app.post("/api/admin-support/messages")
+    @auth_controller.require_auth
+    def admin_support_send_message():
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can send support messages"}), 403
+
+        data = request.get_json() or {}
+        subject = (data.get("subject") or "").strip()
+        message = (data.get("message") or data.get("content") or "").strip()
+        if not subject or not message:
+            return jsonify({"error": "Subject and message are required"}), 400
+
+        now = datetime.utcnow().isoformat()
+        record = {
+            "id": f"support_{uuid.uuid4().hex[:12]}",
+            "account_id": request.user.get("account_id"),
+            "admin_user_id": request.user.get("id"),
+            "admin_email": request.user.get("email"),
+            "admin_name": (g.user or {}).get("name") or request.user.get("email"),
+            "subject": subject,
+            "message": message,
+            "category": data.get("category") or "general",
+            "priority": data.get("priority") or "normal",
+            "status": "open",
+            "response": None,
+            "responded_at": None,
+            "created_at": now,
+            "updated_at": now
+        }
+        created = datastore.create("admin_support_messages", record)
+        _log_activity("admin_support_message", request.user.get("account_id"), request.user.get("id"), {
+            "priority": record.get("priority"),
+            "category": record.get("category")
+        })
+        return jsonify(created), 201
+
+    @app.get("/api/admin-support/messages")
+    @auth_controller.require_auth
+    def admin_support_get_messages():
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can view support messages"}), 403
+
+        account_id = request.user.get("account_id")
+        messages = datastore.get_by_field("admin_support_messages", "account_id", account_id)
+        messages = sorted(messages, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify({"messages": messages}), 200
+
+    @app.post("/api/admin-support/messages/<message_id>/close")
+    @auth_controller.require_auth
+    def admin_support_close_message(message_id: str):
+        if request.user.get("role") not in ["admin", "owner"]:
+            return jsonify({"error": "Only admins can close support messages"}), 403
+
+        updated = datastore.update("admin_support_messages", message_id, {
+            "status": "closed",
+            "updated_at": datetime.utcnow().isoformat()
+        })
+        if not updated:
+            return jsonify({"error": "Message not found"}), 404
+        return jsonify({"success": True}), 200
+
+    @app.get("/api/main-admin/support/messages")
+    def main_admin_support_messages():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        messages = datastore.get_all("admin_support_messages")
+        status = request.args.get("status")
+        if status:
+            messages = [msg for msg in messages if msg.get("status") == status]
+        messages = sorted(messages, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify({"messages": messages}), 200
+
+    @app.post("/api/main-admin/support/messages/<message_id>/reply")
+    def main_admin_support_reply(message_id: str):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        data = request.get_json() or {}
+        response_message = (data.get("response") or data.get("message") or "").strip()
+        if not response_message:
+            return jsonify({"error": "Response message is required"}), 400
+
+        updated = datastore.update("admin_support_messages", message_id, {
+            "response": response_message,
+            "status": "responded",
+            "responded_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        })
+        if not updated:
+            return jsonify({"error": "Message not found"}), 404
+        _log_audit("support_reply", user, f"support_message:{message_id}")
         return jsonify({"success": True}), 200
 
     # ============================================================
@@ -857,6 +1117,8 @@ def create_app() -> Flask:
         }
 
         extra_fields = {k: data.get(k) for k in allowed_fields if k in data}
+        if "cost_per_unit" not in extra_fields and data.get("cost") is not None:
+            extra_fields["cost_per_unit"] = data.get("cost")
         if "enable_weight_pricing" in extra_fields:
             extra_fields["enable_weight_pricing"] = bool(extra_fields.get("enable_weight_pricing"))
         for float_field in ("reorder_level", "max_stock_level", "cost_per_unit"):
@@ -910,6 +1172,8 @@ def create_app() -> Flask:
         }
 
         updates = {k: data.get(k) for k in allowed_fields if k in data}
+        if "cost" in updates and "cost_per_unit" not in updates:
+            updates["cost_per_unit"] = updates.get("cost")
         if "is_composite" not in updates and "isComposite" in data:
             updates["is_composite"] = bool(data.get("isComposite"))
         if "enable_weight_pricing" in updates:
