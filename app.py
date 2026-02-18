@@ -50,7 +50,7 @@ except ImportError:
     OPTIMIZATIONS_AVAILABLE = False
     print("Optimization modules not available - running in basic mode")
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
