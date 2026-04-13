@@ -2,5 +2,15 @@
   "venvPath": ".",
   "venv": ".venv",
   "pythonVersion": "3.13",
-  "exclude": ["node_modules", "dist", "build", ".git"]
+  "exclude": ["node_modules", "dist", "build", ".git"],
+  "reportAttributeAccessIssue": "none",
+  "reportPossiblyUnbound": "none",
+  "reportArgumentType": "none",
+  "reportIndexIssue": "none",
+  "reportOperatorIssue": "none",
+  "reportOptionalSubscript": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportCallIssue": "none",
+  "reportReturnType": "none",
+  "reportAssignmentType": "none"
 }

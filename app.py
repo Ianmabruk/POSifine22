@@ -40,6 +40,17 @@ from message_routes import message_bp
 from notify_service import get_notification_service
 
 # Optional optimization imports - graceful fallback if not available
+DatabaseOptimizer: Any = None
+CacheManager: Any = None
+SessionCache: Any = None
+cache_api_response: Any = None
+SecurityManager: Any = None
+require_csrf: Any = None
+validate_json: Any = None
+PerformanceMonitor: Any = None
+UserAnalytics: Any = None
+ErrorTracker: Any = None
+
 try:
     from database_optimizer import DatabaseOptimizer
     from cache_manager import CacheManager, SessionCache, cache_api_response

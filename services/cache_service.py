@@ -12,8 +12,8 @@ except Exception:
 
 class CacheService:
     def __init__(self):
-        self.enabled = False
-        self.client = None
+        self.enabled: bool = False
+        self.client: Any = None  # Redis client when connected, None otherwise
         redis_url = os.environ.get("REDIS_URL")
         if redis and redis_url:
             try:
