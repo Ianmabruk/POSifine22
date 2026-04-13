@@ -55,10 +55,19 @@ def create_app() -> Flask:
 
     runtime_env = (os.environ.get("NODE_ENV") or os.environ.get("FLASK_ENV") or "").strip().lower()
     is_production = runtime_env in {"production", "prod"}
-    configured_secret = os.environ.get("JWT_SECRET") or os.environ.get("SECRET_KEY")
+    configured_secret = (
+        os.environ.get("JWT_SECRET")
+        or os.environ.get("SECRET_KEY")
+        or os.environ.get("FLASK_SECRET_KEY")
+        or os.environ.get("APP_SECRET_KEY")
+        or os.environ.get("SESSION_SECRET")
+    )
     if not configured_secret:
         if is_production:
-            raise RuntimeError("JWT_SECRET or SECRET_KEY must be set in production")
+            raise RuntimeError(
+                "A production app secret is required. Set one of: "
+                "JWT_SECRET, SECRET_KEY, FLASK_SECRET_KEY, APP_SECRET_KEY, SESSION_SECRET"
+            )
         configured_secret = "dev-secret-change-me"
     auth_cookie_samesite = os.environ.get("AUTH_COOKIE_SAMESITE", "None" if is_production else "Lax").strip().title()
     if auth_cookie_samesite not in {"Lax", "Strict", "None"}:
