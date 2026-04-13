@@ -1773,6 +1773,8 @@ def create_app() -> Flask:
             "class_name": class_name,
             "parent_name": data.get("parentName") or data.get("parent_name") or "",
             "parent_phone": data.get("parentPhone") or data.get("parent_phone") or "",
+            "student_image": data.get("studentImage") or data.get("student_image") or "",
+            "id_image": data.get("idImage") or data.get("id_image") or "",
             "notes": data.get("notes") or "",
             "created_by": created_by,
             "created_at": datetime.utcnow().isoformat()

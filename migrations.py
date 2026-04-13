@@ -206,6 +206,9 @@ def run_migrations():
                     );
                     CREATE INDEX IF NOT EXISTS idx_students_account ON students(account_id);
 
+                    ALTER TABLE students ADD COLUMN IF NOT EXISTS student_image TEXT;
+                    ALTER TABLE students ADD COLUMN IF NOT EXISTS id_image TEXT;
+
                     CREATE TABLE IF NOT EXISTS fee_payments (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,

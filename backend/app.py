@@ -985,6 +985,8 @@ def create_app() -> Flask:
         }
 
         extra_fields = {k: data.get(k) for k in allowed_fields if k in data}
+        if "cost_per_unit" not in extra_fields and data.get("cost") is not None:
+            extra_fields["cost_per_unit"] = data.get("cost")
         if "enable_weight_pricing" in extra_fields:
             extra_fields["enable_weight_pricing"] = bool(extra_fields.get("enable_weight_pricing"))
         for float_field in ("reorder_level", "max_stock_level", "cost_per_unit"):
@@ -1038,6 +1040,8 @@ def create_app() -> Flask:
         }
 
         updates = {k: data.get(k) for k in allowed_fields if k in data}
+        if "cost" in updates and "cost_per_unit" not in updates:
+            updates["cost_per_unit"] = updates.get("cost")
         if "is_composite" not in updates and "isComposite" in data:
             updates["is_composite"] = bool(data.get("isComposite"))
         if "enable_weight_pricing" in updates:
