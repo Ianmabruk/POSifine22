@@ -1570,15 +1570,19 @@ def create_app() -> Flask:
         if "enable_weight_pricing" in extra_fields:
             extra_fields["enable_weight_pricing"] = bool(extra_fields.get("enable_weight_pricing"))
         for float_field in ("reorder_level", "max_stock_level", "cost_per_unit"):
-            if float_field in extra_fields:
+            if float_field in extra_fields and extra_fields.get(float_field) != "":
                 extra_fields[float_field] = _safe_float(extra_fields.get(float_field))
+
+        resolved_cost = data.get("cost")
+        if (resolved_cost is None or resolved_cost == "") and extra_fields.get("cost_per_unit") is not None:
+            resolved_cost = extra_fields.get("cost_per_unit")
 
         success, error, product = admin_controller.create_product(
             account_id=account_id,
             created_by=created_by,
             name=data.get("name"),
             price=data.get("price", 0),
-            cost=data.get("cost", 0),
+            cost=resolved_cost if resolved_cost not in (None, "") else 0,
             quantity=data.get("quantity", 0),
             category=data.get("category", "general"),
             unit=data.get("unit", "pcs"),
@@ -1620,8 +1624,16 @@ def create_app() -> Flask:
         }
 
         updates = {k: data.get(k) for k in allowed_fields if k in data}
+
+        # Ignore blank numeric fields during partial updates to avoid accidental zero-overwrites.
+        for numeric_field in ("price", "cost", "quantity", "reorder_level", "max_stock_level", "cost_per_unit"):
+            if numeric_field in updates and updates.get(numeric_field) == "":
+                updates.pop(numeric_field, None)
+
         if "cost" in updates and "cost_per_unit" not in updates:
             updates["cost_per_unit"] = updates.get("cost")
+        if "cost_per_unit" in updates and "cost" not in updates:
+            updates["cost"] = updates.get("cost_per_unit")
         if "is_composite" not in updates and "isComposite" in data:
             updates["is_composite"] = bool(data.get("isComposite"))
         if "enable_weight_pricing" in updates:
