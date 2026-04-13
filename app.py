@@ -465,103 +465,45 @@ def create_app() -> Flask:
 
     @app.post("/api/main-admin/auth/login")
     def main_admin_login():
-        is_limited, retry_after = _is_rate_limited()
-        if is_limited:
-            return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
+        def _is_dev_mode_enabled() -> bool:
+            node_env = os.environ.get("NODE_ENV", "").strip().lower()
+            admin_dev_mode = os.environ.get("ADMIN_DEV_MODE", "").strip().lower()
+            return node_env == "development" or admin_dev_mode in {"1", "true", "yes", "on"}
 
-        data = request.get_json() or {}
-        email = (data.get("email") or "").strip().lower()
-        password = (data.get("password") or "").strip()
+        def _is_bcrypt_hash(value: str) -> bool:
+            return value.startswith("$2a$") or value.startswith("$2b$") or value.startswith("$2y$")
 
-        if not email or not password:
-            return jsonify({"error": "Email and password required"}), 400
+        def _log_failed_main_admin_login(email_value: str, reason: str, status_code: int = 403):
+            _record_failed_login()
+            _log_activity("main_admin_login_failed", None, None, {
+                "email": email_value,
+                "reason": reason,
+                "status_code": status_code,
+                "user_agent": request.headers.get("User-Agent", "")
+            })
+            return jsonify({"error": "Access denied"}), status_code
 
-        owner_email = os.environ.get("MAIN_ADMIN_EMAIL", "").strip().lower()
-        owner_hash = os.environ.get("MAIN_ADMIN_HASH", "").strip()
-        owner_password = os.environ.get("MAIN_ADMIN_PASSWORD", "").strip()
-
-        # Fallback: allow existing main_admin user to authenticate if env credentials are missing
-        if not owner_email or (not owner_hash and not owner_password):
-            fallback_owner = datastore.get_user_by_email(email)
-            if fallback_owner and fallback_owner.get("role") == "main_admin":
-                if not auth_controller.verify_password(password, fallback_owner.get("password_hash", "")):
-                    _record_failed_login()
-                    return jsonify({"error": "Access denied"}), 403
-                owner = fallback_owner
-            else:
-                # Bootstrap only when no users exist (fresh system) to avoid hijack
-                existing_users = datastore.get_all("users")
-                if existing_users:
-                    return jsonify({"error": "Main admin credentials not configured"}), 401
-
-                account_id = f"acc_{uuid.uuid4().hex[:12]}"
-                account = {
-                    "id": account_id,
-                    "owner_email": email,
-                    "business_name": "Main Admin",
-                    "plan": "owner",
-                    "is_active": True,
-                    "is_locked": False,
-                    "trial_ends_at": None,
-                    "subscription_ends_at": None,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "business_logo": None,
-                    "currency": "KES",
-                    "tax_rate": 0.0,
-                    "screen_lock_password": "2005",
-                    "days_used": 0,
-                    "last_activity_date": None,
-                    "requested_trial": False,
-                    "business_type": "main_admin"
-                }
-                datastore.create("accounts", account)
-
-                password_hash = auth_controller.hash_password(password)
-                owner = datastore.create("users", {
-                    "account_id": account_id,
-                    "email": email,
-                    "password_hash": password_hash,
-                    "name": "Main Admin",
+        def _ensure_main_admin_user(email_value: str, password_hash: str, display_name: str = "Main Admin"):
+            owner_user = datastore.get_user_by_email(email_value)
+            if owner_user:
+                update_data = {
                     "role": "main_admin",
-                    "pin": None,
-                    "cashier_pin": None,
+                    "business_role": "main_admin",
+                    "business_type": "main_admin",
                     "is_active": True,
                     "is_locked": False,
-                    "screen_locked": False,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "created_by": None,
-                    "last_login": None,
-                    "hourly_rate": 0.0,
-                    "business_type": "main_admin",
-                    "business_role": "main_admin"
-                })
-        else:
-            def _is_bcrypt_hash(value: str) -> bool:
-                return value.startswith("$2a$") or value.startswith("$2b$") or value.startswith("$2y$")
+                }
+                if password_hash:
+                    update_data["password_hash"] = password_hash
+                datastore.update("users", owner_user.get("id"), update_data, owner_user.get("account_id"))
+                return datastore.get_user_by_email(email_value) or owner_user
 
-            def _password_valid(candidate: str) -> bool:
-                if owner_hash:
-                    if _is_bcrypt_hash(owner_hash):
-                        return auth_controller.verify_password(candidate, owner_hash)
-                    if not owner_password:
-                        return secrets.compare_digest(candidate, owner_hash)
-                if owner_password:
-                    return secrets.compare_digest(candidate, owner_password)
-                return False
-
-            if email != owner_email or not _password_valid(password):
-                _record_failed_login()
-                return jsonify({"error": "Access denied"}), 403
-
-            owner = datastore.get_user_by_email(email)
-
-        if not owner:
-            account = datastore.get_account_by_email(owner_email)
+            account = datastore.get_account_by_email(email_value)
             if not account:
                 account_id = f"acc_{uuid.uuid4().hex[:12]}"
                 account = {
                     "id": account_id,
-                    "owner_email": owner_email,
+                    "owner_email": email_value,
                     "business_name": "Main Admin",
                     "plan": "owner",
                     "is_active": True,
@@ -579,18 +521,12 @@ def create_app() -> Flask:
                     "business_type": "main_admin"
                 }
                 datastore.create("accounts", account)
-            account_id = account.get("id")
 
-            if owner_hash and owner_hash.startswith(("$2a$", "$2b$", "$2y$")):
-                password_hash = owner_hash
-            else:
-                password_hash = auth_controller.hash_password(owner_password or owner_hash)
-
-            owner = datastore.create("users", {
-                "account_id": account_id,
-                "email": owner_email,
+            return datastore.create("users", {
+                "account_id": account.get("id"),
+                "email": email_value,
                 "password_hash": password_hash,
-                "name": "Main Admin",
+                "name": display_name,
                 "role": "main_admin",
                 "pin": None,
                 "cashier_pin": None,
@@ -604,9 +540,50 @@ def create_app() -> Flask:
                 "business_type": "main_admin",
                 "business_role": "main_admin"
             })
-        elif owner.get("role") != "main_admin":
-            datastore.update("users", owner.get("id"), {"role": "main_admin", "business_role": "main_admin"}, owner.get("account_id"))
+
+        is_limited, retry_after = _is_rate_limited()
+        if is_limited:
+            return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
+
+        data = request.get_json() or {}
+        email = (data.get("email") or "").strip().lower()
+        password = (data.get("password") or "").strip()
+
+        if not email or not password:
+            return jsonify({"error": "Email and password required"}), 400
+
+        owner = None
+        if _is_dev_mode_enabled():
+            dev_email = (os.environ.get("DEV_ADMIN_EMAIL") or "").strip().lower()
+            dev_hash = (os.environ.get("DEV_ADMIN_HASH") or "").strip()
+            dev_password = (os.environ.get("DEV_ADMIN_PASSWORD") or "").strip()
+
+            if dev_email and (dev_hash or dev_password):
+                password_matches = False
+                if email == dev_email:
+                    if dev_hash and _is_bcrypt_hash(dev_hash):
+                        password_matches = auth_controller.verify_password(password, dev_hash)
+                    elif dev_password:
+                        password_matches = secrets.compare_digest(password, dev_password)
+
+                if password_matches:
+                    persisted_hash = dev_hash if dev_hash and _is_bcrypt_hash(dev_hash) else auth_controller.hash_password(dev_password)
+                    owner = _ensure_main_admin_user(dev_email, persisted_hash, "Development Admin")
+                elif email == dev_email:
+                    return _log_failed_main_admin_login(email, "invalid_dev_credentials")
+
+        if not owner:
             owner = datastore.get_user_by_email(email)
+            if not owner:
+                return _log_failed_main_admin_login(email, "user_not_found")
+            if owner.get("role") != "main_admin":
+                return _log_failed_main_admin_login(email, "role_not_allowed")
+            if not owner.get("is_active", True) or owner.get("is_locked"):
+                return _log_failed_main_admin_login(email, "account_blocked")
+
+            password_hash = owner.get("password_hash", "")
+            if not password_hash or not auth_controller.verify_password(password, password_hash):
+                return _log_failed_main_admin_login(email, "invalid_password")
 
         now_iso = datetime.utcnow().isoformat()
         datastore.update("users", owner.get("id"), {"last_login": now_iso}, owner.get("account_id"))
@@ -678,6 +655,23 @@ def create_app() -> Flask:
             return error_response
 
         data = request.get_json() or {}
+        plan_value = str(data.get("plan") or "free").lower()
+        plan_limits = {
+            "basic": 10,
+            "ultra": 10
+        }
+        plan_limit = plan_limits.get(plan_value)
+        if plan_limit is not None:
+            all_users = datastore.get_all("users") or []
+            users_on_plan = 0
+            for candidate in all_users:
+                account = datastore.get_by_id("accounts", candidate.get("account_id"))
+                candidate_plan = str((account or {}).get("plan") or "free").lower()
+                if candidate_plan == plan_value:
+                    users_on_plan += 1
+            if users_on_plan >= plan_limit:
+                return jsonify({"error": f"{plan_value.title()} plan supports a maximum of {plan_limit} users"}), 403
+
         success, error, result = auth_controller.signup(
             email=data.get("email"),
             password=data.get("password"),

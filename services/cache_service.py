@@ -1,10 +1,11 @@
 import json
+import importlib
 import os
 import time
 from typing import Any, Optional
 
 try:
-    import redis
+    redis = importlib.import_module("redis")
 except Exception:
     redis = None
 

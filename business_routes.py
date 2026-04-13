@@ -231,6 +231,18 @@ def create_business_routes(datastore, auth_controller):
             is_pro_plan = plan in ['pro', 'custom', 'pro_petroleum', 'pro-petroleum', 'propetroleum', '3000', '3400']
             if not account or not is_pro_plan:
                 return jsonify({'error': 'Business users are only available for Pro and Custom plans'}), 403
+
+            # Enforce user limits for plan governance consistency.
+            # Basic/Ultra are capped at 10 users per account.
+            plan_limits = {
+                'basic': 10,
+                'ultra': 10
+            }
+            plan_limit = plan_limits.get(plan)
+            if plan_limit is not None:
+                existing_users = datastore.find('users', {'account_id': account_id}) or []
+                if len(existing_users) >= plan_limit:
+                    return jsonify({'error': f'{plan.title()} plan supports a maximum of {plan_limit} users'}), 403
             
             # Get admin's business type
             admin_business_type = admin_user.get('business_type')
