@@ -40,11 +40,19 @@ class AdminController:
             return False, "Product name is required", None
 
         now = datetime.utcnow().isoformat()
+        # Keep both cost fields synchronized at creation time.
+        base_cost = float(cost or 0.0)
+        base_cost_per_unit = extra_fields.get("cost_per_unit")
+        try:
+            base_cost_per_unit = float(base_cost_per_unit) if base_cost_per_unit is not None else base_cost
+        except (TypeError, ValueError):
+            base_cost_per_unit = base_cost
+
         product_data = {
             "account_id": account_id,
             "name": name,
             "price": float(price),
-            "cost": float(cost or 0.0),
+            "cost": base_cost,
             "quantity": float(quantity or 0.0),
             "category": category or "general",
             "unit": unit or "pcs",
@@ -56,7 +64,7 @@ class AdminController:
             "updated_at": None,
             "reorder_level": float(extra_fields.get("reorder_level") or 0.0),
             "max_stock_level": float(extra_fields.get("max_stock_level") or 0.0),
-            "cost_per_unit": float(extra_fields.get("cost_per_unit") or 0.0),
+            "cost_per_unit": base_cost_per_unit,
             "enable_weight_pricing": bool(extra_fields.get("enable_weight_pricing") or False),
             "barcode": extra_fields.get("barcode"),
             "sku": extra_fields.get("sku"),

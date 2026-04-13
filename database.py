@@ -643,6 +643,38 @@ class DataStore:
                     logger.info("✅ Migration: Added business_type and business_role columns to users table")
                 except Exception as e:
                     logger.warning(f"Migration warning (may be normal if columns exist): {e}")
+
+                # Ensure products table has newer fields used by API/controllers.
+                try:
+                    cur.execute("""
+                        ALTER TABLE products
+                        ADD COLUMN IF NOT EXISTS image TEXT,
+                        ADD COLUMN IF NOT EXISTS barcode TEXT,
+                        ADD COLUMN IF NOT EXISTS sku TEXT,
+                        ADD COLUMN IF NOT EXISTS reorder_level REAL DEFAULT 0.0,
+                        ADD COLUMN IF NOT EXISTS max_stock_level REAL DEFAULT 0.0,
+                        ADD COLUMN IF NOT EXISTS cost_per_unit REAL DEFAULT 0.0,
+                        ADD COLUMN IF NOT EXISTS enable_weight_pricing BOOLEAN DEFAULT FALSE,
+                        ADD COLUMN IF NOT EXISTS updated_at TEXT
+                    """)
+                    logger.info("✅ Migration: Ensured extended products columns exist")
+                except Exception as e:
+                    logger.warning(f"Migration warning for products columns: {e}")
+
+                # Ensure expenses table has linking/source fields used by auto-COGS code.
+                try:
+                    cur.execute("""
+                        ALTER TABLE expenses
+                        ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual',
+                        ADD COLUMN IF NOT EXISTS linked_product_id INTEGER,
+                        ADD COLUMN IF NOT EXISTS linked_raw_material_id INTEGER,
+                        ADD COLUMN IF NOT EXISTS linked_sale_id INTEGER,
+                        ADD COLUMN IF NOT EXISTS description TEXT,
+                        ADD COLUMN IF NOT EXISTS created_by INTEGER
+                    """)
+                    logger.info("✅ Migration: Ensured extended expenses columns exist")
+                except Exception as e:
+                    logger.warning(f"Migration warning for expenses columns: {e}")
                 
                 conn.commit()
     
