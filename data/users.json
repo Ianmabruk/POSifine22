@@ -1035,5 +1035,24 @@
     "business_type": "hospital",
     "business_role": "admin",
     "id": 50
+  },
+  {
+    "account_id": "acc_5f796904dc4e",
+    "email": "admin@posifne.com",
+    "password_hash": "$2b$12$fFGR.zg2NEv64EGd8kvd0ewc3BQdVOa8frP83S42ThipJGRaB6uPq",
+    "name": "Main Admin",
+    "role": "main_admin",
+    "pin": null,
+    "cashier_pin": null,
+    "is_active": true,
+    "is_locked": false,
+    "screen_locked": false,
+    "created_at": "2026-02-18T08:33:07.101303",
+    "created_by": null,
+    "last_login": "2026-02-18T08:33:07.110656",
+    "hourly_rate": 0.0,
+    "business_type": "main_admin",
+    "business_role": "main_admin",
+    "id": 51
   }
 ]
