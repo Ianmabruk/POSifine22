@@ -1484,6 +1484,24 @@ def create_app() -> Flask:
             cache.delete(f"cache:products:{account_id}")
         return jsonify(product), 200
 
+    @app.delete("/api/products/<int:product_id>")
+    @auth_controller.require_auth
+    def delete_product(product_id: int):
+        account_id = request.user.get("account_id")
+
+        existing = datastore.get_by_id("products", product_id, account_id)
+        if not existing:
+            return jsonify({"error": "Product not found"}), 404
+
+        success, error = admin_controller.delete_product(product_id, account_id)
+        if not success:
+            return jsonify({"error": error or "Failed to delete product"}), 400
+
+        sync_manager.broadcast_product_update(account_id, existing, action='deleted')
+        if cache.enabled:
+            cache.delete(f"cache:products:{account_id}")
+        return jsonify({"message": "Product deleted successfully"}), 200
+
     @app.get("/api/products/low-stock-warnings")
     @auth_controller.require_auth
     def get_low_stock_warnings():
