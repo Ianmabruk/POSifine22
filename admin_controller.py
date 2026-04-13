@@ -78,6 +78,12 @@ class AdminController:
         if not updates:
             return False, "No updates provided", None
 
+        # Keep both cost fields in sync regardless of which one the client sends.
+        if "cost" in updates and "cost_per_unit" not in updates:
+            updates["cost_per_unit"] = updates.get("cost")
+        if "cost_per_unit" in updates and "cost" not in updates:
+            updates["cost"] = updates.get("cost_per_unit")
+
         updates["updated_at"] = datetime.utcnow().isoformat()
         success = self.datastore.update("products", product_id, updates, account_id)
         if not success:

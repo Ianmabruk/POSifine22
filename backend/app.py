@@ -527,6 +527,182 @@ def create_app() -> Flask:
         return jsonify(response_user), 200
 
     # ============================================================
+    # Account User Management (Admin/Cashier Management)
+    # ============================================================
+
+    def _require_account_admin():
+        current = request.user
+        if current.get("role") not in {"admin", "main_admin", "owner"}:
+            return None, (jsonify({"error": "Admin access required"}), 403)
+        return current, None
+
+    @app.get("/api/users")
+    @auth_controller.require_auth
+    def get_users():
+        account_id = request.user.get("account_id")
+        users = datastore.get_all("users", account_id)
+        response = []
+        for u in users:
+            sanitized = dict(u)
+            sanitized.pop("password_hash", None)
+            response.append(sanitized)
+        return jsonify(response), 200
+
+    @app.post("/api/users")
+    @auth_controller.require_auth
+    def create_user():
+        current, error_response = _require_account_admin()
+        if error_response:
+            return error_response
+
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip()
+        email = (data.get("email") or "").strip().lower()
+        password = (data.get("password") or "").strip()
+
+        if not name or not email or not password:
+            return jsonify({"error": "Name, email, and password are required"}), 400
+
+        existing = datastore.get_user_by_email(email)
+        if existing and existing.get("account_id") == current.get("account_id"):
+            return jsonify({"error": "User with this email already exists"}), 400
+
+        pin_value = (data.get("cashier_pin") or data.get("cashierPIN") or data.get("pin") or "").strip() or None
+        role_value = (data.get("role") or "cashier").strip().lower()
+
+        user_payload = {
+            "account_id": current.get("account_id"),
+            "email": email,
+            "password_hash": auth_controller.hash_password(password),
+            "name": name,
+            "role": role_value,
+            "pin": pin_value,
+            "cashier_pin": pin_value,
+            "is_active": True,
+            "is_locked": False,
+            "screen_locked": False,
+            "created_at": datetime.utcnow().isoformat(),
+            "created_by": current.get("id"),
+            "last_login": None,
+            "hourly_rate": 0.0,
+            "business_type": data.get("businessType") or data.get("business_type") or current.get("business_type"),
+            "business_role": data.get("businessRole") or data.get("business_role") or role_value,
+            "profile_picture": data.get("profilePicture") or data.get("profile_picture")
+        }
+
+        created = datastore.create("users", user_payload)
+        created.pop("password_hash", None)
+        return jsonify(created), 201
+
+    @app.put("/api/users/<int:user_id>")
+    @auth_controller.require_auth
+    def update_user(user_id: int):
+        current, error_response = _require_account_admin()
+        if error_response:
+            return error_response
+
+        target = datastore.get_by_id("users", user_id, current.get("account_id"))
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+
+        data = request.get_json() or {}
+        updates = {}
+
+        if "name" in data:
+            updates["name"] = (data.get("name") or "").strip()
+        if "email" in data:
+            updates["email"] = (data.get("email") or "").strip().lower()
+        if "permissions" in data:
+            updates["permissions"] = data.get("permissions") or {}
+        if "password" in data and data.get("password"):
+            updates["password_hash"] = auth_controller.hash_password(str(data.get("password")))
+
+        pin_value = data.get("cashierPIN") or data.get("cashier_pin") or data.get("pin")
+        if pin_value is not None:
+            pin_text = str(pin_value).strip()
+            updates["pin"] = pin_text
+            updates["cashier_pin"] = pin_text
+
+        if "active" in data:
+            updates["is_active"] = bool(data.get("active"))
+        if "locked" in data:
+            updates["is_locked"] = bool(data.get("locked"))
+        if "role" in data:
+            updates["role"] = str(data.get("role") or target.get("role") or "cashier").strip().lower()
+        if "businessType" in data or "business_type" in data:
+            updates["business_type"] = data.get("businessType") or data.get("business_type")
+        if "businessRole" in data or "business_role" in data:
+            updates["business_role"] = data.get("businessRole") or data.get("business_role")
+        if "profilePicture" in data or "profile_picture" in data:
+            updates["profile_picture"] = data.get("profilePicture") or data.get("profile_picture")
+
+        if not updates:
+            return jsonify({"error": "No updates provided"}), 400
+
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        success = datastore.update("users", user_id, updates, current.get("account_id"))
+        if not success:
+            return jsonify({"error": "Failed to update user"}), 400
+
+        updated = datastore.get_by_id("users", user_id, current.get("account_id")) or target
+        updated.pop("password_hash", None)
+        return jsonify(updated), 200
+
+    @app.delete("/api/users/<int:user_id>")
+    @auth_controller.require_auth
+    def delete_user(user_id: int):
+        current, error_response = _require_account_admin()
+        if error_response:
+            return error_response
+
+        if user_id == current.get("id"):
+            return jsonify({"error": "You cannot delete your own account"}), 400
+
+        target = datastore.get_by_id("users", user_id, current.get("account_id"))
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+
+        success = datastore.delete("users", user_id, current.get("account_id"))
+        if not success:
+            return jsonify({"error": "Failed to delete user"}), 400
+        return jsonify({"message": "User deleted successfully"}), 200
+
+    @app.post("/api/users/<int:user_id>/lock")
+    @auth_controller.require_auth
+    def lock_user(user_id: int):
+        current, error_response = _require_account_admin()
+        if error_response:
+            return error_response
+
+        data = request.get_json() or {}
+        locked = bool(data.get("locked", False))
+        success = datastore.update("users", user_id, {
+            "is_locked": locked,
+            "is_active": not locked,
+            "updated_at": datetime.utcnow().isoformat()
+        }, current.get("account_id"))
+        if not success:
+            return jsonify({"error": "User not found"}), 404
+        return jsonify({"message": "User lock status updated"}), 200
+
+    @app.post("/api/users/<int:user_id>/activate")
+    @auth_controller.require_auth
+    def activate_user(user_id: int):
+        current, error_response = _require_account_admin()
+        if error_response:
+            return error_response
+
+        data = request.get_json() or {}
+        is_active = bool(data.get("active", True))
+        success = datastore.update("users", user_id, {
+            "is_active": is_active,
+            "updated_at": datetime.utcnow().isoformat()
+        }, current.get("account_id"))
+        if not success:
+            return jsonify({"error": "User not found"}), 404
+        return jsonify({"message": "User active status updated"}), 200
+
+    # ============================================================
     # Main Admin (Owner)
     # ============================================================
 
