@@ -458,7 +458,7 @@ class StockEngine:
                 sale = self.ds.create('sales', sale_data)
             
             # Step 5: Create expense records for ingredients
-            self._create_auto_expenses(deduction_plan, account_id, sale['id'])
+            self._create_auto_expenses(deduction_plan, account_id, sale['id'], sale_items)
             
             # Log performance
             elapsed = (datetime.now() - start_time).total_seconds() * 1000
@@ -470,22 +470,26 @@ class StockEngine:
             logger.error(f"Error executing sale: {e}")
             return False, f"Sale execution error: {str(e)}", None
     
-    def _create_auto_expenses(self, deduction_plan: Dict, account_id: str, sale_id: int):
+    def _create_auto_expenses(self, deduction_plan: Dict, account_id: str, sale_id: int, sale_items: list = None):
         """
-        Create automatic expense records for ingredient usage
-        
+        Create automatic expense records for ingredient usage and COGS for regular products.
+
         Args:
             deduction_plan: Deduction plan from validation
             account_id: Account ID
             sale_id: Created sale ID
+            sale_items: Computed sale items with per-item cost (from execute_sale)
         """
         try:
             product_map = deduction_plan['product_map']
             raw_material_map = deduction_plan.get('raw_material_map', {})
-            
+            # Track composite product IDs so we don't double-count their top-level cost
+            composite_product_ids = set()
+
             for detail in deduction_plan['details']:
                 # Only create expenses for ingredients (not final products)
                 if 'parent_product' in detail:
+                    composite_product_ids.add(detail.get('product_id') or detail.get('raw_material_id'))
                     if detail.get('type') == 'raw_material':
                         material_id = detail.get('raw_material_id')
                         material = raw_material_map.get(material_id)
@@ -531,6 +535,35 @@ class StockEngine:
                                     'created_at': datetime.now().isoformat()
                                 }
                                 self.ds.create('expenses', expense_data)
+            # Record COGS expense for every non-composite product sold directly
+            if sale_items:
+                for item in sale_items:
+                    pid = item.get('product_id')
+                    if not pid or pid in composite_product_ids:
+                        continue
+                    product = product_map.get(pid)
+                    if not product:
+                        continue
+                    if product.get('is_composite') or product.get('isComposite', False):
+                        continue  # composite ingredients already covered above
+                    item_cost = safe_float(item.get('cost', 0))
+                    if item_cost <= 0:
+                        continue
+                    expense_data = {
+                        'account_id': account_id,
+                        'name': f"COGS: {item['product_name']}",
+                        'description': (
+                            f"Cost of goods sold – {item['quantity']} x {item['product_name']}"
+                            f" (Sale #{sale_id})"
+                        ),
+                        'amount': item_cost,
+                        'category': 'cogs',
+                        'source': 'auto-sale',
+                        'linked_sale_id': sale_id,
+                        'linked_product_id': pid,
+                        'created_at': datetime.now().isoformat()
+                    }
+                    self.ds.create('expenses', expense_data)
         except Exception as e:
             logger.error(f"Error creating auto expenses: {e}")
     

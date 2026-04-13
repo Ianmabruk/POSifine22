@@ -1748,10 +1748,17 @@ def create_app() -> Flask:
         created_batch = datastore.create("batches", batch)
 
         new_quantity = _safe_float(product.get("quantity")) + quantity
-        datastore.update("products", int(product_id), {
+        product_update = {
             "quantity": new_quantity,
             "updated_at": datetime.utcnow().isoformat()
-        }, account_id)
+        }
+        # If a cost was provided with this batch, update the product's cost fields so
+        # COGS calculations always use the latest purchase cost.
+        batch_cost = _safe_float(data.get("cost"))
+        if batch_cost > 0:
+            product_update["cost"] = batch_cost
+            product_update["cost_per_unit"] = batch_cost
+        datastore.update("products", int(product_id), product_update, account_id)
 
         updated_product = datastore.get_by_id("products", int(product_id), account_id)
         sync_manager.broadcast_stock_update(account_id, int(product_id), updated_product.get("quantity") if updated_product else new_quantity)
