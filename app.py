@@ -64,6 +64,8 @@ def create_app() -> Flask:
     is_production = runtime_env in {"production", "prod"}
     configured_secret = (
         os.environ.get("JWT_SECRET")
+        or os.environ.get("JWT_SECRET_KEY")
+        or os.environ.get("JWT_KEY")
         or os.environ.get("SECRET_KEY")
         or os.environ.get("FLASK_SECRET_KEY")
         or os.environ.get("APP_SECRET_KEY")
@@ -73,7 +75,7 @@ def create_app() -> Flask:
         if is_production:
             raise RuntimeError(
                 "A production app secret is required. Set one of: "
-                "JWT_SECRET, SECRET_KEY, FLASK_SECRET_KEY, APP_SECRET_KEY, SESSION_SECRET"
+                "JWT_SECRET, JWT_SECRET_KEY, JWT_KEY, SECRET_KEY, FLASK_SECRET_KEY, APP_SECRET_KEY, SESSION_SECRET"
             )
         configured_secret = "dev-secret-change-me"
     auth_cookie_samesite = os.environ.get("AUTH_COOKIE_SAMESITE", "None" if is_production else "Lax").strip().title()
@@ -559,6 +561,48 @@ def create_app() -> Flask:
         _clear_auth_cookies(resp, "auth")
         return resp, 200
 
+    @app.post("/api/auth/lock-screen")
+    @auth_controller.require_auth
+    def lock_screen():
+        user = request.user
+        datastore.update("users", user.get("id"), {"screen_locked": True}, user.get("account_id"))
+        updated_user = datastore.get_by_id("users", user.get("id"), user.get("account_id")) or user
+        updated_user["screen_locked"] = True
+        new_token = auth_controller.generate_token(updated_user)
+        return jsonify({"success": True, "token": new_token}), 200
+
+    @app.post("/api/auth/unlock-screen")
+    @auth_controller.require_auth
+    def unlock_screen():
+        _failed_key = f"screen_unlock_fails:{_client_ip()}"
+        fails = cache.get_int(_failed_key) or 0
+        if fails >= 5:
+            return jsonify({"message": "Too many failed attempts. Try again later."}), 429
+
+        data = request.get_json() or {}
+        pin = (data.get("pin") or "").strip()
+        if not pin:
+            return jsonify({"message": "PIN is required"}), 400
+
+        user = request.user
+        account = datastore.get_by_id("accounts", user.get("account_id"))
+
+        # Accept either the user's personal PIN or the account screen-lock password
+        user_pin = (user.get("pin") or user.get("cashier_pin") or "").strip()
+        account_pin = (account.get("screen_lock_password") or "2005") if account else "2005"
+
+        if pin != user_pin and pin != account_pin:
+            cache.set_int(_failed_key, fails + 1, ttl_seconds=300)
+            return jsonify({"message": "Incorrect PIN"}), 401
+
+        # Clear fail counter on success
+        cache.delete(_failed_key)
+        datastore.update("users", user.get("id"), {"screen_locked": False}, user.get("account_id"))
+        updated_user = datastore.get_by_id("users", user.get("id"), user.get("account_id")) or user
+        updated_user["screen_locked"] = False
+        new_token = auth_controller.generate_token(updated_user)
+        return jsonify({"success": True, "token": new_token}), 200
+
     @app.get("/api/auth/me")
     @auth_controller.require_auth
     def auth_me():
@@ -677,29 +721,30 @@ def create_app() -> Flask:
             return jsonify({"error": "Email and password required"}), 400
 
         owner = None
-        if _is_dev_mode_enabled():
-            dev_email = (os.environ.get("DEV_ADMIN_EMAIL") or "").strip().lower()
-            dev_hash = (os.environ.get("DEV_ADMIN_HASH") or "").strip()
-            dev_password = (os.environ.get("DEV_ADMIN_PASSWORD") or "").strip()
+        # --- Production bootstrap via ADMIN_EMAIL + ADMIN_PASSWORD/ADMIN_HASH env vars ---
+        # These work in any environment (dev or prod) when set, allowing first-time setup.
+        bootstrap_email = (os.environ.get("ADMIN_EMAIL") or os.environ.get("DEV_ADMIN_EMAIL") or "").strip().lower()
+        bootstrap_hash = (os.environ.get("ADMIN_HASH") or os.environ.get("DEV_ADMIN_HASH") or "").strip()
+        bootstrap_password = (os.environ.get("ADMIN_PASSWORD") or os.environ.get("DEV_ADMIN_PASSWORD") or "").strip()
 
-            if dev_email and (dev_hash or dev_password):
+        if bootstrap_email and (bootstrap_hash or bootstrap_password):
+            if email == bootstrap_email:
                 password_matches = False
-                if email == dev_email:
-                    if dev_hash and _is_bcrypt_hash(dev_hash):
-                        password_matches = auth_controller.verify_password(password, dev_hash)
-                    elif dev_password:
-                        password_matches = secrets.compare_digest(password, dev_password)
+                if bootstrap_hash and _is_bcrypt_hash(bootstrap_hash):
+                    password_matches = auth_controller.verify_password(password, bootstrap_hash)
+                elif bootstrap_password:
+                    password_matches = secrets.compare_digest(password, bootstrap_password)
 
                 if password_matches:
-                    persisted_hash = dev_hash if dev_hash and _is_bcrypt_hash(dev_hash) else auth_controller.hash_password(dev_password)
-                    owner = _ensure_main_admin_user(dev_email, persisted_hash, "Development Admin")
-                elif email == dev_email:
-                    return _log_failed_main_admin_login(email, "invalid_dev_credentials")
+                    persisted_hash = bootstrap_hash if bootstrap_hash and _is_bcrypt_hash(bootstrap_hash) else auth_controller.hash_password(bootstrap_password)
+                    owner = _ensure_main_admin_user(bootstrap_email, persisted_hash, "Main Admin")
+                else:
+                    return _log_failed_main_admin_login(email, "invalid_bootstrap_credentials")
 
         if not owner:
             owner = datastore.get_user_by_email(email)
             if not owner:
-                return _log_failed_main_admin_login(email, "user_not_found")
+                return _log_failed_main_admin_login(email, "user_not_found", 403)
             if owner.get("role") != "main_admin":
                 return _log_failed_main_admin_login(email, "role_not_allowed")
             if not owner.get("is_active", True) or owner.get("is_locked"):
@@ -1716,6 +1761,117 @@ def create_app() -> Flask:
 
         created_student = datastore.create("students", student)
         return jsonify(created_student), 201
+
+    # ---- Fee payments -------------------------------------------------------
+
+    @app.get("/api/students/<int:student_id>/fees")
+    @auth_controller.require_auth
+    def get_student_fees(student_id: int):
+        account_id = request.user.get("account_id")
+        all_fees = datastore.get_all("fee_payments", account_id)
+        return jsonify([f for f in all_fees if f.get("student_id") == student_id]), 200
+
+    @app.post("/api/students/<int:student_id>/fees")
+    @auth_controller.require_auth
+    def add_fee_payment(student_id: int):
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        record = {
+            "account_id": account_id,
+            "student_id": student_id,
+            "term": data.get("term") or "",
+            "year": int(data.get("year") or datetime.utcnow().year),
+            "amount_due": float(data.get("amount_due") or 0),
+            "amount_paid": float(data.get("amount_paid") or 0),
+            "payment_date": data.get("payment_date") or datetime.utcnow().isoformat(),
+            "payment_method": data.get("payment_method") or "cash",
+            "notes": data.get("notes") or "",
+            "created_by": request.user.get("id"),
+            "created_at": datetime.utcnow().isoformat()
+        }
+        return jsonify(datastore.create("fee_payments", record)), 201
+
+    # ---- Exam results -------------------------------------------------------
+
+    @app.get("/api/students/<int:student_id>/results")
+    @auth_controller.require_auth
+    def get_exam_results(student_id: int):
+        account_id = request.user.get("account_id")
+        all_results = datastore.get_all("exam_results", account_id)
+        return jsonify([r for r in all_results if r.get("student_id") == student_id]), 200
+
+    @app.post("/api/exam-results")
+    @auth_controller.require_auth
+    def add_exam_result():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        record = {
+            "account_id": account_id,
+            "student_id": int(data.get("student_id") or 0),
+            "subject": data.get("subject") or "",
+            "score": float(data.get("score") or 0),
+            "max_score": float(data.get("max_score") or 100),
+            "grade": data.get("grade") or "",
+            "term": data.get("term") or "",
+            "year": int(data.get("year") or datetime.utcnow().year),
+            "exam_type": data.get("exam_type") or "end_term",
+            "notes": data.get("notes") or "",
+            "created_by": request.user.get("id"),
+            "created_at": datetime.utcnow().isoformat()
+        }
+        return jsonify(datastore.create("exam_results", record)), 201
+
+    # ---- Assignments --------------------------------------------------------
+
+    @app.get("/api/assignments")
+    @auth_controller.require_auth
+    def get_assignments():
+        account_id = request.user.get("account_id")
+        class_name = request.args.get("class")
+        items = datastore.get_all("assignments", account_id)
+        if class_name:
+            items = [a for a in items if a.get("class_name") == class_name]
+        return jsonify(items), 200
+
+    @app.post("/api/assignments")
+    @auth_controller.require_auth
+    def create_assignment():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        record = {
+            "account_id": account_id,
+            "class_name": data.get("class_name") or data.get("className") or "",
+            "subject": data.get("subject") or "",
+            "title": data.get("title") or "",
+            "description": data.get("description") or "",
+            "due_date": data.get("due_date") or data.get("dueDate") or "",
+            "created_by": request.user.get("id"),
+            "created_at": datetime.utcnow().isoformat()
+        }
+        return jsonify(datastore.create("assignments", record)), 201
+
+    # ---- School notices -----------------------------------------------------
+
+    @app.get("/api/school-notices")
+    @auth_controller.require_auth
+    def get_school_notices():
+        account_id = request.user.get("account_id")
+        return jsonify(datastore.get_all("school_notices", account_id)), 200
+
+    @app.post("/api/school-notices")
+    @auth_controller.require_auth
+    def create_school_notice():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        record = {
+            "account_id": account_id,
+            "title": data.get("title") or "",
+            "body": data.get("body") or "",
+            "audience": data.get("audience") or "all",
+            "created_by": request.user.get("id"),
+            "created_at": datetime.utcnow().isoformat()
+        }
+        return jsonify(datastore.create("school_notices", record)), 201
 
     @app.post("/api/sales")
     @auth_controller.require_auth

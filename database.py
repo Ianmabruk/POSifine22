@@ -682,7 +682,12 @@ class DataStore:
             'petroleum_staff': os.path.join(self.data_dir, 'petroleum_staff.json'),
             'settings': os.path.join(self.data_dir, 'settings.json'),
             'admin_support_messages': os.path.join(self.data_dir, 'admin_support_messages.json'),
-            'email_templates': os.path.join(self.data_dir, 'email_templates.json')
+            'email_templates': os.path.join(self.data_dir, 'email_templates.json'),
+            'students': os.path.join(self.data_dir, 'students.json'),
+            'fee_payments': os.path.join(self.data_dir, 'fee_payments.json'),
+            'exam_results': os.path.join(self.data_dir, 'exam_results.json'),
+            'assignments': os.path.join(self.data_dir, 'assignments.json'),
+            'school_notices': os.path.join(self.data_dir, 'school_notices.json')
         }
         
         # Initialize empty files

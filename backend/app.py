@@ -57,6 +57,8 @@ def create_app() -> Flask:
     is_production = runtime_env in {"production", "prod"}
     configured_secret = (
         os.environ.get("JWT_SECRET")
+        or os.environ.get("JWT_SECRET_KEY")
+        or os.environ.get("JWT_KEY")
         or os.environ.get("SECRET_KEY")
         or os.environ.get("FLASK_SECRET_KEY")
         or os.environ.get("APP_SECRET_KEY")
@@ -66,7 +68,7 @@ def create_app() -> Flask:
         if is_production:
             raise RuntimeError(
                 "A production app secret is required. Set one of: "
-                "JWT_SECRET, SECRET_KEY, FLASK_SECRET_KEY, APP_SECRET_KEY, SESSION_SECRET"
+                "JWT_SECRET, JWT_SECRET_KEY, JWT_KEY, SECRET_KEY, FLASK_SECRET_KEY, APP_SECRET_KEY, SESSION_SECRET"
             )
         configured_secret = "dev-secret-change-me"
     auth_cookie_samesite = os.environ.get("AUTH_COOKIE_SAMESITE", "None" if is_production else "Lax").strip().title()
@@ -636,29 +638,29 @@ def create_app() -> Flask:
             return jsonify({"error": "Email and password required"}), 400
 
         owner = None
-        if _is_dev_mode_enabled():
-            dev_email = (os.environ.get("DEV_ADMIN_EMAIL") or "").strip().lower()
-            dev_hash = (os.environ.get("DEV_ADMIN_HASH") or "").strip()
-            dev_password = (os.environ.get("DEV_ADMIN_PASSWORD") or "").strip()
+        # --- Production bootstrap via ADMIN_EMAIL + ADMIN_PASSWORD/ADMIN_HASH env vars ---
+        bootstrap_email = (os.environ.get("ADMIN_EMAIL") or os.environ.get("DEV_ADMIN_EMAIL") or "").strip().lower()
+        bootstrap_hash = (os.environ.get("ADMIN_HASH") or os.environ.get("DEV_ADMIN_HASH") or "").strip()
+        bootstrap_password = (os.environ.get("ADMIN_PASSWORD") or os.environ.get("DEV_ADMIN_PASSWORD") or "").strip()
 
-            if dev_email and (dev_hash or dev_password):
+        if bootstrap_email and (bootstrap_hash or bootstrap_password):
+            if email == bootstrap_email:
                 password_matches = False
-                if email == dev_email:
-                    if dev_hash and _is_bcrypt_hash(dev_hash):
-                        password_matches = auth_controller.verify_password(password, dev_hash)
-                    elif dev_password:
-                        password_matches = secrets.compare_digest(password, dev_password)
+                if bootstrap_hash and _is_bcrypt_hash(bootstrap_hash):
+                    password_matches = auth_controller.verify_password(password, bootstrap_hash)
+                elif bootstrap_password:
+                    password_matches = secrets.compare_digest(password, bootstrap_password)
 
                 if password_matches:
-                    persisted_hash = dev_hash if dev_hash and _is_bcrypt_hash(dev_hash) else auth_controller.hash_password(dev_password)
-                    owner = _ensure_main_admin_user(dev_email, persisted_hash, "Development Admin")
-                elif email == dev_email:
-                    return _log_failed_main_admin_login(email, "invalid_dev_credentials")
+                    persisted_hash = bootstrap_hash if bootstrap_hash and _is_bcrypt_hash(bootstrap_hash) else auth_controller.hash_password(bootstrap_password)
+                    owner = _ensure_main_admin_user(bootstrap_email, persisted_hash, "Main Admin")
+                else:
+                    return _log_failed_main_admin_login(email, "invalid_bootstrap_credentials")
 
         if not owner:
             owner = datastore.get_user_by_email(email)
             if not owner:
-                return _log_failed_main_admin_login(email, "user_not_found")
+                return _log_failed_main_admin_login(email, "user_not_found", 403)
             if owner.get("role") != "main_admin":
                 return _log_failed_main_admin_login(email, "role_not_allowed")
             if not owner.get("is_active", True) or owner.get("is_locked"):

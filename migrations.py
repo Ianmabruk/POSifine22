@@ -188,6 +188,83 @@ def run_migrations():
                     CREATE INDEX IF NOT EXISTS idx_audit_log_createdat ON audit_log(createdat);
                 ''')
                 
+                # School / Pro-plan tables
+                print("📍 Creating school tables (students, fee_payments, exam_results, assignments, school_notices)...")
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS students (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        admission_number TEXT,
+                        class_name TEXT,
+                        parent_name TEXT,
+                        parent_phone TEXT,
+                        notes TEXT,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_by INTEGER,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_students_account ON students(account_id);
+
+                    CREATE TABLE IF NOT EXISTS fee_payments (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+                        student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
+                        term TEXT,
+                        year INTEGER,
+                        amount_due REAL DEFAULT 0,
+                        amount_paid REAL DEFAULT 0,
+                        balance REAL GENERATED ALWAYS AS (amount_due - amount_paid) STORED,
+                        payment_date TIMESTAMP WITH TIME ZONE,
+                        payment_method TEXT DEFAULT 'cash',
+                        notes TEXT,
+                        created_by INTEGER,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_fee_payments_student ON fee_payments(student_id);
+
+                    CREATE TABLE IF NOT EXISTS exam_results (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+                        student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
+                        subject TEXT NOT NULL,
+                        score REAL,
+                        max_score REAL DEFAULT 100,
+                        grade TEXT,
+                        term TEXT,
+                        year INTEGER,
+                        exam_type TEXT DEFAULT 'end_term',
+                        notes TEXT,
+                        created_by INTEGER,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_exam_results_student ON exam_results(student_id);
+
+                    CREATE TABLE IF NOT EXISTS assignments (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+                        class_name TEXT,
+                        subject TEXT,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        due_date TIMESTAMP WITH TIME ZONE,
+                        created_by INTEGER,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_assignments_account ON assignments(account_id);
+
+                    CREATE TABLE IF NOT EXISTS school_notices (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+                        title TEXT NOT NULL,
+                        body TEXT,
+                        audience TEXT DEFAULT 'all',
+                        created_by INTEGER,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_school_notices_account ON school_notices(account_id);
+                ''')
+
                 conn.commit()
                 logger.info("✅ All migrations completed successfully")
                 print("\n✅ Database migrations completed successfully!")
