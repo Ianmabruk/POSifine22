@@ -12,7 +12,7 @@ export const SyncService = {
           const p = await sqlite.product.findUnique({ where: { id: it.entityId } });
           if (!p) { await SyncQueueRepo.delete(it.id); continue; }
           // Upsert to MySQL deterministically by id
-          await mysql.$transaction(async (tx) => {
+          await mysql.$transaction(async (tx: any) => {
             const existing = await tx.product.findUnique({ where: { id: p.id } });
             if (!existing) {
               await tx.product.create({ data: { ...p } });

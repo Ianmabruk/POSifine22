@@ -11,7 +11,7 @@ import logging
 import uuid
 import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import asyncio
 from typing import Dict, Any
@@ -830,6 +830,8 @@ def create_app() -> Flask:
                 billing_anchor = account.get("subscription_ends_at") or account.get("created_at")
                 days_since = _days_since(billing_anchor)
                 sanitized["days_since_plan_start"] = days_since
+                sanitized["days_used"] = days_since if days_since is not None else int(account.get("days_used") or 0)
+                sanitized["daysUsed"] = sanitized["days_used"]
                 sanitized["billing_due"] = bool(days_since is not None and days_since >= 31 and (account.get("plan") or "free") not in ["free", "trial"])
             response.append(sanitized)
 
@@ -1280,9 +1282,23 @@ def create_app() -> Flask:
     def get_settings():
         account_id = request.user.get("account_id")
         profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
+        account = datastore.get_by_id("accounts", account_id)
         if profiles:
-            return jsonify(profiles[0].get("settings") or {}), 200
-        return jsonify({}), 200
+            settings_payload = profiles[0].get("settings") or {}
+            if account:
+                if account.get("business_logo") and not settings_payload.get("logo"):
+                    settings_payload["logo"] = account.get("business_logo")
+                if account.get("screen_lock_password") and not settings_payload.get("screenLockPassword"):
+                    settings_payload["screenLockPassword"] = account.get("screen_lock_password")
+            return jsonify(settings_payload), 200
+
+        fallback = {}
+        if account:
+            if account.get("business_logo"):
+                fallback["logo"] = account.get("business_logo")
+            if account.get("screen_lock_password"):
+                fallback["screenLockPassword"] = account.get("screen_lock_password")
+        return jsonify(fallback), 200
 
     @app.put("/api/settings")
     @auth_controller.require_auth
@@ -1291,6 +1307,15 @@ def create_app() -> Flask:
         data = request.get_json() or {}
         profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
         now = datetime.utcnow().isoformat()
+
+        account_updates = {}
+        if "logo" in data:
+            account_updates["business_logo"] = data.get("logo")
+        if "screenLockPassword" in data:
+            account_updates["screen_lock_password"] = data.get("screenLockPassword")
+        if account_updates:
+            account_updates["last_activity_date"] = now
+            datastore.update("accounts", account_id, account_updates)
 
         if profiles:
             profile = profiles[0]
@@ -1591,6 +1616,27 @@ def create_app() -> Flask:
         total_sales = sum(_safe_float(s.get("total")) for s in sales)
         total_expenses = sum(_safe_float(e.get("amount")) for e in expenses)
         total_cogs = sum(_safe_float(s.get("total_cost")) for s in sales)
+        today = datetime.utcnow().date()
+        week_start = today - timedelta(days=today.weekday())
+
+        def _sale_date(sale: Dict[str, Any]):
+            created_at = sale.get("created_at") or sale.get("createdAt") or ""
+            if not created_at:
+                return None
+            try:
+                return datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).date()
+            except Exception:
+                return None
+
+        daily_sales = 0.0
+        weekly_sales = 0.0
+        for sale in sales:
+            sale_date = _sale_date(sale)
+            sale_total = _safe_float(sale.get("total"))
+            if sale_date == today:
+                daily_sales += sale_total
+            if sale_date and sale_date >= week_start:
+                weekly_sales += sale_total
 
         # Cashier monitor uses sales - expenses, admin uses full cost model
         if cashier_id is not None:
@@ -1598,12 +1644,19 @@ def create_app() -> Flask:
         else:
             profit = total_sales - total_cogs - total_expenses
 
+        gross_profit = total_sales - total_cogs
+        net_profit = profit
+
         response = {
             "totalSales": total_sales,
             "totalExpenses": total_expenses,
             "totalCOGS": total_cogs,
-            "grossProfit": total_sales - total_cogs,
+            "grossProfit": gross_profit,
+            "netProfit": net_profit,
             "profit": profit,
+            "dailySales": daily_sales,
+            "weeklySales": weekly_sales,
+            "productCount": len(products),
             "productsCount": len(products),
             "salesCount": len(sales)
         }
@@ -1649,13 +1702,17 @@ def create_app() -> Flask:
 
         total_sales = sum(_safe_float(s.get("total")) for s in today_sales)
         total_expenses = sum(_safe_float(e.get("amount")) for e in today_expenses)
+        total_cogs = sum(_safe_float(s.get("total_cost")) for s in today_sales)
         transaction_count = len(today_sales)
         avg_transaction = (total_sales / transaction_count) if transaction_count else 0
 
         response_data = {
             "totalSales": total_sales,
             "totalExpenses": total_expenses,
+            "totalCOGS": total_cogs,
+            "grossProfit": total_sales - total_cogs,
             "netProfit": total_sales - total_expenses,
+            "profit": total_sales - total_expenses,
             "transactionCount": transaction_count,
             "avgTransaction": avg_transaction,
             "timestamp": datetime.utcnow().isoformat()

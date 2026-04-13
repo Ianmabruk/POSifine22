@@ -3,6 +3,6 @@ import { logger } from "../../config/logger";
 
 export const mysql = new PrismaClientMysql();
 
-mysql.$connect().then(() => logger.info("MySQL Prisma connected")).catch((e) => {
+mysql.$connect().then(() => logger.info("MySQL Prisma connected")).catch((e: unknown) => {
   logger.error({ err: e }, "MySQL connect failed");
 });

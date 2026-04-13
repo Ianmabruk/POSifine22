@@ -720,6 +720,15 @@ def create_app() -> Flask:
         all_users = datastore.get_all("users")
         accounts = {acc.get("id"): acc for acc in datastore.get_all("accounts")}
 
+        def _days_since(date_str):
+            if not date_str:
+                return None
+            try:
+                parsed = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+                return (datetime.utcnow() - parsed).days
+            except Exception:
+                return None
+
         response = []
         for u in all_users:
             sanitized = dict(u)
@@ -734,6 +743,12 @@ def create_app() -> Flask:
                     sanitized["business_type"] = account.get("business_type")
                 if account.get("business_name") and not sanitized.get("business_name"):
                     sanitized["business_name"] = account.get("business_name")
+                billing_anchor = account.get("subscription_ends_at") or account.get("created_at")
+                days_since = _days_since(billing_anchor)
+                sanitized["days_since_plan_start"] = days_since
+                sanitized["days_used"] = days_since if days_since is not None else int(account.get("days_used") or 0)
+                sanitized["daysUsed"] = sanitized["days_used"]
+                sanitized["billing_due"] = bool(days_since is not None and days_since >= 31 and (account.get("plan") or "free") not in ["free", "trial"])
             response.append(sanitized)
 
         return jsonify(response), 200
@@ -1206,18 +1221,48 @@ def create_app() -> Flask:
 
         total_sales = sum(_safe_float(s.get("total")) for s in sales)
         total_expenses = sum(_safe_float(e.get("amount")) for e in expenses)
+        total_cogs = sum(_safe_float(s.get("total_cost")) for s in sales)
+        today = datetime.utcnow().date()
+        week_start = today - timedelta(days=today.weekday())
+
+        def _sale_date(sale: Dict[str, Any]):
+            created_at = sale.get("created_at") or sale.get("createdAt") or ""
+            if not created_at:
+                return None
+            try:
+                return datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).date()
+            except Exception:
+                return None
+
+        daily_sales = 0.0
+        weekly_sales = 0.0
+        for sale in sales:
+            sale_date = _sale_date(sale)
+            sale_total = _safe_float(sale.get("total"))
+            if sale_date == today:
+                daily_sales += sale_total
+            if sale_date and sale_date >= week_start:
+                weekly_sales += sale_total
 
         # Cashier monitor uses sales - expenses, admin uses full cost model
         if cashier_id is not None:
             profit = total_sales - total_expenses
         else:
-            total_cost = sum(_safe_float(s.get("total_cost")) for s in sales)
-            profit = total_sales - total_cost - total_expenses
+            profit = total_sales - total_cogs - total_expenses
+
+        gross_profit = total_sales - total_cogs
+        net_profit = profit
 
         response = {
             "totalSales": total_sales,
             "totalExpenses": total_expenses,
+            "totalCOGS": total_cogs,
+            "grossProfit": gross_profit,
+            "netProfit": net_profit,
             "profit": profit,
+            "dailySales": daily_sales,
+            "weeklySales": weekly_sales,
+            "productCount": len(products),
             "productsCount": len(products),
             "salesCount": len(sales)
         }
@@ -1263,13 +1308,17 @@ def create_app() -> Flask:
 
         total_sales = sum(_safe_float(s.get("total")) for s in today_sales)
         total_expenses = sum(_safe_float(e.get("amount")) for e in today_expenses)
+        total_cogs = sum(_safe_float(s.get("total_cost")) for s in today_sales)
         transaction_count = len(today_sales)
         avg_transaction = (total_sales / transaction_count) if transaction_count else 0
 
         response_data = {
             "totalSales": total_sales,
             "totalExpenses": total_expenses,
+            "totalCOGS": total_cogs,
+            "grossProfit": total_sales - total_cogs,
             "netProfit": total_sales - total_expenses,
+            "profit": total_sales - total_expenses,
             "transactionCount": transaction_count,
             "avgTransaction": avg_transaction,
             "timestamp": datetime.utcnow().isoformat()

@@ -365,6 +365,8 @@ class AuthController:
             sanitized["subscription"] = account.get("plan")
             sanitized["active"] = bool(account.get("is_active", True))
             sanitized["account_active"] = bool(account.get("is_active", True))
+            if account.get("business_logo") and not sanitized.get("business_logo"):
+                sanitized["business_logo"] = account.get("business_logo")
             if account.get("business_type") and not sanitized.get("business_type"):
                 sanitized["business_type"] = account.get("business_type")
 

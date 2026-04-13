@@ -250,10 +250,12 @@ def create_business_routes(datastore, auth_controller):
                 return jsonify({'error': 'Please select a business type first'}), 400
             
             data = request.get_json()
-            email = data.get('email')
-            name = data.get('name')
+            email = (data.get('email') or '').strip().lower()
+            name = (data.get('name') or '').strip()
             password = data.get('password', 'changeme123')  # Default password
-            business_role = data.get('business_role', 'cashier')  # Default to cashier
+            business_role = data.get('business_role') or data.get('businessRole') or 'cashier'
+            profile_picture = data.get('profile_picture') or data.get('profilePicture')
+            cashier_pin = data.get('cashier_pin') or data.get('pin')
             
             if not email or not name:
                 return jsonify({'error': 'email and name are required'}), 400
@@ -289,7 +291,10 @@ def create_business_routes(datastore, auth_controller):
                 'is_active': True,
                 'is_locked': False,
                 'screen_locked': False,
-                'pin': data.get('pin', None),  # Optional PIN for quick login
+                'pin': cashier_pin,
+                'cashier_pin': cashier_pin,
+                'profile_picture': profile_picture,
+                'profilePicture': profile_picture,
                 'created_at': datetime.now().isoformat(),
                 'last_login': None,
                 'hourly_rate': data.get('hourly_rate', 0.0)
@@ -362,10 +367,15 @@ def create_business_routes(datastore, auth_controller):
             
             # Get update data
             data = request.get_json()
+
+            if 'profilePicture' in data and 'profile_picture' not in data:
+                data['profile_picture'] = data.get('profilePicture')
+            if 'pin' in data and 'cashier_pin' not in data:
+                data['cashier_pin'] = data.get('pin')
             
             # Build update object (only allow certain fields)
             update_data = {}
-            allowed_fields = ['name', 'business_role', 'is_active', 'hourly_rate']
+            allowed_fields = ['name', 'business_role', 'is_active', 'hourly_rate', 'profile_picture', 'profilePicture', 'pin', 'cashier_pin']
             
             for field in allowed_fields:
                 if field in data:
