@@ -60,11 +60,19 @@ def create_app() -> Flask:
     app = Flask(__name__)
     sock = Sock(app)
 
+    runtime_env = (os.environ.get("NODE_ENV") or os.environ.get("FLASK_ENV") or "").strip().lower()
+    is_production = runtime_env in {"production", "prod"}
+    configured_secret = os.environ.get("JWT_SECRET") or os.environ.get("SECRET_KEY")
+    if not configured_secret:
+        if is_production:
+            raise RuntimeError("JWT_SECRET or SECRET_KEY must be set in production")
+        configured_secret = "dev-secret-change-me"
+    auth_cookie_samesite = os.environ.get("AUTH_COOKIE_SAMESITE", "None" if is_production else "Lax").strip().title()
+    if auth_cookie_samesite not in {"Lax", "Strict", "None"}:
+        auth_cookie_samesite = "None" if is_production else "Lax"
+
     # Config
-    app.config["SECRET_KEY"] = os.environ.get(
-        "JWT_SECRET",
-        os.environ.get("SECRET_KEY", "dev-secret-change-me")
-    )
+    app.config["SECRET_KEY"] = configured_secret
     app.config["SESSION_COOKIE_SECURE"] = True
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
@@ -73,7 +81,15 @@ def create_app() -> Flask:
     # CORS
     cors_origins = os.environ.get("CORS_ORIGINS", "*")
     if cors_origins == "*":
-        CORS(app, supports_credentials=True)
+        if is_production:
+            raise RuntimeError("CORS_ORIGINS cannot be '*' in production")
+        CORS(
+            app,
+            resources={r"/*": {"origins": "*"}},
+            supports_credentials=False,
+            allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        )
     else:
         allowed_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
         # Always allow Netlify production frontend if not explicitly set
@@ -161,9 +177,56 @@ def create_app() -> Flask:
     # Simple in-memory rate limiting for auth endpoints
     login_attempts = {}
     login_blocked_until = {}
+    refresh_attempts = {}
+
+    trusted_proxy_ips = {
+        ip.strip()
+        for ip in os.environ.get("TRUSTED_PROXY_IPS", "").split(",")
+        if ip.strip()
+    }
+    trust_proxy_headers = os.environ.get("TRUST_PROXY_HEADERS", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _client_ip():
+        remote = request.remote_addr or "unknown"
+        if not (trust_proxy_headers or remote in trusted_proxy_ips):
+            return remote
+        forwarded_for = request.headers.get("X-Forwarded-For", "")
+        if forwarded_for:
+            first_hop = forwarded_for.split(",")[0].strip()
+            if first_hop:
+                return first_hop
+        return remote
 
     def _rate_limit_key():
-        return request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
+        return _client_ip()
+
+    def _set_auth_cookies(resp, refresh_token: str | None, csrf_token: str | None, scope: str = "auth"):
+        cookie_path = "/api/main-admin" if scope == "main_admin" else "/api/auth"
+        if refresh_token:
+            resp.set_cookie(
+                "refresh_token",
+                refresh_token,
+                secure=True,
+                httponly=True,
+                samesite=auth_cookie_samesite,
+                path=cookie_path,
+                max_age=7 * 24 * 60 * 60,
+            )
+        if csrf_token:
+            resp.set_cookie(
+                "csrf_token",
+                csrf_token,
+                secure=True,
+                httponly=False,
+                samesite=auth_cookie_samesite,
+                path=cookie_path,
+                max_age=7 * 24 * 60 * 60,
+            )
+
+    def _clear_auth_cookies(resp, scope: str = "auth"):
+        cookie_path = "/api/main-admin" if scope == "main_admin" else "/api/auth"
+        resp.set_cookie("refresh_token", "", expires=0, secure=True, httponly=True, samesite=auth_cookie_samesite, path=cookie_path)
+        resp.set_cookie("csrf_token", "", expires=0, secure=True, httponly=False, samesite=auth_cookie_samesite, path=cookie_path)
 
     def _is_rate_limited():
         key = _rate_limit_key()
@@ -203,6 +266,40 @@ def create_app() -> Flask:
 
         login_attempts.pop(key, None)
         login_blocked_until.pop(key, None)
+
+    def _is_refresh_rate_limited(window_seconds: int = 300, max_attempts: int = 30):
+        key = _rate_limit_key()
+        if cache.enabled:
+            attempts = cache.incr_with_ttl(f"rl:refresh:{key}", window_seconds)
+            if attempts > max_attempts:
+                return True, window_seconds
+            return False, 0
+
+        now = time.time()
+        attempts = refresh_attempts.get(key, [])
+        attempts = [t for t in attempts if now - t < window_seconds]
+        attempts.append(now)
+        refresh_attempts[key] = attempts
+        if len(attempts) > max_attempts:
+            return True, int(window_seconds)
+        return False, 0
+
+    def _is_logout_rate_limited(window_seconds: int = 120, max_attempts: int = 60):
+        key = _rate_limit_key()
+        if cache.enabled:
+            attempts = cache.incr_with_ttl(f"rl:logout:{key}", window_seconds)
+            if attempts > max_attempts:
+                return True, window_seconds
+            return False, 0
+
+        now = time.time()
+        attempts = refresh_attempts.get(f"logout:{key}", [])
+        attempts = [t for t in attempts if now - t < window_seconds]
+        attempts.append(now)
+        refresh_attempts[f"logout:{key}"] = attempts
+        if len(attempts) > max_attempts:
+            return True, int(window_seconds)
+        return False, 0
 
     def _log_activity(action: str, account_id: str | None, user_id: int | None, metadata: Dict[str, Any] | None = None):
         try:
@@ -285,11 +382,18 @@ def create_app() -> Flask:
     @app.before_request
     def start_timer():
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-            if request.path.startswith("/api/auth") or request.path.startswith("/api/main-admin/auth"):
-                pass
-            else:
-                csrf_cookie = request.cookies.get("csrf_token")
-                csrf_header = request.headers.get("X-CSRF-Token")
+            csrf_cookie = request.cookies.get("csrf_token")
+            csrf_header = request.headers.get("X-CSRF-Token")
+            csrf_strict_paths = {
+                "/api/auth/refresh",
+                "/api/auth/logout",
+                "/api/main-admin/auth/refresh",
+                "/api/main-admin/auth/logout",
+            }
+            if request.path in csrf_strict_paths:
+                if not csrf_cookie or not csrf_header or csrf_header != csrf_cookie:
+                    return jsonify({"error": "Invalid CSRF token"}), 403
+            elif not request.path.startswith("/api/auth") and not request.path.startswith("/api/main-admin/auth"):
                 if csrf_cookie and csrf_header != csrf_cookie:
                     return jsonify({"error": "Invalid CSRF token"}), 403
         if os.environ.get("ENFORCE_HTTPS") == "1":
@@ -369,10 +473,9 @@ def create_app() -> Flask:
                 ip_address=_rate_limit_key()
             )
             csrf_token = uuid.uuid4().hex
-            result["refreshToken"] = refresh_token
             result["csrfToken"] = csrf_token
             resp = jsonify(result)
-            resp.set_cookie("csrf_token", csrf_token, secure=True, httponly=False, samesite="Strict")
+            _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
             return resp, 201
         return jsonify({"error": error or "Signup failed"}), 400
 
@@ -395,19 +498,24 @@ def create_app() -> Flask:
                 ip_address=_rate_limit_key()
             )
             csrf_token = uuid.uuid4().hex
-            result["refreshToken"] = refresh_token
             result["csrfToken"] = csrf_token
             _log_activity("login", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
             resp = jsonify(result)
-            resp.set_cookie("csrf_token", csrf_token, secure=True, httponly=False, samesite="Strict")
+            _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
             return resp, 200
         _record_failed_login()
         return jsonify({"error": error or "Invalid credentials"}), 401
 
     @app.post("/api/auth/refresh")
     def refresh_token():
+        is_limited, retry_after = _is_refresh_rate_limited()
+        if is_limited:
+            return jsonify({"error": "Too many refresh attempts. Try again later.", "retry_after": retry_after}), 429
+
         data = request.get_json() or {}
-        refresh = data.get("refreshToken")
+        refresh = request.cookies.get("refresh_token")
+        if not refresh and not is_production:
+            refresh = data.get("refreshToken")
         if not refresh:
             return jsonify({"error": "Refresh token required"}), 400
 
@@ -421,19 +529,26 @@ def create_app() -> Flask:
 
         _log_activity("refresh_token", rotated.get("user", {}).get("account_id"), rotated.get("user", {}).get("id"))
         csrf_token = uuid.uuid4().hex
+        next_refresh = rotated.pop("refreshToken", None)
         rotated["csrfToken"] = csrf_token
         resp = jsonify(rotated)
-        resp.set_cookie("csrf_token", csrf_token, secure=True, httponly=False, samesite="Strict")
+        _set_auth_cookies(resp, next_refresh, csrf_token, "auth")
         return resp, 200
 
     @app.post("/api/auth/logout")
     def logout():
+        is_limited, retry_after = _is_logout_rate_limited()
+        if is_limited:
+            return jsonify({"error": "Too many logout attempts. Try again later.", "retry_after": retry_after}), 429
+
         data = request.get_json() or {}
-        refresh = data.get("refreshToken")
+        refresh = request.cookies.get("refresh_token") or (data.get("refreshToken") if not is_production else None)
         if refresh:
             auth_controller.revoke_refresh_session(refresh)
         _log_activity("logout", None, None)
-        return jsonify({"success": True}), 200
+        resp = jsonify({"success": True})
+        _clear_auth_cookies(resp, "auth")
+        return resp, 200
 
     @app.get("/api/auth/me")
     @auth_controller.require_auth
@@ -602,10 +717,9 @@ def create_app() -> Flask:
         resp = jsonify({
             "user": auth_controller._build_user_payload(owner),
             "token": token,
-            "refreshToken": refresh_token,
             "csrfToken": csrf_token
         })
-        resp.set_cookie("csrf_token", csrf_token, secure=True, httponly=False, samesite="Strict")
+        _set_auth_cookies(resp, refresh_token, csrf_token, "main_admin")
         return resp, 200
 
     @app.get("/api/main-admin/users")
