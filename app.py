@@ -626,18 +626,13 @@ def create_app() -> Flask:
         if not user:
             return None, (jsonify({"error": "User not found"}), 401)
 
-        if user.get("role") != "main_admin":
+        if user.get("role") not in {"main_admin", "owner"}:
             return None, (jsonify({"error": "Access denied"}), 403)
 
         return user, None
 
     @app.post("/api/main-admin/auth/login")
     def main_admin_login():
-        def _is_dev_mode_enabled() -> bool:
-            node_env = os.environ.get("NODE_ENV", "").strip().lower()
-            admin_dev_mode = os.environ.get("ADMIN_DEV_MODE", "").strip().lower()
-            return node_env == "development" or admin_dev_mode in {"1", "true", "yes", "on"}
-
         def _is_bcrypt_hash(value: str) -> bool:
             return value.startswith("$2a$") or value.startswith("$2b$") or value.startswith("$2y$")
 
@@ -723,9 +718,24 @@ def create_app() -> Flask:
         owner = None
         # --- Production bootstrap via ADMIN_EMAIL + ADMIN_PASSWORD/ADMIN_HASH env vars ---
         # These work in any environment (dev or prod) when set, allowing first-time setup.
-        bootstrap_email = (os.environ.get("ADMIN_EMAIL") or os.environ.get("DEV_ADMIN_EMAIL") or "").strip().lower()
-        bootstrap_hash = (os.environ.get("ADMIN_HASH") or os.environ.get("DEV_ADMIN_HASH") or "").strip()
-        bootstrap_password = (os.environ.get("ADMIN_PASSWORD") or os.environ.get("DEV_ADMIN_PASSWORD") or "").strip()
+        bootstrap_email = (
+            os.environ.get("MAIN_ADMIN_EMAIL")
+            or os.environ.get("ADMIN_EMAIL")
+            or os.environ.get("DEV_ADMIN_EMAIL")
+            or ""
+        ).strip().lower()
+        bootstrap_hash = (
+            os.environ.get("MAIN_ADMIN_HASH")
+            or os.environ.get("ADMIN_HASH")
+            or os.environ.get("DEV_ADMIN_HASH")
+            or ""
+        ).strip()
+        bootstrap_password = (
+            os.environ.get("MAIN_ADMIN_PASSWORD")
+            or os.environ.get("ADMIN_PASSWORD")
+            or os.environ.get("DEV_ADMIN_PASSWORD")
+            or ""
+        ).strip()
 
         if bootstrap_email and (bootstrap_hash or bootstrap_password):
             if email == bootstrap_email:
@@ -745,7 +755,7 @@ def create_app() -> Flask:
             owner = datastore.get_user_by_email(email)
             if not owner:
                 return _log_failed_main_admin_login(email, "user_not_found", 403)
-            if owner.get("role") != "main_admin":
+            if owner.get("role") not in {"main_admin", "owner"}:
                 return _log_failed_main_admin_login(email, "role_not_allowed")
             if not owner.get("is_active", True) or owner.get("is_locked"):
                 return _log_failed_main_admin_login(email, "account_blocked")
@@ -755,6 +765,15 @@ def create_app() -> Flask:
                 return _log_failed_main_admin_login(email, "invalid_password")
 
         now_iso = datetime.utcnow().isoformat()
+        # Migrate legacy owner role to main_admin to avoid repeated access denials.
+        if owner.get("role") == "owner":
+            datastore.update("users", owner.get("id"), {
+                "role": "main_admin",
+                "business_role": "main_admin",
+                "business_type": "main_admin",
+            }, owner.get("account_id"))
+            owner = datastore.get_user_by_email(email) or owner
+
         datastore.update("users", owner.get("id"), {"last_login": now_iso}, owner.get("account_id"))
         datastore.update("accounts", owner.get("account_id"), {"last_activity_date": now_iso})
         owner = datastore.get_user_by_email(email) or owner
