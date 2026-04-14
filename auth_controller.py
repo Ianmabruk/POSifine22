@@ -56,12 +56,14 @@ class AuthController:
     # ============================================================
 
     def generate_token(self, user: Dict[str, Any]) -> str:
-        """Generate JWT token for user."""
+        """Generate JWT token for user with expiration."""
         payload = {
             "user_id": user["id"],
             "email": user["email"],
             "account_id": user["account_id"],
-            "role": user.get("role", "cashier")
+            "role": user.get("role", "cashier"),
+            "exp": datetime.utcnow() + timedelta(hours=24),
+            "iat": datetime.utcnow(),
         }
         return jwt.encode(payload, self.secret_key, algorithm="HS256")
 
@@ -456,6 +458,8 @@ class AuthController:
     def _sanitize_user(user: Dict[str, Any]) -> Dict[str, Any]:
         sanitized = dict(user)
         sanitized.pop("password_hash", None)
+        sanitized.pop("pin", None)
+        sanitized.pop("cashier_pin", None)
         return sanitized
 
     def _build_user_payload(self, user: Dict[str, Any]) -> Dict[str, Any]:

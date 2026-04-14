@@ -200,6 +200,7 @@ def create_app() -> Flask:
     login_attempts = {}
     login_blocked_until = {}
     refresh_attempts = {}
+    signup_attempts = {}
 
     trusted_proxy_ips = {
         ip.strip()
@@ -288,6 +289,32 @@ def create_app() -> Flask:
 
         login_attempts.pop(key, None)
         login_blocked_until.pop(key, None)
+
+    def _is_signup_rate_limited():
+        """Allow max 5 signups per IP per hour."""
+        key = _rate_limit_key()
+        now = time.time()
+        if cache.enabled:
+            attempts = cache.incr_with_ttl(f"rl:signup:{key}", 3600)
+            if attempts > 5:
+                return True
+            return False
+        attempts = signup_attempts.get(key, [])
+        attempts = [t for t in attempts if now - t < 3600]
+        signup_attempts[key] = attempts
+        if len(attempts) >= 5:
+            return True
+        return False
+
+    def _record_signup():
+        key = _rate_limit_key()
+        now = time.time()
+        if cache.enabled:
+            return  # already incremented in _is_signup_rate_limited
+        attempts = signup_attempts.get(key, [])
+        attempts = [t for t in attempts if now - t < 3600]
+        attempts.append(now)
+        signup_attempts[key] = attempts
 
     def _is_refresh_rate_limited(window_seconds: int = 300, max_attempts: int = 30):
         key = _rate_limit_key()
@@ -479,6 +506,8 @@ def create_app() -> Flask:
 
     @app.post("/api/auth/signup")
     def signup():
+        if _is_signup_rate_limited():
+            return jsonify({"error": "Too many signup attempts. Please try again later."}), 429
         try:
             data = request.get_json() or {}
             
@@ -489,8 +518,12 @@ def create_app() -> Flask:
             
             if not email or not password or not name:
                 return jsonify({"error": "Email, password, and name are required"}), 400
-            if len(password) < 6:
-                return jsonify({"error": "Password must be at least 6 characters"}), 400
+            if len(password) < 8:
+                return jsonify({"error": "Password must be at least 8 characters"}), 400
+            if not any(c.isdigit() for c in password):
+                return jsonify({"error": "Password must contain at least one number"}), 400
+            if not any(c.isupper() for c in password):
+                return jsonify({"error": "Password must contain at least one uppercase letter"}), 400
             
             success, error, result = auth_controller.signup(
                 email=email,
@@ -501,6 +534,7 @@ def create_app() -> Flask:
             )
             
             if success:
+                _record_signup()
                 refresh_token = auth_controller.create_refresh_session(
                     user=result.get("user") or {},
                     user_agent=request.headers.get("User-Agent", ""),
@@ -743,6 +777,8 @@ def create_app() -> Flask:
             return jsonify({"error": "User with this email already exists"}), 400
 
         pin_value = (data.get("cashier_pin") or data.get("cashierPIN") or data.get("pin") or "").strip() or None
+        if pin_value and len(pin_value) < 4:
+            return jsonify({"error": "PIN must be at least 4 digits"}), 400
         role_value = (data.get("role") or "cashier").strip().lower()
         permissions_value = data.get("permissions") or auth_controller._default_permissions(role_value)
 
@@ -801,6 +837,8 @@ def create_app() -> Flask:
         pin_value = data.get("cashierPIN") or data.get("cashier_pin") or data.get("pin")
         if pin_value is not None:
             pin_text = str(pin_value).strip()
+            if len(pin_text) < 4:
+                return jsonify({"error": "PIN must be at least 4 digits"}), 400
             updates["pin"] = pin_text
             updates["cashier_pin"] = pin_text
 
