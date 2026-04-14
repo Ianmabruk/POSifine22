@@ -771,8 +771,10 @@ class DataStore:
         """Thread-safe JSON file write"""
         lock = get_file_lock(filepath)
         with lock:
-            with open(filepath, 'w') as f:
-                json.dump(data, f, indent=2)
+            temp_filepath = f"{filepath}.tmp"
+            with open(temp_filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, separators=(',', ':'), ensure_ascii=True)
+            os.replace(temp_filepath, filepath)
     
     # ============================================================
     # GENERIC CRUD OPERATIONS
@@ -812,7 +814,10 @@ class DataStore:
                     cur.execute(query, (value,))
                     return cur.fetchall()
         else:
-            all_items = self.get_all(table)
+            filepath = self.files.get(table)
+            if not filepath:
+                return []
+            all_items = self._read_json(filepath)
             return [item for item in all_items if item.get(field) == value]
     
     def create(self, table: str, data: Dict) -> Dict:
@@ -948,7 +953,7 @@ class DataStore:
         
         # Auto-assign ID if not provided
         if 'id' not in data:
-            data['id'] = self.get_next_id(table)
+            data['id'] = (max((item.get('id', 0) for item in all_data), default=0) + 1)
         
         all_data.append(data)
         self._write_json(filepath, all_data)
@@ -1009,9 +1014,10 @@ class DataStore:
                     cur.execute("SELECT * FROM users WHERE email = %s", (email,))
                     return cur.fetchone()
         else:
+            normalized_email = (email or '').strip().lower()
             users = self._read_json(self.files['users'])
             for user in users:
-                if user.get('email') == email:
+                if (user.get('email') or '').strip().lower() == normalized_email:
                     return user
             return None
     

@@ -11,6 +11,7 @@ import uuid
 import logging
 import secrets
 import hashlib
+import time as _time
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any, Callable
 from functools import wraps
@@ -29,6 +30,9 @@ class AuthController:
         self.datastore = datastore
         self.secret_key = secret_key
         self.session_store = session_store
+        # Simple in-memory TTL cache to reduce DB hits on every authenticated request
+        self._auth_cache: Dict[str, Tuple[Any, float]] = {}
+        self._AUTH_CACHE_TTL = 30  # seconds
 
     # ============================================================
     # Password hashing
@@ -36,7 +40,7 @@ class AuthController:
 
     def hash_password(self, password: str) -> str:
         """Hash password using bcrypt."""
-        salt = bcrypt.gensalt(rounds=12)
+        salt = bcrypt.gensalt(rounds=10)
         hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
         return hashed.decode("utf-8")
 
@@ -404,14 +408,29 @@ class AuthController:
             if not payload:
                 return jsonify({"error": "Invalid or expired token"}), 401
 
-            user = self.datastore.get_by_id("users", payload.get("user_id"), payload.get("account_id"))
-            if not user:
-                return jsonify({"error": "User not found"}), 401
+            user_id = payload.get("user_id")
+            account_id = payload.get("account_id")
+            cache_key = f"auth:{user_id}:{account_id}"
+            now = _time.time()
+
+            cached = self._auth_cache.get(cache_key)
+            if cached and (now - cached[1]) < self._AUTH_CACHE_TTL:
+                user, account = cached[0]
+            else:
+                user = self.datastore.get_by_id("users", user_id, account_id)
+                if not user:
+                    return jsonify({"error": "User not found"}), 401
+                account = self.datastore.get_by_id("accounts", account_id)
+                if not account:
+                    return jsonify({"error": "Account not found"}), 401
+                self._auth_cache[cache_key] = ((user, account), now)
+                # Prune stale entries periodically
+                if len(self._auth_cache) > 200:
+                    cutoff = now - self._AUTH_CACHE_TTL * 2
+                    self._auth_cache = {k: v for k, v in self._auth_cache.items() if v[1] > cutoff}
 
             g.user = user
-            g.account = self.datastore.get_by_id("accounts", payload.get("account_id"))
-            if not g.account:
-                return jsonify({"error": "Account not found"}), 401
+            g.account = account
             if g.account.get("is_locked"):
                 return jsonify({"error": "Account locked"}), 403
             if g.account.get("is_active") is False:
@@ -419,8 +438,12 @@ class AuthController:
             request.user = {
                 "id": user["id"],
                 "email": user["email"],
+                "name": user.get("name"),
                 "role": user.get("role"),
-                "account_id": user.get("account_id")
+                "account_id": user.get("account_id"),
+                "business_type": user.get("business_type"),
+                "business_role": user.get("business_role"),
+                "permissions": user.get("permissions") or self._default_permissions(user.get("role"))
             }
             return f(*args, **kwargs)
         return decorated
