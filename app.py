@@ -480,27 +480,48 @@ def create_app() -> Flask:
 
     @app.post("/api/auth/signup")
     def signup():
-        data = request.get_json() or {}
-        success, error, result = auth_controller.signup(
-            email=data.get("email"),
-            password=data.get("password"),
-            name=data.get("name"),
-            plan=data.get("plan", "free"),
-            business_type=data.get("business_type")
-        )
-        if success:
-            refresh_token = auth_controller.create_refresh_session(
-                user=result.get("user") or {},
-                user_agent=request.headers.get("User-Agent", ""),
-                ip_address=_rate_limit_key()
+        try:
+            data = request.get_json() or {}
+            
+            # Validate required fields first
+            email = (data.get("email") or "").strip()
+            password = (data.get("password") or "").strip()
+            name = (data.get("name") or "").strip()
+            
+            if not email or not password or not name:
+                return jsonify({"error": "Email, password, and name are required"}), 400
+            if len(password) < 6:
+                return jsonify({"error": "Password must be at least 6 characters"}), 400
+            
+            success, error, result = auth_controller.signup(
+                email=email,
+                password=password,
+                name=name,
+                plan=data.get("plan", "free"),
+                business_type=data.get("business_type")
             )
-            csrf_token = uuid.uuid4().hex
-            result["refreshToken"] = refresh_token
-            result["csrfToken"] = csrf_token
-            resp = jsonify(result)
-            _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
-            return resp, 201
-        return jsonify({"error": error or "Signup failed"}), 400
+            
+            if success:
+                refresh_token = auth_controller.create_refresh_session(
+                    user=result.get("user") or {},
+                    user_agent=request.headers.get("User-Agent", ""),
+                    ip_address=_rate_limit_key()
+                )
+                csrf_token = uuid.uuid4().hex
+                result["refreshToken"] = refresh_token
+                result["csrfToken"] = csrf_token
+                resp = jsonify(result)
+                _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
+                return resp, 201
+            
+            return jsonify({"error": error or "Signup failed"}), 400
+            
+        except ValueError as e:
+            logger.error(f"Signup validation error: {str(e)}")
+            return jsonify({"error": f"Invalid input: {str(e)}"}), 400
+        except Exception as e:
+            logger.error(f"Signup error: {str(e)}", exc_info=True)
+            return jsonify({"error": "Signup failed. Please try again later."}), 500
 
     @app.post("/api/auth/login")
     def login():

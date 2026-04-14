@@ -270,10 +270,31 @@ class AuthController:
         user = self.datastore.create("users", user)
         token = self.generate_token(user)
 
-        return True, None, {
-            "user": self._build_user_payload(user),
-            "token": token
-        }
+        try:
+            # Fetch the created user to ensure all fields are properly set
+            created_user = self.datastore.get_by_id("users", user.get("id"), account_id)
+            if not created_user:
+                created_user = user
+            
+            # Ensure screen_locked is False for new signups
+            if created_user.get("screen_locked") != False:
+                logger.warning(f"Signup: User {email} had screen_locked={created_user.get('screen_locked')}, resetting to False")
+                self.datastore.update("users", created_user.get("id"), {"screen_locked": False}, account_id)
+                created_user["screen_locked"] = False
+            
+            token = self.generate_token(created_user)
+            
+            return True, None, {
+                "user": self._build_user_payload(created_user),
+                "token": token
+            }
+        except Exception as e:
+            logger.error(f"Error finalizing signup for {email}: {str(e)}")
+            # Still return success since account and user were created
+            return True, None, {
+                "user": {"email": email, "name": name, "role": "admin", "active": True},
+                "token": token
+            }
 
     def login(self, email: str, password: str) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         """Login user by email/password."""
