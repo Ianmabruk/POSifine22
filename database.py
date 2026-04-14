@@ -315,6 +315,26 @@ class DataStore:
                     )
                 """)
 
+                # Stock deductions table (audit trail for inventory reductions)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_deductions (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                        product_name TEXT NOT NULL,
+                        quantity_before REAL NOT NULL,
+                        quantity_deducted REAL NOT NULL,
+                        quantity_after REAL NOT NULL,
+                        unit TEXT DEFAULT 'pcs',
+                        payment_method TEXT DEFAULT 'cash',
+                        cashier_id INTEGER,
+                        cashier_name TEXT,
+                        deduction_reason TEXT,
+                        sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+
                 # Petroleum tanks
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS petroleum_tanks (
@@ -631,6 +651,10 @@ class DataStore:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_account ON stock_movements(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_account ON stock_deductions(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_product ON stock_deductions(product_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_created ON stock_deductions(created_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_cashier ON stock_deductions(cashier_id)")
                 
                 # ============================================================
                 # MIGRATIONS: Add new columns to existing tables
