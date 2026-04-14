@@ -1752,6 +1752,9 @@ def create_app() -> Flask:
         sync_manager.broadcast_product_update(account_id, product, action='updated')
         if cache.enabled:
             cache.delete(f"cache:products:{account_id}")
+            # Invalidate stats cache when cost changes so COGS reflects latest costs
+            if "cost" in updates or "cost_per_unit" in updates:
+                cache.delete(f"cache:stats:{account_id}:all")
         return jsonify(product), 200
 
     @app.put("/api/products/<int:product_id>/stock")
@@ -1877,6 +1880,8 @@ def create_app() -> Flask:
 
         if cache.enabled:
             cache.delete(f"cache:products:{account_id}")
+            if batch_cost > 0:
+                cache.delete(f"cache:stats:{account_id}:all")
 
         return jsonify({
             "batch": created_batch,
