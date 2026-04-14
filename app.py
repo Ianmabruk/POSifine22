@@ -495,6 +495,7 @@ def create_app() -> Flask:
                 ip_address=_rate_limit_key()
             )
             csrf_token = uuid.uuid4().hex
+            result["refreshToken"] = refresh_token
             result["csrfToken"] = csrf_token
             resp = jsonify(result)
             _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
@@ -520,6 +521,7 @@ def create_app() -> Flask:
                 ip_address=_rate_limit_key()
             )
             csrf_token = uuid.uuid4().hex
+            result["refreshToken"] = refresh_token
             result["csrfToken"] = csrf_token
             _log_activity("login", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
             resp = jsonify(result)
@@ -1780,7 +1782,10 @@ def create_app() -> Flask:
         if cache.enabled:
             cache.delete(f"cache:products:{account_id}")
 
-        return jsonify(created_batch), 201
+        return jsonify({
+            "batch": created_batch,
+            "product": updated_product
+        }), 201
 
     # ============================================================
     # Sales
@@ -2263,7 +2268,8 @@ def create_app() -> Flask:
             amount_paid=_safe_float(data.get("amountPaid") or data.get("amount_paid")),
             tax_rate=tax_rate,
             discount_amount=_safe_float(data.get("discount")),
-            service_fee=_safe_float(data.get("serviceFee"))
+            service_fee=_safe_float(data.get("serviceFee")),
+            deduction_plan=deduction_plan   # pass pre-validated plan — skips second DB load
         )
 
         if not success:

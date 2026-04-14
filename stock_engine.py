@@ -226,7 +226,8 @@ class StockEngine:
         amount_paid: float = 0.0,
         tax_rate: float = 0.0,
         discount_amount: float = 0.0,
-        service_fee: float = 0.0
+        service_fee: float = 0.0,
+        deduction_plan: Optional[Dict] = None
     ) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
         Execute complete sale with stock deduction
@@ -255,10 +256,11 @@ class StockEngine:
         start_time = datetime.now()
         
         try:
-            # Step 1: Validate and prepare (fast)
-            is_valid, error, deduction_plan = self.validate_and_prepare_sale(items, account_id)
-            if not is_valid:
-                return False, error, None
+            # Step 1: Use pre-computed plan if provided (avoids double DB load), else validate now
+            if deduction_plan is None:
+                is_valid, error, deduction_plan = self.validate_and_prepare_sale(items, account_id)
+                if not is_valid:
+                    return False, error, None
             
             # Step 2: Calculate sale totals
             product_map = deduction_plan['product_map']
