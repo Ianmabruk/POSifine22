@@ -1586,7 +1586,7 @@ def create_app() -> Flask:
             quantity=data.get("quantity", 0),
             category=data.get("category", "general"),
             unit=data.get("unit", "pcs"),
-            is_composite=bool(data.get("is_composite") or data.get("isComposite", False)),
+            is_composite=bool(data.get("is_composite") or data.get("isComposite", False) or str(data.get("category", "")).lower() == "composite"),
             recipe=data.get("recipe"),
             **extra_fields
         )
@@ -2233,6 +2233,7 @@ def create_app() -> Flask:
                 normalized["product_id"] = normalized.get("productId")
             items.append(normalized)
 
+        # === PHASE 1: Validate and prepare (fast, in-memory) ===
         is_valid, error, deduction_plan = stock_engine.validate_and_prepare_sale(items, account_id)
         if not is_valid:
             return jsonify({"success": False, "error": error or "Invalid sale"}), 400
@@ -2250,12 +2251,15 @@ def create_app() -> Flask:
         tax_amount = _safe_float(data.get("tax") or data.get("taxAmount"))
         tax_rate = (tax_amount / subtotal) * 100 if subtotal > 0 and tax_amount > 0 else 0.0
 
+        payment_method = data.get("paymentMethod") or data.get("payment_method") or "cash"
+
+        # === PHASE 2: Execute sale (stock deduction + sale record) ===
         success, error, sale = stock_engine.execute_sale(
             items=items,
             account_id=account_id,
             cashier_id=cashier_id,
             cashier_name=cashier_name,
-            payment_method=data.get("paymentMethod") or data.get("payment_method") or "cash",
+            payment_method=payment_method,
             amount_paid=_safe_float(data.get("amountPaid") or data.get("amount_paid")),
             tax_rate=tax_rate,
             discount_amount=_safe_float(data.get("discount")),
@@ -2265,9 +2269,12 @@ def create_app() -> Flask:
         if not success:
             return jsonify({"success": False, "error": error or "Failed to complete sale"}), 400
 
+        # === PHASE 3: Build response using the pre-validated plan ===
         product_map = deduction_plan.get("product_map", {})
         raw_material_map = deduction_plan.get("raw_material_map", {})
+
         product_deductions = []
+        affected_product_ids = set()
         for product_id, qty in deduction_plan.get("deductions", {}).items():
             product = product_map.get(product_id)
             if not product:
@@ -2282,6 +2289,7 @@ def create_app() -> Flask:
                 "deducted": qty,
                 "unit": product.get("unit", "pcs")
             })
+            affected_product_ids.add(product_id)
 
         raw_material_deductions = []
         for material_id, qty in deduction_plan.get("raw_material_deductions", {}).items():
@@ -2299,18 +2307,50 @@ def create_app() -> Flask:
                 "unit": material.get("unit", "unit")
             })
 
-        updated_products = datastore.get_all("products", account_id)
+        # === Record ingredient deductions for stock dashboard ===
+        now_iso = datetime.utcnow().isoformat()
+        for d in product_deductions:
+            deduction_record = {
+                "account_id": account_id,
+                "product_id": d["id"],
+                "product_name": d["name"],
+                "quantity_before": d["before"],
+                "quantity_after": d["after"],
+                "quantity_deducted": d["deducted"],
+                "unit": d["unit"],
+                "sale_id": sale.get("id"),
+                "payment_method": payment_method,
+                "cashier_id": cashier_id,
+                "cashier_name": cashier_name,
+                "created_at": now_iso,
+                "deduction_type": "ingredient"
+            }
+            try:
+                datastore.create("stock_deductions", deduction_record)
+            except Exception:
+                pass  # non-critical
+
+        # Only return affected products instead of ALL products (faster)
+        updated_products = []
+        for pid in affected_product_ids:
+            p = datastore.get_by_id("products", pid, account_id)
+            if p:
+                updated_products.append(p)
+
+        # Check low stock only among affected products
         low_stock = [
             {
                 "id": p.get("id"),
                 "name": p.get("name"),
                 "quantity": p.get("quantity"),
-                "unit": p.get("unit", "pcs")
+                "unit": p.get("unit", "pcs"),
+                "reorder_level": p.get("reorder_level", 0)
             }
             for p in updated_products
             if _safe_float(p.get("quantity")) <= _safe_float(p.get("reorder_level")) and _safe_float(p.get("reorder_level")) > 0
         ]
 
+        # Broadcast updates
         sync_manager.broadcast_sale_completed(account_id, sale)
         for deduction in product_deductions:
             sync_manager.broadcast_stock_update(account_id, deduction.get("id"), deduction.get("after"))
@@ -2333,6 +2373,28 @@ def create_app() -> Flask:
             "timestamp": datetime.utcnow().isoformat(),
             "processingTime": "ok"
         }), 201
+
+    # ============================================================
+    # Stock Deductions History (for Stock Dashboard)
+    # ============================================================
+
+    @app.get("/api/stock-deductions")
+    @auth_controller.require_auth
+    def get_stock_deductions():
+        account_id = request.user.get("account_id")
+        limit = int(request.args.get("limit", 200))
+        product_id = request.args.get("product_id") or request.args.get("productId")
+
+        deductions = datastore.get_all("stock_deductions", account_id)
+        if product_id:
+            try:
+                pid = int(product_id)
+                deductions = [d for d in deductions if int(d.get("product_id") or 0) == pid]
+            except (ValueError, TypeError):
+                pass
+
+        deductions = sorted(deductions, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify(deductions[:limit]), 200
 
     # ============================================================
     # Petroleum Module

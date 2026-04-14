@@ -100,8 +100,12 @@ class StockEngine:
                 if not product:
                     return False, f"Product ID {product_id} not found", None
                 
-                # Check if composite product (support both is_composite and isComposite)
-                is_composite = product.get('is_composite') or product.get('isComposite', False)
+                # Check if composite product (support both is_composite and isComposite and category)
+                is_composite = (
+                    product.get('is_composite') or
+                    product.get('isComposite', False) or
+                    str(product.get('category', '')).lower() == 'composite'
+                )
                 if is_composite:
                     # 🔥 CRITICAL FIX: Enhanced composite product handling
                     recipe = product.get('recipe', [])
@@ -274,14 +278,19 @@ class StockEngine:
                 unit_price = safe_float(product.get('price', 0))
                 item_subtotal = round_decimal(unit_price * quantity)
                 
-                # Calculate cost (support both is_composite and isComposite)
-                is_composite = product.get('is_composite') or product.get('isComposite', False)
+                # Calculate cost (support both is_composite and isComposite and category)
+                is_composite = (
+                    product.get('is_composite') or
+                    product.get('isComposite', False) or
+                    str(product.get('category', '')).lower() == 'composite'
+                )
                 if is_composite:
                     # Sum ingredient costs
                     recipe = product.get('recipe', [])
                     item_cost = 0.0
                     for ingredient in recipe:
-                        ing_id = ingredient.get('product_id') or ingredient.get('id')
+                        # Support both snake_case (DB) and camelCase (Recipes.jsx) keys
+                        ing_id = ingredient.get('product_id') or ingredient.get('id') or ingredient.get('productId')
                         raw_id = ingredient.get('raw_material_id') or ingredient.get('rawMaterialId')
                         is_raw = ingredient.get('type') in ['raw_material', 'raw-material'] or ingredient.get('source') == 'raw_material'
                         ing_qty = safe_float(ingredient.get('quantity', 0))
@@ -294,7 +303,8 @@ class StockEngine:
                         else:
                             ing_product = product_map.get(ing_id)
                             if ing_product:
-                                ing_cost = safe_float(ing_product.get('cost', 0))
+                                # Prefer cost_per_unit (always kept in sync with cost)
+                                ing_cost = safe_float(ing_product.get('cost_per_unit') or ing_product.get('cost', 0))
                                 item_cost += ing_cost * ing_qty * quantity
                 else:
                     unit_cost = safe_float(product.get('cost_per_unit') or product.get('costPerUnit') or product.get('cost', 0))
