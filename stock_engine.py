@@ -100,17 +100,12 @@ class StockEngine:
                 if not product:
                     return False, f"Product ID {product_id} not found", None
                 
-                # Check if composite product (support both is_composite and isComposite and category)
-                is_composite = (
-                    product.get('is_composite') or
-                    product.get('isComposite', False) or
-                    str(product.get('category', '')).lower() == 'composite'
-                )
+                # Treat a product as composite only when an explicit non-empty recipe/BOM exists.
+                recipe = product.get('recipe')
+                is_composite = isinstance(recipe, list) and len(recipe) > 0
                 if is_composite:
                     # 🔥 CRITICAL FIX: Enhanced composite product handling
                     recipe = product.get('recipe', [])
-                    if not recipe:
-                        return False, f"Composite product '{product['name']}' has no recipe defined", None
                     
                     logger.info(f"🍳 [StockEngine] Processing composite product: {product['name']} (qty: {quantity})")
                     logger.info(f"   Recipe has {len(recipe)} ingredients")
@@ -280,12 +275,9 @@ class StockEngine:
                 unit_price = safe_float(product.get('price', 0))
                 item_subtotal = round_decimal(unit_price * quantity)
                 
-                # Calculate cost (support both is_composite and isComposite and category)
-                is_composite = (
-                    product.get('is_composite') or
-                    product.get('isComposite', False) or
-                    str(product.get('category', '')).lower() == 'composite'
-                )
+                # Use recipe/BOM existence as the composite source of truth.
+                recipe = product.get('recipe')
+                is_composite = isinstance(recipe, list) and len(recipe) > 0
                 if is_composite:
                     # Sum ingredient costs
                     recipe = product.get('recipe', [])

@@ -2278,6 +2278,15 @@ def create_app() -> Flask:
         # === PHASE 3: Build response using the pre-validated plan ===
         product_map = deduction_plan.get("product_map", {})
         raw_material_map = deduction_plan.get("raw_material_map", {})
+        deduction_details = deduction_plan.get("details", [])
+
+        deduction_sources = {}
+        for detail in deduction_details:
+            pid = detail.get("product_id")
+            parent = detail.get("parent_product")
+            if not pid or not parent:
+                continue
+            deduction_sources.setdefault(int(pid), set()).add(parent)
 
         product_deductions = []
         affected_product_ids = set()
@@ -2316,6 +2325,12 @@ def create_app() -> Flask:
         # === Record ingredient deductions for stock dashboard ===
         now_iso = datetime.utcnow().isoformat()
         for d in product_deductions:
+            source_products = sorted(list(deduction_sources.get(int(d["id"]), set())))
+            deduction_reason = (
+                f"Ingredient used in: {', '.join(source_products)}"
+                if source_products
+                else "Direct sale"
+            )
             deduction_record = {
                 "account_id": account_id,
                 "product_id": d["id"],
@@ -2329,7 +2344,9 @@ def create_app() -> Flask:
                 "cashier_id": cashier_id,
                 "cashier_name": cashier_name,
                 "created_at": now_iso,
-                "deduction_type": "ingredient"
+                "deduction_type": "ingredient",
+                "parent_product": source_products[0] if source_products else None,
+                "deduction_reason": deduction_reason
             }
             try:
                 datastore.create("stock_deductions", deduction_record)
