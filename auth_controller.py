@@ -57,8 +57,7 @@ class AuthController:
             "user_id": user["id"],
             "email": user["email"],
             "account_id": user["account_id"],
-            "role": user.get("role", "cashier"),
-            "exp": datetime.utcnow() + timedelta(minutes=20)
+            "role": user.get("role", "cashier")
         }
         return jwt.encode(payload, self.secret_key, algorithm="HS256")
 
@@ -179,6 +178,29 @@ class AuthController:
         except Exception:
             return None
 
+    @staticmethod
+    def _default_permissions(role: Optional[str]) -> Dict[str, bool]:
+        normalized_role = (role or "cashier").strip().lower()
+        if normalized_role in {"admin", "main_admin", "owner"}:
+            return {
+                "all": True,
+                "manageUsers": True,
+                "viewSales": True,
+                "viewInventory": True,
+                "viewExpenses": True,
+                "manageProducts": True,
+                "manageSettings": True,
+                "manageReports": True,
+                "manageBusiness": True
+            }
+
+        return {
+            "viewSales": True,
+            "viewInventory": True,
+            "viewExpenses": False,
+            "manageProducts": False
+        }
+
     # ============================================================
     # Auth flows
     # ============================================================
@@ -231,6 +253,7 @@ class AuthController:
             "password_hash": self.hash_password(password),
             "name": name,
             "role": "admin",
+            "permissions": self._default_permissions("admin"),
             "pin": None,
             "cashier_pin": None,
             "is_active": True,
@@ -275,6 +298,42 @@ class AuthController:
 
         if not self.verify_password(password, user.get("password_hash", "")):
             return False, "Invalid credentials", None
+
+        self.datastore.update("users", user["id"], {"last_login": datetime.utcnow().isoformat()}, user.get("account_id"))
+        token = self.generate_token(user)
+
+        return True, None, {
+            "user": self._build_user_payload(user),
+            "token": token
+        }
+
+    def pin_login(self, email: str, pin: str) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+        """Login user by email + PIN."""
+        email = (email or "").strip().lower()
+        pin = str(pin or "").strip()
+        if not email or not pin:
+            return False, "Email and PIN are required", None
+
+        user = self.datastore.get_user_by_email(email)
+        if not user:
+            return False, "Invalid credentials", None
+
+        account = self.datastore.get_by_id("accounts", user.get("account_id")) if user.get("account_id") else None
+        if not account:
+            return False, "Account not found", None
+        if account.get("is_locked"):
+            return False, "Account locked", None
+        if account.get("is_active") is False:
+            return False, "Account inactive. Please choose a subscription.", None
+
+        if user.get("is_locked"):
+            return False, "Account locked", None
+
+        stored_pin = str(user.get("pin") or user.get("cashier_pin") or "").strip()
+        if not stored_pin:
+            return False, "PIN not set for this user", None
+        if stored_pin != pin:
+            return False, "Invalid PIN", None
 
         self.datastore.update("users", user["id"], {"last_login": datetime.utcnow().isoformat()}, user.get("account_id"))
         token = self.generate_token(user)
@@ -380,5 +439,8 @@ class AuthController:
 
         if "active" not in sanitized:
             sanitized["active"] = bool(sanitized.get("is_active", True))
+
+        if not sanitized.get("permissions"):
+            sanitized["permissions"] = self._default_permissions(sanitized.get("role"))
 
         return sanitized

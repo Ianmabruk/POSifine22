@@ -155,6 +155,8 @@ class DataStore:
                         hourly_rate REAL DEFAULT 0.0,
                         business_type TEXT,
                         business_role TEXT,
+                        profile_picture TEXT,
+                        permissions JSONB DEFAULT '{}'::jsonb,
                         UNIQUE(account_id, email)
                     )
                 """)
@@ -267,6 +269,7 @@ class DataStore:
                         reorder_level REAL DEFAULT 0.0,
                         max_stock_level REAL DEFAULT 0.0,
                         cost_per_unit REAL DEFAULT 0.0,
+                        visible_to_cashier BOOLEAN DEFAULT TRUE,
                         enable_weight_pricing BOOLEAN DEFAULT FALSE,
                         created_at TEXT NOT NULL,
                         created_by INTEGER,
@@ -638,7 +641,9 @@ class DataStore:
                     cur.execute("""
                         ALTER TABLE users 
                         ADD COLUMN IF NOT EXISTS business_type TEXT,
-                        ADD COLUMN IF NOT EXISTS business_role TEXT
+                        ADD COLUMN IF NOT EXISTS business_role TEXT,
+                        ADD COLUMN IF NOT EXISTS profile_picture TEXT,
+                        ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb
                     """)
                     logger.info("✅ Migration: Added business_type and business_role columns to users table")
                 except Exception as e:
@@ -655,6 +660,7 @@ class DataStore:
                         ADD COLUMN IF NOT EXISTS max_stock_level REAL DEFAULT 0.0,
                         ADD COLUMN IF NOT EXISTS cost_per_unit REAL DEFAULT 0.0,
                         ADD COLUMN IF NOT EXISTS enable_weight_pricing BOOLEAN DEFAULT FALSE,
+                        ADD COLUMN IF NOT EXISTS visible_to_cashier BOOLEAN DEFAULT TRUE,
                         ADD COLUMN IF NOT EXISTS updated_at TEXT
                     """)
                     logger.info("✅ Migration: Ensured extended products columns exist")

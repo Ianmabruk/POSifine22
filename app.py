@@ -530,6 +530,34 @@ def create_app() -> Flask:
         _record_failed_login()
         return jsonify({"error": error or "Invalid credentials"}), 401
 
+    @app.post("/api/auth/pin-login")
+    def pin_login():
+        is_limited, retry_after = _is_rate_limited()
+        if is_limited:
+            return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
+
+        data = request.get_json() or {}
+        success, error, result = auth_controller.pin_login(
+            email=data.get("email"),
+            pin=data.get("pin")
+        )
+        if success:
+            _reset_login_attempts()
+            refresh_token = auth_controller.create_refresh_session(
+                user=result.get("user") or {},
+                user_agent=request.headers.get("User-Agent", ""),
+                ip_address=_rate_limit_key()
+            )
+            csrf_token = uuid.uuid4().hex
+            result["refreshToken"] = refresh_token
+            result["csrfToken"] = csrf_token
+            _log_activity("pin_login", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
+            resp = jsonify(result)
+            _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
+            return resp, 200
+        _record_failed_login()
+        return jsonify({"error": error or "Invalid credentials"}), 401
+
     @app.post("/api/auth/refresh")
     def refresh_token():
         is_limited, retry_after = _is_refresh_rate_limited()
@@ -538,7 +566,7 @@ def create_app() -> Flask:
 
         data = request.get_json() or {}
         refresh = request.cookies.get("refresh_token")
-        if not refresh and not is_production:
+        if not refresh:
             refresh = data.get("refreshToken")
         if not refresh:
             return jsonify({"error": "Refresh token required"}), 400
@@ -666,6 +694,7 @@ def create_app() -> Flask:
 
         pin_value = (data.get("cashier_pin") or data.get("cashierPIN") or data.get("pin") or "").strip() or None
         role_value = (data.get("role") or "cashier").strip().lower()
+        permissions_value = data.get("permissions") or auth_controller._default_permissions(role_value)
 
         user_payload = {
             "account_id": current.get("account_id"),
@@ -673,6 +702,7 @@ def create_app() -> Flask:
             "password_hash": auth_controller.hash_password(password),
             "name": name,
             "role": role_value,
+            "permissions": permissions_value,
             "pin": pin_value,
             "cashier_pin": pin_value,
             "is_active": True,
@@ -1579,6 +1609,11 @@ def create_app() -> Flask:
         for float_field in ("reorder_level", "max_stock_level", "cost_per_unit"):
             if float_field in extra_fields and extra_fields.get(float_field) != "":
                 extra_fields[float_field] = _safe_float(extra_fields.get(float_field))
+        # Handle visibleToCashier -> stored as visible_to_cashier
+        visible = data.get("visibleToCashier") if "visibleToCashier" in data else data.get("visible_to_cashier")
+        if visible is not None:
+            extra_fields["visible_to_cashier"] = bool(visible)
+
 
         resolved_cost = data.get("cost")
         if (resolved_cost is None or resolved_cost == "") and extra_fields.get("cost_per_unit") is not None:
@@ -1645,6 +1680,12 @@ def create_app() -> Flask:
             updates["is_composite"] = bool(data.get("isComposite"))
         if "enable_weight_pricing" in updates:
             updates["enable_weight_pricing"] = bool(updates.get("enable_weight_pricing"))
+        # Handle visibleToCashier
+        if "visibleToCashier" in data:
+            updates["visible_to_cashier"] = bool(data.get("visibleToCashier"))
+        elif "visible_to_cashier" in data:
+            updates["visible_to_cashier"] = bool(data.get("visible_to_cashier"))
+
 
         for float_field in ("price", "cost", "quantity", "reorder_level", "max_stock_level", "cost_per_unit"):
             if float_field in updates:
