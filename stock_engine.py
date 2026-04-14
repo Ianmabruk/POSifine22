@@ -78,10 +78,18 @@ class StockEngine:
             # Load all products once
             products = self.ds.get_all('products', account_id)
             product_map = {p['id']: p for p in products}
+            product_name_map = {
+                str(p.get('name') or '').strip().lower(): p
+                for p in products if str(p.get('name') or '').strip()
+            }
 
             # Load raw materials (if any)
             raw_materials = self.ds.get_all('raw_materials', account_id)
             raw_material_map = {m['id']: m for m in raw_materials}
+            raw_material_name_map = {
+                str(m.get('name') or '').strip().lower(): m
+                for m in raw_materials if str(m.get('name') or '').strip()
+            }
             
             # Track required deductions
             deductions = {}  # {product_id: quantity}
@@ -114,12 +122,25 @@ class StockEngine:
                         # Support multiple ingredient formats
                         ing_id = ingredient.get('product_id') or ingredient.get('id') or ingredient.get('productId')
                         raw_id = ingredient.get('raw_material_id') or ingredient.get('rawMaterialId') or ingredient.get('materialId')
+                        ingredient_name = str(ingredient.get('name') or '').strip()
                         is_raw = (
                             ingredient.get('type') in ['raw_material', 'raw-material', 'material'] or 
                             ingredient.get('source') == 'raw_material' or
                             ingredient.get('category') == 'raw_material' or
                             bool(raw_id)
                         )
+
+                        # Fallback: resolve ID-less recipe entries by ingredient name.
+                        if not ing_id and not raw_id and ingredient_name:
+                            raw_match = raw_material_name_map.get(ingredient_name.lower())
+                            if raw_match:
+                                raw_id = raw_match.get('id')
+                                is_raw = True
+                            else:
+                                product_match = product_name_map.get(ingredient_name.lower())
+                                if product_match:
+                                    ing_id = product_match.get('id')
+
                         ing_qty = safe_float(ingredient.get('quantity', 0))
                         total_ing_qty = round_decimal(ing_qty * quantity)
                         
@@ -260,6 +281,14 @@ class StockEngine:
             # Step 2: Calculate sale totals
             product_map = deduction_plan['product_map']
             raw_material_map = deduction_plan.get('raw_material_map', {})
+            product_name_map = {
+                str(p.get('name') or '').strip().lower(): p
+                for p in product_map.values() if str(p.get('name') or '').strip()
+            }
+            raw_material_name_map = {
+                str(m.get('name') or '').strip().lower(): m
+                for m in raw_material_map.values() if str(m.get('name') or '').strip()
+            }
             sale_items = []
             subtotal = 0.0
             total_cost = 0.0
@@ -286,7 +315,19 @@ class StockEngine:
                         # Support both snake_case (DB) and camelCase (Recipes.jsx) keys
                         ing_id = ingredient.get('product_id') or ingredient.get('id') or ingredient.get('productId')
                         raw_id = ingredient.get('raw_material_id') or ingredient.get('rawMaterialId')
+                        ingredient_name = str(ingredient.get('name') or '').strip()
                         is_raw = ingredient.get('type') in ['raw_material', 'raw-material'] or ingredient.get('source') == 'raw_material'
+
+                        if not ing_id and not raw_id and ingredient_name:
+                            raw_match = raw_material_name_map.get(ingredient_name.lower())
+                            if raw_match:
+                                raw_id = raw_match.get('id')
+                                is_raw = True
+                            else:
+                                product_match = product_name_map.get(ingredient_name.lower())
+                                if product_match:
+                                    ing_id = product_match.get('id')
+
                         ing_qty = safe_float(ingredient.get('quantity', 0))
                         if raw_id or is_raw:
                             material_id = raw_id or ing_id

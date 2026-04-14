@@ -660,7 +660,8 @@ def create_app() -> Flask:
             return jsonify({"error": "Name, email, and password are required"}), 400
 
         existing = datastore.get_user_by_email(email)
-        if existing and existing.get("account_id") == current.get("account_id"):
+        # Email is globally unique in storage, so reject early with a clear message.
+        if existing:
             return jsonify({"error": "User with this email already exists"}), 400
 
         pin_value = (data.get("cashier_pin") or data.get("cashierPIN") or data.get("pin") or "").strip() or None
@@ -686,7 +687,11 @@ def create_app() -> Flask:
             "profile_picture": data.get("profilePicture") or data.get("profile_picture")
         }
 
-        created = datastore.create("users", user_payload)
+        try:
+            created = datastore.create("users", user_payload)
+        except Exception:
+            return jsonify({"error": "Unable to create cashier right now. Please try again."}), 500
+
         created.pop("password_hash", None)
         return jsonify(created), 201
 
@@ -1980,16 +1985,67 @@ def create_app() -> Flask:
         if amount <= 0:
             return jsonify({"error": "Amount must be positive"}), 400
 
+        category = (data.get("category") or "general").strip().lower()
+        quantity = _safe_float(data.get("quantity") or 1)
+        unit = (data.get("unit") or "unit").strip() or "unit"
+        track_stock = bool(data.get("track_stock") or data.get("trackStock") or category == "ingredient")
+
+        if track_stock and quantity <= 0:
+            return jsonify({"error": "Quantity must be positive for stock-tracked ingredient expenses"}), 400
+
         expense = {
             "account_id": account_id,
             "name": data.get("name") or data.get("description") or "Expense",
             "description": data.get("description") or data.get("name") or "",
             "amount": amount,
-            "category": data.get("category") or "general",
+            "quantity": quantity,
+            "unit": unit,
+            "category": category,
+            "source": data.get("source") or ("ingredient-stock" if track_stock else "manual"),
             "cashier_id": cashier_id,
             "cashier_name": cashier_name,
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat(),
+            "created_by": cashier_id
         }
+
+        # Allow ingredient purchases in Expenses to refill ingredient stock.
+        if track_stock:
+            ingredient_name = (expense.get("name") or "").strip()
+            if not ingredient_name:
+                return jsonify({"error": "Ingredient name is required for stock-tracked expenses"}), 400
+
+            raw_materials = datastore.get_all("raw_materials", account_id)
+            existing_material = next(
+                (m for m in raw_materials if str(m.get("name") or "").strip().lower() == ingredient_name.lower()),
+                None
+            )
+
+            if existing_material:
+                current_qty = _safe_float(existing_material.get("quantity"))
+                new_qty = round(current_qty + quantity, 4)
+                material_updates = {
+                    "quantity": new_qty,
+                    "unit": unit,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+                unit_cost = amount / quantity if quantity > 0 else 0.0
+                if unit_cost > 0:
+                    material_updates["cost_per_unit"] = round(unit_cost, 6)
+                datastore.update("raw_materials", existing_material.get("id"), material_updates, account_id)
+                expense["linked_raw_material_id"] = existing_material.get("id")
+            else:
+                unit_cost = amount / quantity if quantity > 0 else 0.0
+                created_material = datastore.create("raw_materials", {
+                    "account_id": account_id,
+                    "name": ingredient_name,
+                    "quantity": quantity,
+                    "unit": unit,
+                    "cost_per_unit": round(unit_cost, 6),
+                    "reorder_level": _safe_float(data.get("reorder_level") or 0),
+                    "created_at": datetime.utcnow().isoformat(),
+                    "updated_at": None
+                })
+                expense["linked_raw_material_id"] = created_material.get("id")
 
         created = datastore.create("expenses", expense)
         sync_manager.broadcast_expense_created(account_id, created)
@@ -2025,6 +2081,19 @@ def create_app() -> Flask:
         if cache.enabled:
             cache.delete(f"cache:stats:{account_id}:all")
         return jsonify({"success": True}), 200
+
+    # ============================================================
+    # Raw Materials (Ingredient Stock)
+    # ============================================================
+
+    @app.get("/api/raw-materials")
+    @auth_controller.require_auth
+    def get_raw_materials():
+        account_id = request.user.get("account_id")
+        raw_materials = datastore.get_all("raw_materials", account_id)
+        raw_materials = _apply_sort(raw_materials, request.args.get("sort") or "name")
+        raw_materials = _apply_limit(raw_materials, request.args.get("limit"))
+        return jsonify(raw_materials), 200
 
     # ============================================================
     # School - Students
@@ -2333,6 +2402,7 @@ def create_app() -> Flask:
             )
             deduction_record = {
                 "account_id": account_id,
+                "item_type": "product",
                 "product_id": d["id"],
                 "product_name": d["name"],
                 "quantity_before": d["before"],
@@ -2347,6 +2417,29 @@ def create_app() -> Flask:
                 "deduction_type": "ingredient",
                 "parent_product": source_products[0] if source_products else None,
                 "deduction_reason": deduction_reason
+            }
+            try:
+                datastore.create("stock_deductions", deduction_record)
+            except Exception:
+                pass  # non-critical
+
+        for d in raw_material_deductions:
+            deduction_record = {
+                "account_id": account_id,
+                "item_type": "raw_material",
+                "raw_material_id": d["id"],
+                "product_name": d["name"],
+                "quantity_before": d["before"],
+                "quantity_after": d["after"],
+                "quantity_deducted": d["deducted"],
+                "unit": d["unit"],
+                "sale_id": sale.get("id"),
+                "payment_method": payment_method,
+                "cashier_id": cashier_id,
+                "cashier_name": cashier_name,
+                "created_at": now_iso,
+                "deduction_type": "ingredient",
+                "deduction_reason": "Ingredient usage from composite sale"
             }
             try:
                 datastore.create("stock_deductions", deduction_record)
