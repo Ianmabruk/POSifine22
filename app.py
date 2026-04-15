@@ -734,6 +734,51 @@ def create_app() -> Flask:
         response_user = auth_controller._build_user_payload(getattr(g, "user", {}) or {})
         return jsonify(response_user), 200
 
+    @app.post("/api/auth/change-password")
+    @auth_controller.require_auth
+    def change_password():
+        user = request.user
+        data = request.get_json() or {}
+        current_password = (data.get("currentPassword") or "").strip()
+        new_password = (data.get("newPassword") or "").strip()
+        new_pin = data.get("newPin")  # optional
+
+        if not current_password:
+            return jsonify({"error": "Current password is required"}), 400
+        if not new_password and new_pin is None:
+            return jsonify({"error": "New password or new PIN is required"}), 400
+        if new_password and len(new_password) < 4:
+            return jsonify({"error": "New password must be at least 4 characters"}), 400
+
+        # Re-fetch full user from DB to get password_hash
+        db_user = datastore.get_by_id("users", user.get("id"), user.get("account_id"))
+        if not db_user:
+            return jsonify({"error": "User not found"}), 404
+
+        if not auth_controller.verify_password(current_password, db_user.get("password_hash", "")):
+            return jsonify({"error": "Current password is incorrect"}), 401
+
+        updates = {}
+        changed_items = []
+        if new_password:
+            updates["password_hash"] = auth_controller.hash_password(new_password)
+            changed_items.append("password")
+        if new_pin is not None:
+            pin_text = str(new_pin).strip()
+            if len(pin_text) < 4:
+                return jsonify({"error": "PIN must be at least 4 digits"}), 400
+            updates["pin"] = pin_text
+            updates["cashier_pin"] = pin_text
+            changed_items.append("PIN")
+
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        success = datastore.update("users", user.get("id"), updates, user.get("account_id"))
+        if not success:
+            return jsonify({"error": "Failed to update credentials"}), 400
+
+        changed_str = " and ".join(changed_items)
+        return jsonify({"message": f"{changed_str} changed successfully"}), 200
+
     # ============================================================
     # Account User Management (Admin/Cashier Management)
     # ============================================================
