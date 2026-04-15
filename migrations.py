@@ -268,6 +268,13 @@ def run_migrations():
                     CREATE INDEX IF NOT EXISTS idx_school_notices_account ON school_notices(account_id);
                 ''')
 
+                # Add missing columns to credit_requests
+                print("📍 Adding missing columns to credit_requests...")
+                cursor.execute('''
+                    ALTER TABLE credit_requests ADD COLUMN IF NOT EXISTS customer_name TEXT;
+                    ALTER TABLE credit_requests ADD COLUMN IF NOT EXISTS notes TEXT;
+                ''')
+
                 conn.commit()
                 logger.info("✅ All migrations completed successfully")
                 print("\n✅ Database migrations completed successfully!")

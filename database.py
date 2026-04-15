@@ -440,8 +440,10 @@ class DataStore:
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
                         cashier_id INTEGER NOT NULL,
                         cashier_name TEXT NOT NULL,
+                        customer_name TEXT,
                         amount REAL NOT NULL,
                         reason TEXT NOT NULL,
+                        notes TEXT,
                         status TEXT DEFAULT 'pending',
                         reviewed_by INTEGER,
                         reviewed_at TEXT,
@@ -705,6 +707,17 @@ class DataStore:
                     logger.info("✅ Migration: Ensured extended expenses columns exist")
                 except Exception as e:
                     logger.warning(f"Migration warning for expenses columns: {e}")
+                
+                # Migration: Add missing columns to credit_requests
+                try:
+                    cur.execute("""
+                    ALTER TABLE credit_requests
+                        ADD COLUMN IF NOT EXISTS customer_name TEXT,
+                        ADD COLUMN IF NOT EXISTS notes TEXT
+                    """)
+                    logger.info("✅ Migration: Ensured credit_requests has customer_name and notes columns")
+                except Exception as e:
+                    logger.warning(f"Migration warning for credit_requests columns: {e}")
                 
                 conn.commit()
     
