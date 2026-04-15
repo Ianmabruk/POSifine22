@@ -833,6 +833,44 @@ class DataStore:
             all_items = self._read_json(filepath)
             return [item for item in all_items if item.get(field) == value]
     
+    def find(self, table: str, filters: Dict[str, Any], account_id: Optional[str] = None) -> List[Dict]:
+        """Find records matching ALL filter conditions.
+        
+        Args:
+            table: Table name
+            filters: Dict of field->value pairs; ALL must match
+            account_id: Optional account_id override for security (if not in filters)
+        
+        Returns:
+            List of matching records
+        """
+        # Ensure account_id is always part of filtering for tenant isolation
+        effective_account_id = account_id or filters.get('account_id') or filters.get('accountId')
+
+        if self.use_postgres:
+            with self.pg_pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    conditions = []
+                    values = []
+                    for field, value in filters.items():
+                        conditions.append(f"{field} = %s")
+                        values.append(value)
+                    if not conditions:
+                        return []
+                    query = f"SELECT * FROM {table} WHERE " + " AND ".join(conditions)
+                    cur.execute(query, values)
+                    return cur.fetchall()
+        else:
+            filepath = self.files.get(table)
+            if not filepath:
+                return []
+            all_items = self._read_json(filepath)
+            results = []
+            for item in all_items:
+                if all(item.get(k) == v for k, v in filters.items()):
+                    results.append(item)
+            return results
+
     def create(self, table: str, data: Dict) -> Dict:
         """Create a new record"""
         if self.use_postgres:
