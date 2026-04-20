@@ -241,6 +241,7 @@ class StockEngine:
         payment_method: str = 'cash',
         amount_paid: float = 0.0,
         tax_rate: float = 0.0,
+        tax_type: str = 'exclusive',
         discount_amount: float = 0.0,
         service_fee: float = 0.0,
         deduction_plan: Optional[Dict] = None
@@ -263,6 +264,7 @@ class StockEngine:
             payment_method: Payment method
             amount_paid: Amount paid by customer
             tax_rate: Tax rate (%)
+            tax_type: 'inclusive' or 'exclusive'
             discount_amount: Discount applied
             service_fee: Service fee applied
         
@@ -359,8 +361,14 @@ class StockEngine:
                 total_cost += item_cost
             
             # Apply tax, discount, service fee
-            tax_amount = round_decimal(subtotal * (tax_rate / 100))
-            total = round_decimal(subtotal + tax_amount + service_fee - discount_amount)
+            if tax_type == 'inclusive':
+                # Tax is already included in item prices — extract for records only
+                tax_amount = round_decimal((subtotal / (1 + tax_rate / 100)) * (tax_rate / 100)) if tax_rate > 0 else 0.0
+                total = round_decimal(subtotal + service_fee - discount_amount)
+            else:
+                # Tax is added on top of subtotal
+                tax_amount = round_decimal((subtotal - discount_amount) * (tax_rate / 100))
+                total = round_decimal(subtotal - discount_amount + tax_amount + service_fee)
             change = round_decimal(amount_paid - total) if amount_paid > total else 0.0
             gross_profit = round_decimal(total - total_cost)
             

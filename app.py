@@ -2502,6 +2502,7 @@ def create_app() -> Flask:
                 subtotal += _safe_float(product.get("price")) * quantity
 
         tax_amount = _safe_float(data.get("tax") or data.get("taxAmount"))
+        tax_type = (data.get("taxType") or "exclusive").strip().lower()
         tax_rate = (tax_amount / subtotal) * 100 if subtotal > 0 and tax_amount > 0 else 0.0
 
         payment_method = data.get("paymentMethod") or data.get("payment_method") or "cash"
@@ -2515,6 +2516,7 @@ def create_app() -> Flask:
             payment_method=payment_method,
             amount_paid=_safe_float(data.get("amountPaid") or data.get("amount_paid")),
             tax_rate=tax_rate,
+            tax_type=tax_type,
             discount_amount=_safe_float(data.get("discount")),
             service_fee=_safe_float(data.get("serviceFee")),
             deduction_plan=deduction_plan   # pass pre-validated plan — skips second DB load
