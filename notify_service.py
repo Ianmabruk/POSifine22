@@ -25,6 +25,14 @@ except ImportError:
     HAS_REQUESTS = False
     logger.warning("requests not installed. WhatsApp alerts unavailable.")
 
+try:
+    from email_service import email_service as _email_service_instance
+    EMAIL_SERVICE_AVAILABLE = True
+    email_service = _email_service_instance
+except ImportError:
+    EMAIL_SERVICE_AVAILABLE = False
+    email_service = None
+
 
 class NotificationService:
     """
@@ -33,12 +41,18 @@ class NotificationService:
     
     def __init__(self):
         """Initialize notification service"""
-        # Email configuration
-        self.email_enabled = bool(os.environ.get('EMAIL_USER') and os.environ.get('EMAIL_PASS'))
+        # Email configuration - SMTP
+        self.smtp_enabled = bool(os.environ.get('EMAIL_USER') and os.environ.get('EMAIL_PASS'))
         self.email_user = os.environ.get('EMAIL_USER')
         self.email_pass = os.environ.get('EMAIL_PASS')
         self.email_host = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
         self.email_port = int(os.environ.get('EMAIL_PORT', '587'))
+        
+        # Email configuration - SendGrid (Twilio) fallback
+        self.sendgrid_enabled = EMAIL_SERVICE_AVAILABLE and email_service and email_service.available
+        
+        # Overall email enabled if either backend works
+        self.email_enabled = self.smtp_enabled or self.sendgrid_enabled
         
         # WhatsApp/Twilio configuration
         self.whatsapp_enabled = bool(
@@ -64,37 +78,37 @@ class NotificationService:
         html: Optional[str] = None
     ) -> bool:
         """
-        Send email alert
-        
-        Args:
-            to: Recipient email
-            subject: Email subject
-            message: Plain text message
-            html: Optional HTML content
-            
-        Returns:
-            True if sent successfully
+        Send email alert via SMTP or SendGrid (Twilio) fallback.
         """
         if not self.email_enabled:
             logger.warning("Email not configured. Skipping email alert.")
             return False
         
+        # Try SendGrid first if SMTP is not configured
+        if not self.smtp_enabled and self.sendgrid_enabled:
+            try:
+                result = email_service.send_email(to, subject, html or message, message)
+                return result.get("success", False)
+            except Exception as e:
+                logger.error(f"SendGrid email failed to {to}: {e}")
+                return False
+        
+        # Fall back to SMTP
+        if not self.smtp_enabled:
+            logger.warning("No email backend configured (SMTP or SendGrid).")
+            return False
+        
         try:
-            # Create message
             msg = MIMEMultipart('alternative')
             msg['From'] = self.email_user
             msg['To'] = to
             msg['Subject'] = subject
             msg['Date'] = datetime.now().strftime('%a, %d %b %Y %H:%M:%S %z')
             
-            # Add text version
             msg.attach(MIMEText(message, 'plain'))
-            
-            # Add HTML version if provided
             if html:
                 msg.attach(MIMEText(html, 'html'))
             
-            # Send via SMTP
             with smtplib.SMTP(self.email_host, self.email_port) as server:
                 server.starttls()
                 server.login(self.email_user, self.email_pass)

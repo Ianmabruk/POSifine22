@@ -30,9 +30,19 @@ class AuthController:
         self.datastore = datastore
         self.secret_key = secret_key
         self.session_store = session_store
-        # Simple in-memory TTL cache to reduce DB hits on every authenticated request
         self._auth_cache: Dict[str, Tuple[Any, float]] = {}
-        self._AUTH_CACHE_TTL = 30  # seconds
+        self._AUTH_CACHE_TTL = 30
+        self._email_service = None
+
+    @property
+    def email_service(self):
+        if self._email_service is None:
+            try:
+                from email_service import email_service
+                self._email_service = email_service
+            except Exception:
+                self._email_service = None
+        return self._email_service
 
     # ============================================================
     # Password hashing
@@ -291,6 +301,15 @@ class AuthController:
                 created_user["screen_locked"] = False
             
             token = self.generate_token(created_user)
+            
+            # Send welcome email (non-blocking)
+            try:
+                es = self.email_service
+                if es and es.available:
+                    login_url = os.environ.get("APP_LOGIN_URL", "https://posify.co.ke/auth/login")
+                    es.send_welcome_email(email, name, business_name or name, login_url)
+            except Exception as e:
+                logger.warning(f"Failed to send welcome email to {email}: {str(e)}")
             
             return True, None, {
                 "user": self._build_user_payload(created_user),

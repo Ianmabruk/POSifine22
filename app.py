@@ -17,6 +17,7 @@ import asyncio
 from typing import Dict, Any
 
 from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from flask import Flask, jsonify, request, g
 from flask_sock import Sock
@@ -60,8 +61,6 @@ try:
 except ImportError:
     OPTIMIZATIONS_AVAILABLE = False
     print("Optimization modules not available - running in basic mode")
-
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
