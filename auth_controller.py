@@ -230,6 +230,8 @@ class AuthController:
 
         account_id = f"acc_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow().isoformat()
+        trial_duration_days = 15
+        trial_end = (datetime.utcnow() + timedelta(days=trial_duration_days)).isoformat() if (plan or "").lower() in {"trial", "free_trial", "starter"} else None
 
         account = {
             "id": account_id,
@@ -238,7 +240,7 @@ class AuthController:
             "plan": plan or "free",
             "is_active": True,
             "is_locked": False,
-            "trial_ends_at": None,
+            "trial_ends_at": trial_end,
             "subscription_ends_at": None,
             "created_at": now,
             "business_logo": None,
@@ -247,7 +249,7 @@ class AuthController:
             "screen_lock_password": "2005",
             "days_used": 0,
             "last_activity_date": None,
-            "requested_trial": False,
+            "requested_trial": trial_end is not None,
             "business_type": business_type
         }
 
@@ -420,6 +422,11 @@ class AuthController:
                 user, account = cached[0]
             else:
                 user = self.datastore.get_by_id("users", user_id, account_id)
+                # Fallback: try without account_id filter (handles account_id drift)
+                if not user and user_id:
+                    user = self.datastore.get_by_id("users", user_id, None)
+                    if user:
+                        account_id = user.get("account_id")
                 if not user:
                     return jsonify({"error": "User not found"}), 401
                 account = self.datastore.get_by_id("accounts", account_id)

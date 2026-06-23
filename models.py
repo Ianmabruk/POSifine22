@@ -92,6 +92,12 @@ class Account:
         if self.plan == SubscriptionPlan.FREE.value:
             return True
         
+        if self.plan == "trial":
+            if self.trial_ends_at:
+                ends_at = datetime.fromisoformat(self.trial_ends_at)
+                return datetime.now() < ends_at
+            return True
+        
         if self.subscription_ends_at:
             ends_at = datetime.fromisoformat(self.subscription_ends_at)
             return datetime.now() < ends_at

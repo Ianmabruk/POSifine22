@@ -780,6 +780,102 @@ def create_app() -> Flask:
         return jsonify({"message": f"{changed_str} changed successfully"}), 200
 
     # ============================================================
+    # Subscription Management
+    # ============================================================
+
+    def _require_active_subscription():
+        account = datastore.get_by_id("accounts", request.user.get("account_id"))
+        if not account:
+            return False, (jsonify({"error": "Account not found"}), 404)
+        if not account.get("is_active") or account.get("is_locked"):
+            return False, (jsonify({"error": "Account suspended. Please contact support."}), 403)
+        plan = account.get("plan", "free")
+        if plan == "free":
+            return True, None
+        if plan == "trial":
+            trial_end = account.get("trial_ends_at")
+            if trial_end and datetime.utcnow().isoformat() > trial_end:
+                return False, (jsonify({"error": "Trial expired. Please subscribe to continue.", "code": "TRIAL_EXPIRED"}), 403)
+            return True, None
+        sub_end = account.get("subscription_ends_at")
+        if sub_end and datetime.utcnow().isoformat() > sub_end:
+            return False, (jsonify({"error": "Subscription expired. Please renew to continue.", "code": "SUBSCRIPTION_EXPIRED"}), 403)
+        return True, None
+
+    @app.get("/api/subscription/status")
+    @auth_controller.require_auth
+    def subscription_status():
+        account = datastore.get_by_id("accounts", request.user.get("account_id"))
+        if not account:
+            return jsonify({"error": "Account not found"}), 404
+        now = datetime.utcnow().isoformat()
+        plan = account.get("plan", "free")
+        trial_end = account.get("trial_ends_at")
+        sub_end = account.get("subscription_ends_at")
+        status = "active"
+        days_remaining = None
+        if plan == "trial":
+            if trial_end:
+                days_remaining = max(0, (datetime.fromisoformat(trial_end) - datetime.utcnow()).days)
+                if now > trial_end:
+                    status = "expired"
+            else:
+                status = "active"
+        elif plan not in ("free",):
+            if sub_end:
+                days_remaining = max(0, (datetime.fromisoformat(sub_end) - datetime.utcnow()).days)
+                if now > sub_end:
+                    status = "expired"
+        return jsonify({
+            "plan": plan,
+            "status": status,
+            "trial_ends_at": trial_end,
+            "subscription_ends_at": sub_end,
+            "days_remaining": days_remaining,
+            "is_active": bool(account.get("is_active")),
+        }), 200
+
+    @app.post("/api/subscription/renew")
+    @auth_controller.require_auth
+    def subscription_renew():
+        ok, err_resp = _require_active_subscription()
+        if not ok:
+            return err_resp
+        current, error_response = _require_account_admin()
+        if error_response:
+            return error_response
+        data = request.get_json() or {}
+        plan_id = data.get("plan_id") or request.user.get("plan") or "business"
+        method = data.get("payment_method", "mpesa")
+        now = datetime.utcnow()
+        new_end = (now + timedelta(days=30)).isoformat()
+        success = datastore.update("accounts", request.user.get("account_id"), {
+            "plan": plan_id,
+            "subscription_ends_at": new_end,
+            "trial_ends_at": None,
+            "updated_at": now.isoformat(),
+        })
+        if not success:
+            return jsonify({"error": "Failed to update subscription"}), 400
+        return jsonify({
+            "success": True,
+            "plan": plan_id,
+            "subscription_ends_at": new_end,
+            "payment_method": method,
+            "message": f"Subscription renewed until {now + timedelta(days=30):%B %d, %Y}",
+        }), 200
+
+    @app.get("/api/subscription/plans")
+    def subscription_plans():
+        return jsonify({
+            "plans": [
+                {"id": "starter", "name": "Starter", "price": 999, "currency": "KES", "trial_days": 15},
+                {"id": "business", "name": "Business", "price": 2499, "currency": "KES", "trial_days": 15},
+                {"id": "enterprise", "name": "Enterprise", "price": 4999, "currency": "KES", "trial_days": 15},
+            ]
+        }), 200
+
+    # ============================================================
     # Account User Management (Admin/Cashier Management)
     # ============================================================
 
@@ -3366,6 +3462,12 @@ def create_app() -> Flask:
                     ws.send(json.dumps({"type": "pong", "timestamp": datetime.utcnow().isoformat()}))
         finally:
             sync_manager.unregister_connection(ws)
+
+    @app.post("/api/frontend-errors")
+    def frontend_errors():
+        data = request.get_json(silent=True) or {}
+        logger.warning(f"Frontend error report: {data}")
+        return jsonify({"received": True}), 200
 
     return app
 
