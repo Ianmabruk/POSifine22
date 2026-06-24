@@ -7,6 +7,7 @@ import { logger } from "./config/logger";
 import { errorHandler } from "./middlewares/errorHandler";
 import authRoutes from "./modules/auth/auth.routes";
 import productsRoutes from "./modules/products/products.routes";
+import superAdminRoutes from "./modules/super-admin/super-admin.routes";
 import { startSyncWorker } from "./modules/sync/sync.worker";
 import { initRealtime } from "./modules/realtime/gateway";
 
@@ -22,6 +23,7 @@ app.get("/api/v1/health", async (_req, res) => {
 
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/products", productsRoutes);
+app.use("/api/v1/super-admin", superAdminRoutes);
 
 app.use(errorHandler);
 

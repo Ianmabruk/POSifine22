@@ -42,3 +42,15 @@ export const authorize = (roles: string[]) => (
   }
   next();
 };
+
+export const requireSuperAdmin = (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  const userRole = req.user?.role?.toUpperCase();
+  if (userRole !== "MAIN_ADMIN" && userRole !== "owner") {
+    return res.status(403).json({ error: "Super Admin access required" });
+  }
+  next();
+};

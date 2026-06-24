@@ -17,6 +17,13 @@ export const AuthController = {
       res.json(ok({ token: result.accessToken, refreshToken: result.refreshToken, user: { id: result.user.id, email: result.user.email, role: result.user.role } }));
     } catch (e) { next(e); }
   },
+  async superAdminLogin(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { email, password, deviceId } = req.body;
+      const result = await AuthService.superAdminLogin(email.toLowerCase(), password, deviceId);
+      res.json(ok({ token: result.accessToken, refreshToken: result.refreshToken, user: { id: result.user.id, email: result.user.email, role: result.user.role } }));
+    } catch (e) { next(e); }
+  },
   async refresh(req: Request, res: Response, next: NextFunction) {
     try {
       const { refreshToken, deviceId } = req.body;
