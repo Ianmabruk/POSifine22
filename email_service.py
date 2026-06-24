@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Try to import sendgrid
 try:
     from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import Mail, Email, To, Content, TemplateId
+    from sendgrid.helpers.mail import Mail, Email, To, Content
     SENDGRID_AVAILABLE = True
 except ImportError:
     SENDGRID_AVAILABLE = False
@@ -41,18 +41,20 @@ class EmailService:
         text_content: Optional[str] = None,
         from_name: Optional[str] = None,
         reply_to: Optional[str] = None,
-    ) -> Mail:
-        """Build a SendGrid Mail object."""
-        from_email = Email(self.from_email, from_name or self.from_name)
-        to = To(to_email)
-        content = Content("text/html", html_content)
-        if text_content:
-            content.text_content = text_content
-        
-        mail = Mail(from_email, to, subject, content)
-        mail.reply_to = Email(reply_to or self.reply_to)
-        mail.bcc = Email(self.from_email)  # BCC admin for record
-        return mail
+    ):
+        """Build a SendGrid Mail object (returns dict if SendGrid unavailable)."""
+        if SENDGRID_AVAILABLE:
+            from sendgrid.helpers.mail import Mail, Email, To, Content
+            from_email = Email(self.from_email, from_name or self.from_name)
+            to = To(to_email)
+            content = Content("text/html", html_content)
+            if text_content:
+                content.text_content = text_content
+            mail = Mail(from_email, to, subject, content)
+            mail.reply_to = Email(reply_to or self.reply_to)
+            mail.bcc = Email(self.from_email)  # BCC admin for record
+            return mail
+        return None
 
     def send_email(
         self,
