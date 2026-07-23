@@ -1,6 +1,17 @@
-import { Response, NextFunction } from "express";
+import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
-import { AuthRequest } from "./subscription";
+
+export interface JWTPayload {
+  id: string;
+  role: "admin" | "cashier" | "main_admin";
+  plan: "basic" | "ultra";
+  accountId: string;
+}
+
+export interface AuthRequest extends Request {
+  user?: JWTPayload;
+  account?: any;
+}
 
 export const verifyToken = (
   req: AuthRequest,
@@ -19,7 +30,7 @@ export const verifyToken = (
       return res.status(500).json({ error: "Server misconfigured: JWT_SECRET missing" });
     }
 
-    const decoded = jwt.verify(token, secret) as AuthRequest["user"];
+    const decoded = jwt.verify(token, secret) as JWTPayload;
 
     req.user = decoded;
     next();
