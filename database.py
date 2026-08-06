@@ -1270,3 +1270,23 @@ class DataStore:
                 if entry.get('user_id') == user_id and not entry.get('clock_out_time'):
                     return entry
             return None
+    
+    def execute_sql(self, sql: str) -> Optional[List[Dict]]:
+        """Execute raw SQL against the PostgreSQL database.
+        
+        Falls back to no-op if not using PostgreSQL.
+        Used by DatabaseOptimizer for index creation and raw queries.
+        """
+        if not self.use_postgres or not self.pg_pool:
+            return None
+        try:
+            with self._pg_connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(sql)
+                    conn.commit()
+                    if cur.description:
+                        return cur.fetchall()
+                    return None
+        except Exception as e:
+            logger.error(f"execute_sql failed: {e}")
+            return None
