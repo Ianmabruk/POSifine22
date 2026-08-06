@@ -24,7 +24,7 @@ class DatabaseOptimizer:
             "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
             "CREATE INDEX IF NOT EXISTS idx_users_account_id ON users(account_id)",
             "CREATE INDEX IF NOT EXISTS idx_expenses_account_id ON expenses(account_id)",
-            "CREATE INDEX IF NOT EXISTS idx_batches_product_id ON batches(product_id)",
+            "CREATE INDEX IF NOT EXISTS idx_batches_product_id ON batches(\"productId\")",
         ]
         
         for index_sql in indexes:
