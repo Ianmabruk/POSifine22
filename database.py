@@ -158,7 +158,8 @@ class DataStore:
                         screen_lock_password TEXT DEFAULT '2005',
                         days_used INTEGER DEFAULT 0,
                         last_activity_date TEXT,
-                        requested_trial BOOLEAN DEFAULT FALSE
+                        requested_trial BOOLEAN DEFAULT FALSE,
+                        business_type TEXT
                     )
                 """)
                 
@@ -745,6 +746,16 @@ class DataStore:
                     logger.info("✅ Migration: Ensured credit_requests has customer_name and notes columns")
                 except Exception as e:
                     logger.warning(f"Migration warning for credit_requests columns: {e}")
+                
+                # Migration: Add missing business_type column to accounts
+                try:
+                    cur.execute("""
+                        ALTER TABLE accounts
+                            ADD COLUMN IF NOT EXISTS business_type TEXT
+                    """)
+                    logger.info("✅ Migration: Ensured accounts table has business_type column")
+                except Exception as e:
+                    logger.warning(f"Migration warning for accounts.business_type: {e}")
                 
                 conn.commit()
     

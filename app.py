@@ -868,6 +868,28 @@ def create_app() -> Flask:
             ]
         }), 200
 
+    @app.post("/api/trials/create")
+    def create_trial():
+        data = request.get_json() or {}
+        package_type = data.get("packageType") or data.get("plan") or "business"
+        valid_plans = {"starter", "business", "enterprise", "custom"}
+        if package_type not in valid_plans:
+            return jsonify({"error": "Invalid plan"}), 400
+        
+        trial_days = 15
+        trial_end = (datetime.utcnow() + timedelta(days=trial_days)).isoformat()
+        
+        return jsonify({
+            "success": True,
+            "message": "Trial created successfully",
+            "trial": {
+                "plan": package_type,
+                "trial_days": trial_days,
+                "trial_ends_at": trial_end,
+                "started_at": datetime.utcnow().isoformat(),
+            }
+        }), 201
+
     # ============================================================
     # Account User Management (Admin/Cashier Management)
     # ============================================================
