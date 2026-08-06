@@ -112,13 +112,19 @@ class DataStore:
             if db_url.startswith('postgres://'):
                 db_url = db_url.replace('postgres://', 'postgresql://', 1)
             
-            # Create connection pool (min 2, max 10 connections)
+            if 'sslmode=' not in db_url:
+                separator = '&' if '?' in db_url else '?'
+                db_url = f"{db_url}{separator}sslmode=require"
+            
+            # Create connection pool (min 1, max 5 for Render/cloud environments)
             self.pg_pool = ConnectionPool(
                 db_url,
-                min_size=2,
-                max_size=10,
-                timeout=30
+                min_size=1,
+                max_size=5,
+                timeout=30,
+                open=False
             )
+            self.pg_pool.open()
             
             # Create tables
             self._create_tables()
@@ -127,11 +133,12 @@ class DataStore:
             logger.error(f"PostgreSQL initialization failed: {e}")
             logger.info("Falling back to JSON file storage")
             self.use_postgres = False
+            self.pg_pool = None
             self._init_json_files()
     
     def _create_tables(self):
         """Create database tables if they don't exist"""
-        with self.pg_pool.connection() as conn:
+        with self._pg_connection() as conn:
             with conn.cursor() as cur:
                 # Accounts table
                 cur.execute("""
@@ -846,7 +853,7 @@ class DataStore:
             logger.warning(f"Blocked query on disallowed field: {field}")
             return []
         if self.use_postgres:
-            with self.pg_pool.connection() as conn:
+            with self._pg_connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
                     query = f"SELECT * FROM {table} WHERE {field} = %s"
                     cur.execute(query, (value,))
@@ -880,7 +887,7 @@ class DataStore:
         effective_account_id = account_id or filters.get('account_id') or filters.get('accountId')
 
         if self.use_postgres:
-            with self.pg_pool.connection() as conn:
+            with self._pg_connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
                     conditions = []
                     values = []
@@ -942,9 +949,21 @@ class DataStore:
     # POSTGRESQL IMPLEMENTATIONS
     # ============================================================
     
+    def _pg_connection(self):
+        """Get PostgreSQL connection with retry on stale connections"""
+        import time
+        for attempt in range(3):
+            try:
+                return self.pg_pool.connection()
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise
+    
     def _pg_get_all(self, table: str, account_id: Optional[str] = None) -> List[Dict]:
         """PostgreSQL: Get all records"""
-        with self.pg_pool.connection() as conn:
+        with self._pg_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 if account_id and table != 'accounts':
                     cur.execute(f"SELECT * FROM {table} WHERE account_id = %s ORDER BY id", (account_id,))
@@ -954,17 +973,25 @@ class DataStore:
     
     def _pg_get_by_id(self, table: str, id: int, account_id: Optional[str] = None) -> Optional[Dict]:
         """PostgreSQL: Get record by ID"""
-        with self.pg_pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                if account_id and table != 'accounts':
-                    cur.execute(f"SELECT * FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
-                else:
-                    cur.execute(f"SELECT * FROM {table} WHERE id = %s", (id,))
-                return cur.fetchone()
+        import time
+        for attempt in range(3):
+            try:
+                with self._pg_connection() as conn:
+                    with conn.cursor(row_factory=dict_row) as cur:
+                        if account_id and table != 'accounts':
+                            cur.execute(f"SELECT * FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
+                        else:
+                            cur.execute(f"SELECT * FROM {table} WHERE id = %s", (id,))
+                        return cur.fetchone()
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise
     
     def _pg_create(self, table: str, data: Dict) -> Dict:
         """PostgreSQL: Create record"""
-        with self.pg_pool.connection() as conn:
+        with self._pg_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 columns = ', '.join(data.keys())
                 placeholders = ', '.join(['%s'] * len(data))
@@ -975,32 +1002,48 @@ class DataStore:
     
     def _pg_update(self, table: str, id: int, data: Dict, account_id: Optional[str] = None) -> bool:
         """PostgreSQL: Update record"""
-        with self.pg_pool.connection() as conn:
-            with conn.cursor() as cur:
-                set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
-                values = list(data.values())
-                values.append(id)
-                
-                if account_id and table != 'accounts':
-                    query = f"UPDATE {table} SET {set_clause} WHERE id = %s AND account_id = %s"
-                    values.append(account_id)
-                else:
-                    query = f"UPDATE {table} SET {set_clause} WHERE id = %s"
-                
-                cur.execute(query, values)
-                conn.commit()
-                return cur.rowcount > 0
+        import time
+        for attempt in range(3):
+            try:
+                with self._pg_connection() as conn:
+                    with conn.cursor() as cur:
+                        set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
+                        values = list(data.values())
+                        values.append(id)
+                        
+                        if account_id and table != 'accounts':
+                            query = f"UPDATE {table} SET {set_clause} WHERE id = %s AND account_id = %s"
+                            values.append(account_id)
+                        else:
+                            query = f"UPDATE {table} SET {set_clause} WHERE id = %s"
+                        
+                        cur.execute(query, values)
+                        conn.commit()
+                        return cur.rowcount > 0
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise
     
     def _pg_delete(self, table: str, id: int, account_id: Optional[str] = None) -> bool:
         """PostgreSQL: Delete record"""
-        with self.pg_pool.connection() as conn:
-            with conn.cursor() as cur:
-                if account_id and table != 'accounts':
-                    cur.execute(f"DELETE FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
-                else:
-                    cur.execute(f"DELETE FROM {table} WHERE id = %s", (id,))
-                conn.commit()
-                return cur.rowcount > 0
+        import time
+        for attempt in range(3):
+            try:
+                with self._pg_connection() as conn:
+                    with conn.cursor() as cur:
+                        if account_id and table != 'accounts':
+                            cur.execute(f"DELETE FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
+                        else:
+                            cur.execute(f"DELETE FROM {table} WHERE id = %s", (id,))
+                        conn.commit()
+                        return cur.rowcount > 0
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise
     
     # ============================================================
     # JSON FILE IMPLEMENTATIONS
@@ -1092,10 +1135,18 @@ class DataStore:
     def get_user_by_email(self, email: str) -> Optional[Dict]:
         """Get user by email"""
         if self.use_postgres:
-            with self.pg_pool.connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-                    return cur.fetchone()
+            import time
+            for attempt in range(3):
+                try:
+                    with self._pg_connection() as conn:
+                        with conn.cursor(row_factory=dict_row) as cur:
+                            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                            return cur.fetchone()
+                except Exception as e:
+                    if attempt < 2:
+                        time.sleep(0.1 * (attempt + 1))
+                        continue
+                    raise
         else:
             normalized_email = (email or '').strip().lower()
             users = self._read_json(self.files['users'])
@@ -1107,7 +1158,7 @@ class DataStore:
     def get_account_by_email(self, owner_email: str) -> Optional[Dict]:
         """Get account by owner email"""
         if self.use_postgres:
-            with self.pg_pool.connection() as conn:
+            with self._pg_connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
                     cur.execute("SELECT * FROM accounts WHERE owner_email = %s", (owner_email,))
                     return cur.fetchone()
@@ -1121,7 +1172,7 @@ class DataStore:
     def get_sales_by_date_range(self, account_id: str, start_date: str, end_date: str) -> List[Dict]:
         """Get sales within a date range"""
         if self.use_postgres:
-            with self.pg_pool.connection() as conn:
+            with self._pg_connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
                     cur.execute("""
                         SELECT * FROM sales 
@@ -1144,7 +1195,7 @@ class DataStore:
             updates: List of (product_id, new_quantity, account_id) tuples
         """
         if self.use_postgres:
-            with self.pg_pool.connection() as conn:
+            with self._pg_connection() as conn:
                 with conn.cursor() as cur:
                     for product_id, quantity, account_id in updates:
                         cur.execute("""
@@ -1176,7 +1227,7 @@ class DataStore:
             updates: List of (raw_material_id, new_quantity, account_id) tuples
         """
         if self.use_postgres:
-            with self.pg_pool.connection() as conn:
+            with self._pg_connection() as conn:
                 with conn.cursor() as cur:
                     for material_id, quantity, account_id in updates:
                         cur.execute("""
@@ -1205,7 +1256,7 @@ class DataStore:
     def get_active_time_entry(self, user_id: int, account_id: str) -> Optional[Dict]:
         """Get active (not clocked out) time entry for user"""
         if self.use_postgres:
-            with self.pg_pool.connection() as conn:
+            with self._pg_connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
                     cur.execute("""
                         SELECT * FROM time_entries 
