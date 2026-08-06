@@ -241,7 +241,7 @@ class AuthController:
         account_id = f"acc_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow().isoformat()
         trial_duration_days = 15
-        trial_end = (datetime.utcnow() + timedelta(days=trial_duration_days)).isoformat() if (plan or "").lower() in {"trial", "free_trial", "starter"} else None
+        trial_end = (datetime.utcnow() + timedelta(days=trial_duration_days)).isoformat()
 
         account = {
             "id": account_id,
@@ -270,8 +270,8 @@ class AuthController:
             "email": email,
             "password_hash": self.hash_password(password),
             "name": name,
-            "role": "admin",
-            "permissions": self._default_permissions("admin"),
+            "role": "main_admin",
+            "permissions": self._default_permissions("main_admin"),
             "pin": None,
             "cashier_pin": None,
             "is_active": True,
@@ -282,7 +282,7 @@ class AuthController:
             "last_login": None,
             "hourly_rate": 0.0,
             "business_type": business_type,
-            "business_role": "admin"
+            "business_role": "main_admin"
         }
 
         user = self.datastore.create("users", user)
@@ -307,7 +307,7 @@ class AuthController:
                 es = self.email_service
                 if es and es.available:
                     login_url = os.environ.get("APP_LOGIN_URL", "https://posify.co.ke/auth/login")
-                    es.send_welcome_email(email, name, business_name or name, login_url)
+                    es.send_welcome_email(email, name, name, login_url)
             except Exception as e:
                 logger.warning(f"Failed to send welcome email to {email}: {str(e)}")
             
@@ -463,6 +463,19 @@ class AuthController:
                 return jsonify({"error": "Account locked"}), 403
             if g.account.get("is_active") is False:
                 return jsonify({"error": "Account inactive. Please choose a subscription."}), 403
+
+            trial_end = g.account.get("trial_ends_at")
+            plan = g.account.get("plan", "free")
+            if plan == "trial" and trial_end:
+                try:
+                    if datetime.utcnow().isoformat() > trial_end:
+                        return jsonify({
+                            "error": "Trial expired. Please subscribe to continue.",
+                            "code": "TRIAL_EXPIRED"
+                        }), 403
+                except Exception:
+                    pass
+
             request.user = {
                 "id": user["id"],
                 "email": user["email"],

@@ -57,22 +57,39 @@ backend/
 pip install flask flask-cors flask-sock bcrypt pyjwt psycopg psycopg-pool
 ```
 
+### Production Requirements
+
+For production deployments, install the following additional packages:
+
+```bash
+pip install redis python-security
+```
+
+- **redis**: Required for Redis caching, session store, and rate limiting
+- **python-security**: Required for security hardening, header enforcement, and audit logging
+
 ### Environment Variables
 
 ```bash
-# Optional - PostgreSQL database URL
+# Required for production - PostgreSQL database URL
 DATABASE_URL=postgresql://user:pass@localhost/pos_db
+USE_POSTGRES=true
 
-# Optional - Custom data directory for JSON files
+# Required for production - Redis connection
+REDIS_URL=redis://localhost:6379/0
+CACHE_URL=redis://localhost:6379/1
+
+# Required - JWT and Flask secrets (use strong random values in production)
+JWT_SECRET=your-jwt-secret-here
+SECRET_KEY=your-flask-secret-here
+
+# Optional - Custom data directory for JSON fallback storage
 DATA_DIR=/app/data
-
-# Optional - JWT secret key
-JWT_SECRET=your-secret-key-here
 
 # Optional - Port (defaults to 5000)
 PORT=5000
 
-# Optional - Debug mode
+# Optional - Debug mode (disable in production)
 DEBUG=False
 ```
 

@@ -50,6 +50,26 @@ class DataStore:
     High-performance data store with dual backend support
     """
     
+    ALLOWED_TABLES = {
+        'accounts', 'users', 'products', 'sales', 'expenses', 'time_entries',
+        'reminders', 'vendors', 'credit_requests', 'discounts', 'service_fees',
+        'sessions', 'activity_logs', 'audit_logs', 'batches', 'stock_movements',
+        'business_profiles', 'customers', 'raw_materials', 'recipes',
+        'petroleum_tanks', 'petroleum_sales', 'petroleum_staff',
+        'room_bookings', 'appointments', 'prescriptions', 'table_orders',
+        'students', 'exam_results', 'assignments', 'school_notices',
+        'admin_support_messages', 'messages', 'stock_deductions',
+        'role_assignments', 'settings', 'email_templates'
+    }
+    
+    ALLOWED_FILTER_FIELDS = {
+        'id', 'account_id', 'user_id', 'product_id', 'sale_id', 'expense_id',
+        'email', 'role', 'plan', 'status', 'created_at', 'updated_at',
+        'refresh_token_hash', 'cashier_id', 'category', 'business_id',
+        'name', 'phone', 'is_active', 'is_locked', 'trial_ends_at',
+        'subscription_ends_at', 'payment_status', 'package_type'
+    }
+    
     def __init__(self, data_dir: str = None, use_postgres: bool = False):
         """
         Initialize data store
@@ -819,10 +839,15 @@ class DataStore:
         Returns:
             List of matching records
         """
+        if table not in self.ALLOWED_TABLES:
+            logger.warning(f"Blocked query on disallowed table: {table}")
+            return []
+        if field not in self.ALLOWED_FILTER_FIELDS:
+            logger.warning(f"Blocked query on disallowed field: {field}")
+            return []
         if self.use_postgres:
             with self.pg_pool.connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
-                    # Use parameterized query for security
                     query = f"SELECT * FROM {table} WHERE {field} = %s"
                     cur.execute(query, (value,))
                     return cur.fetchall()
@@ -844,6 +869,13 @@ class DataStore:
         Returns:
             List of matching records
         """
+        if table not in self.ALLOWED_TABLES:
+            logger.warning(f"Blocked query on disallowed table: {table}")
+            return []
+        for field in filters.keys():
+            if field not in self.ALLOWED_FILTER_FIELDS:
+                logger.warning(f"Blocked query on disallowed field: {field}")
+                return []
         # Ensure account_id is always part of filtering for tenant isolation
         effective_account_id = account_id or filters.get('account_id') or filters.get('accountId')
 

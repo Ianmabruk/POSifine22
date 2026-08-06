@@ -130,12 +130,6 @@ def create_app() -> Flask:
         if request.method == "OPTIONS":
             return ("", 200)
 
-    # Global preflight handler (avoid non-OK preflight responses)
-    @app.before_request
-    def handle_options_preflight():
-        if request.method == "OPTIONS":
-            return ("", 200)
-
     # Services
     use_postgres = bool(os.environ.get("DATABASE_URL"))
     datastore = DataStore(data_dir=os.environ.get("DATA_DIR"), use_postgres=use_postgres)
@@ -1478,6 +1472,266 @@ def create_app() -> Flask:
             "totalRevenue": total_revenue,
             "pendingPayments": 0,
             "overduePayments": 0
+        }), 200
+
+    @app.get("/api/main-admin/metrics")
+    def main_admin_metrics():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        all_accounts = datastore.get_all("accounts")
+        all_users = datastore.get_all("users")
+        sales = datastore.get_all("sales")
+
+        total_businesses = len(all_accounts)
+        active_businesses = len([a for a in all_accounts if a.get("is_active") and not a.get("is_locked")])
+        total_revenue = sum(_safe_float(s.get("total")) for sale in sales)
+        now = datetime.utcnow()
+
+        active_trials = 0
+        expired_trials = 0
+        paying_customers = 0
+        for a in all_accounts:
+            trial_end = a.get("trial_ends_at")
+            plan = a.get("plan", "free")
+            if plan == "trial" or a.get("status") == "trial":
+                if trial_end and now.isoformat() > trial_end:
+                    expired_trials += 1
+                else:
+                    active_trials += 1
+            if plan not in ("free", "trial"):
+                paying_customers += 1
+
+        return jsonify({
+            "totalBusinesses": total_businesses,
+            "activeBusinesses": active_businesses,
+            "trialAccounts": active_trials,
+            "expiredTrials": expired_trials,
+            "totalRevenue": total_revenue,
+            "payingCustomers": paying_customers,
+            "recentRegistrations": len([a for a in all_accounts if a.get("created_at") and (now - datetime.fromisoformat(a.get("created_at").replace("Z", "+00:00"))).days <= 30]),
+            "lastUpdated": now.isoformat()
+        }), 200
+
+    @app.get("/api/main-admin/businesses")
+    def main_admin_businesses():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        accounts = datastore.get_all("accounts")
+        users = datastore.get_all("users")
+        sales = datastore.get_all("sales")
+
+        users_by_account = {}
+        for u in users:
+            aid = u.get("account_id")
+            users_by_account.setdefault(aid, []).append(u)
+
+        business_list = []
+        for account in accounts:
+            account_id = account.get("id")
+            account_users = users_by_account.get(account_id, [])
+            owner = next((u for u in account_users if u.get("role") in ("main_admin", "owner")), account_users[0] if account_users else {})
+
+            trial_end = account.get("trial_ends_at")
+            plan = account.get("plan", "free")
+            now = datetime.utcnow()
+            days_remaining = 0
+            trial_status = "none"
+
+            if trial_end:
+                try:
+                    end_dt = datetime.fromisoformat(trial_end.replace("Z", "+00:00"))
+                    days_remaining = max(0, (end_dt - now).days)
+                    if now.isoformat() > trial_end:
+                        trial_status = "expired"
+                    else:
+                        trial_status = "active"
+                except Exception:
+                    pass
+
+            created_at = account.get("created_at")
+            days_used = 0
+            if created_at:
+                try:
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    days_used = (now - created_dt).days
+                except Exception:
+                    pass
+
+            account_sales = [s for s in sales if s.get("account_id") == account_id]
+            total_revenue = sum(_safe_float(s.get("total")) for s in account_sales)
+
+            business_list.append({
+                "_id": account_id,
+                "id": account_id,
+                "name": account.get("business_name") or owner.get("name") or "Unknown",
+                "email": account.get("owner_email") or owner.get("email") or "",
+                "ownerName": owner.get("name") or "Unknown",
+                "plan": plan,
+                "status": account.get("status", "active"),
+                "isActive": bool(account.get("is_active", True)),
+                "isLocked": bool(account.get("is_locked", False)),
+                "trialStatus": trial_status,
+                "trialEndsAt": trial_end,
+                "daysRemaining": days_remaining,
+                "daysUsed": days_used,
+                "totalRevenue": total_revenue,
+                "subscriptionStatus": account.get("subscriptionStatus", "active"),
+                "subscriptionPlan": account.get("subscriptionPlan"),
+                "subscriptionEndsAt": account.get("subscriptionEndsAt"),
+                "createdAt": created_at,
+                "industry": account.get("industry"),
+                "currency": account.get("currency", "KES"),
+                "userCount": len(account_users),
+                "lastActivityDate": account.get("last_activity_date"),
+            })
+
+        return jsonify(business_list), 200
+
+    @app.get("/api/main-admin/trials/active")
+    def main_admin_active_trials():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        now = datetime.utcnow().isoformat()
+        accounts = datastore.get_all("accounts")
+        users = datastore.get_all("users")
+        users_by_account = {u.get("account_id"): u for u in users}
+
+        active = []
+        for a in accounts:
+            trial_end = a.get("trial_ends_at")
+            plan = a.get("plan", "free")
+            if (plan == "trial" or a.get("status") == "trial") and trial_end and now <= trial_end:
+                owner = users_by_account.get(a.get("id"), {})
+                active.append({
+                    "_id": a.get("id"),
+                    "businessId": {"name": a.get("business_name"), "email": a.get("owner_email")},
+                    "packageType": plan,
+                    "startDate": a.get("trial_started_at") or a.get("created_at"),
+                    "endDate": trial_end,
+                    "ownerName": owner.get("name"),
+                    "businessName": a.get("business_name"),
+                })
+
+        active.sort(key=lambda x: x.get("endDate") or "", reverse=True)
+        return jsonify(active), 200
+
+    @app.get("/api/main-admin/trials/expired")
+    def main_admin_expired_trials():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        now = datetime.utcnow().isoformat()
+        accounts = datastore.get_all("accounts")
+        users = datastore.get_all("users")
+        users_by_account = {u.get("account_id"): u for u in users}
+
+        expired = []
+        for a in accounts:
+            trial_end = a.get("trial_ends_at")
+            plan = a.get("plan", "free")
+            if (plan == "trial" or a.get("status") == "trial") and trial_end and now > trial_end:
+                owner = users_by_account.get(a.get("id"), {})
+                expired.append({
+                    "_id": a.get("id"),
+                    "businessId": {"name": a.get("business_name"), "email": a.get("owner_email")},
+                    "packageType": plan,
+                    "startDate": a.get("trial_started_at") or a.get("created_at"),
+                    "endDate": trial_end,
+                    "ownerName": owner.get("name"),
+                    "businessName": a.get("business_name"),
+                })
+
+        expired.sort(key=lambda x: x.get("endDate") or "", reverse=True)
+        return jsonify(expired), 200
+
+    @app.get("/api/main-admin/subscriptions/all")
+    def main_admin_subscriptions():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        accounts = datastore.get_all("accounts")
+        users = datastore.get_all("users")
+        users_by_account = {u.get("account_id"): u for u in users}
+
+        subs = []
+        for a in accounts:
+            plan = a.get("plan", "free")
+            if plan in ("free", "trial"):
+                continue
+            owner = users_by_account.get(a.get("id"), {})
+            subs.append({
+                "_id": a.get("id"),
+                "businessId": {"name": a.get("business_name")},
+                "packageType": plan,
+                "status": "active" if a.get("is_active") else "inactive",
+                "amount": 0,
+                "startDate": a.get("subscription_started_at") or a.get("created_at"),
+                "endDate": a.get("subscription_ends_at"),
+                "ownerName": owner.get("name"),
+                "businessName": a.get("business_name"),
+            })
+
+        subs.sort(key=lambda x: x.get("startDate") or "", reverse=True)
+        return jsonify(subs), 200
+
+    @app.get("/api/main-admin/payments")
+    def main_admin_payments():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        payments = datastore.get_all("payments")
+        users = datastore.get_all("users")
+        users_by_account = {u.get("account_id"): u for u in users}
+
+        result = []
+        for p in payments:
+            account_id = p.get("account_id")
+            owner = users_by_account.get(account_id, {})
+            result.append({
+                "_id": p.get("id"),
+                "businessId": {"name": p.get("business_name")},
+                "amount": p.get("amount"),
+                "paymentStatus": p.get("payment_status", "pending"),
+                "paymentMethod": p.get("payment_method", ""),
+                "createdAt": p.get("created_at"),
+                "ownerName": owner.get("name"),
+            })
+
+        result.sort(key=lambda x: x.get("createdAt") or "", reverse=True)
+        return jsonify(result), 200
+
+    @app.get("/api/main-admin/revenue")
+    def main_admin_revenue():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        sales = datastore.get_all("sales")
+        daily = {}
+        for s in sales:
+            created = s.get("created_at") or ""
+            if not created:
+                continue
+            try:
+                day = datetime.fromisoformat(created.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+            except Exception:
+                continue
+            daily[day] = daily.get(day, 0) + _safe_float(s.get("total"))
+
+        daily_revenue = [{"_id": day, "revenue": total} for day, total in sorted(daily.items())]
+
+        return jsonify({
+            "dailyRevenue": daily_revenue[-30:],
+            "totalRevenue": sum(_safe_float(s.get("total")) for s in sales),
         }), 200
 
     @app.get("/api/main-admin/sales-all")

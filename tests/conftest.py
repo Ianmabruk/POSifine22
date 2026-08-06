@@ -1,18 +1,31 @@
 """
 Pytest Configuration and Fixtures
-==================================
+===================================
 Shared test fixtures for all test modules.
 """
 
 import pytest
 import os
 import sys
+import shutil
 from datetime import datetime
+
+# Set test environment variables BEFORE any imports
+TEST_DATA_DIR = '/tmp/pos_test_data'
+TEST_SECRET_KEY = 'test-secret-key'
+
+os.environ['DATA_DIR'] = TEST_DATA_DIR
+os.environ['SECRET_KEY'] = TEST_SECRET_KEY
+os.environ['JWT_SECRET'] = TEST_SECRET_KEY
+os.environ['DATABASE_URL'] = ''
+os.environ['REDIS_URL'] = ''
+os.environ['CACHE_URL'] = ''
 
 # Add backend to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from app import app as flask_app
+# Import app module (app will be created with test env vars)
+import app as app_module
 from database import DataStore
 from auth_controller import AuthController
 from admin_controller import AdminController
@@ -20,11 +33,26 @@ from cashier_controller import CashierController
 from stock_engine import StockEngine
 
 
+def _clear_test_data():
+    """Remove stale test data directory"""
+    if os.path.exists(TEST_DATA_DIR):
+        shutil.rmtree(TEST_DATA_DIR)
+
+
+@pytest.fixture(autouse=True)
+def _clean_test_data():
+    """Auto-clean test data before and after each test"""
+    _clear_test_data()
+    os.makedirs(TEST_DATA_DIR, exist_ok=True)
+    yield
+    _clear_test_data()
+
+
 @pytest.fixture
 def app():
     """Create Flask app for testing"""
+    flask_app = app_module.app
     flask_app.config['TESTING'] = True
-    flask_app.config['SECRET_KEY'] = 'test-secret-key'
     yield flask_app
 
 
@@ -36,19 +64,15 @@ def client(app):
 
 @pytest.fixture
 def datastore():
-    """Create test datastore with in-memory storage"""
-    ds = DataStore(data_dir='/tmp/pos_test_data', use_postgres=False)
+    """Create test datastore with isolated storage"""
+    ds = DataStore(data_dir=TEST_DATA_DIR, use_postgres=False)
     yield ds
-    # Cleanup test data
-    import shutil
-    if os.path.exists('/tmp/pos_test_data'):
-        shutil.rmtree('/tmp/pos_test_data')
 
 
 @pytest.fixture
 def auth_controller(datastore):
     """Create auth controller for testing"""
-    return AuthController(datastore, 'test-secret-key')
+    return AuthController(datastore, TEST_SECRET_KEY)
 
 
 @pytest.fixture
