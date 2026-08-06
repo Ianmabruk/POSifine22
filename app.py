@@ -3722,6 +3722,99 @@ def create_app() -> Flask:
         logger.warning(f"Frontend error report: {data}")
         return jsonify({"received": True}), 200
 
+    def _bootstrap_main_admin():
+        bootstrap_email = (
+            os.environ.get("MAIN_ADMIN_EMAIL")
+            or os.environ.get("ADMIN_EMAIL")
+            or os.environ.get("DEV_ADMIN_EMAIL")
+            or ""
+        ).strip().lower()
+        bootstrap_password = (
+            os.environ.get("MAIN_ADMIN_PASSWORD")
+            or os.environ.get("ADMIN_PASSWORD")
+            or os.environ.get("DEV_ADMIN_PASSWORD")
+            or ""
+        ).strip()
+        bootstrap_hash = (
+            os.environ.get("MAIN_ADMIN_HASH")
+            or os.environ.get("ADMIN_HASH")
+            or os.environ.get("DEV_ADMIN_HASH")
+            or ""
+        ).strip()
+
+        if not bootstrap_email or not (bootstrap_password or bootstrap_hash):
+            return
+
+        try:
+            existing = datastore.get_user_by_email(bootstrap_email)
+            if existing and existing.get("role") in {"main_admin", "owner"}:
+                return
+
+            persisted_hash = bootstrap_hash if bootstrap_hash and (bootstrap_hash.startswith("$2a$") or bootstrap_hash.startswith("$2b$") or bootstrap_hash.startswith("$2y$")) else auth_controller.hash_password(bootstrap_password)
+            
+            owner_user = datastore.get_user_by_email(bootstrap_email)
+            if owner_user:
+                update_data = {
+                    "role": "main_admin",
+                    "business_role": "main_admin",
+                    "business_type": "main_admin",
+                    "is_active": True,
+                    "is_locked": False,
+                }
+                if persisted_hash:
+                    update_data["password_hash"] = persisted_hash
+                datastore.update("users", owner_user.get("id"), update_data, owner_user.get("account_id"))
+                logger.info(f"Updated main admin user: {bootstrap_email}")
+                return
+
+            account = datastore.get_account_by_email(bootstrap_email)
+            if not account:
+                account_id = f"acc_{uuid.uuid4().hex[:12]}"
+                account = {
+                    "id": account_id,
+                    "owner_email": bootstrap_email,
+                    "business_name": "Main Admin",
+                    "plan": "owner",
+                    "is_active": True,
+                    "is_locked": False,
+                    "trial_ends_at": None,
+                    "subscription_ends_at": None,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "business_logo": None,
+                    "currency": "KES",
+                    "tax_rate": 0.0,
+                    "screen_lock_password": "2005",
+                    "days_used": 0,
+                    "last_activity_date": None,
+                    "requested_trial": False,
+                    "business_type": "main_admin"
+                }
+                datastore.create("accounts", account)
+
+            datastore.create("users", {
+                "account_id": account.get("id"),
+                "email": bootstrap_email,
+                "password_hash": persisted_hash,
+                "name": "Main Admin",
+                "role": "main_admin",
+                "pin": None,
+                "cashier_pin": None,
+                "is_active": True,
+                "is_locked": False,
+                "screen_locked": False,
+                "created_at": datetime.utcnow().isoformat(),
+                "created_by": None,
+                "last_login": None,
+                "hourly_rate": 0.0,
+                "business_type": "main_admin",
+                "business_role": "main_admin"
+            })
+            logger.info(f"Bootstrapped main admin user: {bootstrap_email}")
+        except Exception as e:
+            logger.error(f"Main admin bootstrap failed: {e}")
+
+    _bootstrap_main_admin()
+
     return app
 
 
