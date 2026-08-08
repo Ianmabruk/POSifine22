@@ -37,6 +37,39 @@ export const AuthService = {
         await SessionsRepo.create({ userId: user.id, deviceId, refreshTokenHash, expiresAt });
         return { user, accessToken, refreshToken };
     },
+    async superAdminLogin(email, password, deviceId) {
+        // Check if this is a super admin (main admin) login
+        const mainAdminEmail = process.env.MAIN_ADMIN_EMAIL;
+        const mainAdminPassword = process.env.MAIN_ADMIN_PASSWORD;
+        if (!mainAdminEmail || !mainAdminPassword) {
+            throw new AppError(500, "CONFIG_ERROR", "Super admin configuration missing");
+        }
+        if (email.toLowerCase() !== mainAdminEmail.toLowerCase()) {
+            throw new AppError(401, "INVALID_CREDENTIALS", "Invalid credentials");
+        }
+        const passwordOk = await comparePassword(password, mainAdminPassword);
+        if (!passwordOk) {
+            throw new AppError(401, "INVALID_CREDENTIALS", "Invalid credentials");
+        }
+        // Create a super admin user record or use a special ID
+        const superAdminId = "main_admin_" + Date.now();
+        const accessToken = issueAccessToken({ id: superAdminId, role: "main_admin", plan: "ultra" });
+        const refreshTokenVal = issueRefreshToken({ id: superAdminId, deviceId });
+        const refreshTokenHash = await hashPassword(refreshTokenVal);
+        const expiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+        // Store session
+        try {
+            const existing = await SessionsRepo.findByUserAndDevice(superAdminId, deviceId);
+            if (existing)
+                await SessionsRepo.revoke(existing.id);
+            await SessionsRepo.create({ userId: superAdminId, deviceId, refreshTokenHash, expiresAt });
+        }
+        catch (e) {
+            // Continue even if session storage fails
+        }
+        const user = { id: superAdminId, email, role: "main_admin", plan: "ultra" };
+        return { user, accessToken, refreshToken: refreshTokenVal };
+    },
     async refresh(refreshToken, deviceId) {
         let payload;
         try {

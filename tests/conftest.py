@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # Import app module (app will be created with test env vars)
 import app as app_module
 from database import DataStore
-from auth_controller import AuthController
+from auth import AuthManager, AuthService
 from admin_controller import AdminController
 from cashier_controller import CashierController
 from stock_engine import StockEngine
@@ -71,8 +71,10 @@ def datastore():
 
 @pytest.fixture
 def auth_controller(datastore):
-    """Create auth controller for testing"""
-    return AuthController(datastore, TEST_SECRET_KEY)
+    """Create auth manager for testing"""
+    manager = AuthManager(TEST_SECRET_KEY, datastore=datastore)
+    service = AuthService(manager, datastore=datastore)
+    return service
 
 
 @pytest.fixture

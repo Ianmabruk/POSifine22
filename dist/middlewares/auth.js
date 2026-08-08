@@ -26,3 +26,10 @@ export const authorize = (roles) => (req, res, next) => {
     }
     next();
 };
+export const requireSuperAdmin = (req, res, next) => {
+    const userRole = req.user?.role?.toUpperCase();
+    if (userRole !== "MAIN_ADMIN" && userRole !== "owner") {
+        return res.status(403).json({ error: "Super Admin access required" });
+    }
+    next();
+};

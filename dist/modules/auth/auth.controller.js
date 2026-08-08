@@ -21,6 +21,16 @@ export const AuthController = {
             next(e);
         }
     },
+    async superAdminLogin(req, res, next) {
+        try {
+            const { email, password, deviceId } = req.body;
+            const result = await AuthService.superAdminLogin(email.toLowerCase(), password, deviceId);
+            res.json(ok({ token: result.accessToken, refreshToken: result.refreshToken, user: { id: result.user.id, email: result.user.email, role: result.user.role } }));
+        }
+        catch (e) {
+            next(e);
+        }
+    },
     async refresh(req, res, next) {
         try {
             const { refreshToken, deviceId } = req.body;

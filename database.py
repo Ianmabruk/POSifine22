@@ -59,7 +59,7 @@ class DataStore:
         'room_bookings', 'appointments', 'prescriptions', 'table_orders',
         'students', 'exam_results', 'assignments', 'school_notices',
         'admin_support_messages', 'messages', 'stock_deductions',
-        'role_assignments', 'settings', 'email_templates'
+        'role_assignments', 'settings', 'email_templates', 'payments'
     }
     
     ALLOWED_FILTER_FIELDS = {
@@ -67,7 +67,7 @@ class DataStore:
         'email', 'role', 'plan', 'status', 'created_at', 'updated_at',
         'refresh_token_hash', 'cashier_id', 'category', 'business_id',
         'name', 'phone', 'is_active', 'is_locked', 'trial_ends_at',
-        'subscription_ends_at', 'payment_status', 'package_type'
+        'subscription_ends_at', 'payment_status', 'provider_reference', 'package_type'
     }
     
     def __init__(self, data_dir: str = None, use_postgres: bool = False):
@@ -337,13 +337,38 @@ class DataStore:
                         service_fee REAL DEFAULT 0.0,
                         cashier_id INTEGER,
                         cashier_name TEXT,
+                         created_at TEXT NOT NULL,
+                         receipt_number TEXT,
+                         notes TEXT,
+                         payment_status TEXT DEFAULT 'paid'
+                     )
+                 """)
+
+                # Payments table (M-Pesa STK Push and other payment methods)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS payments (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+                        cashier_id INTEGER NOT NULL,
+                        amount REAL NOT NULL,
+                        currency TEXT DEFAULT 'KES',
+                        customer_phone TEXT,
+                        provider TEXT DEFAULT 'intasend',
+                        provider_reference TEXT,
+                        account_ref TEXT,
+                        status TEXT DEFAULT 'pending',
+                        failure_reason TEXT,
                         created_at TEXT NOT NULL,
-                        receipt_number TEXT,
-                        notes TEXT
+                        updated_at TEXT NOT NULL
                     )
                 """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
 
-                # Stock deductions table (audit trail for inventory reductions)
+                 # Stock deductions table (audit trail for inventory reductions)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS stock_deductions (
                         id SERIAL PRIMARY KEY,
@@ -755,7 +780,45 @@ class DataStore:
                     """)
                     logger.info("✅ Migration: Ensured accounts table has business_type column")
                 except Exception as e:
-                    logger.warning(f"Migration warning for accounts.business_type: {e}")
+                     logger.warning(f"Migration warning for accounts.business_type: {e}")
+                 
+                # Migration: Add payment_status to sales
+                try:
+                    cur.execute("""
+                        ALTER TABLE sales
+                            ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'paid'
+                    """)
+                    logger.info("✅ Migration: Ensured sales table has payment_status column")
+                except Exception as e:
+                    logger.warning(f"Migration warning for sales.payment_status: {e}")
+
+                # Migration: Create payments table if it does not exist
+                try:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS payments (
+                            id SERIAL PRIMARY KEY,
+                            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                            sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+                            cashier_id INTEGER NOT NULL,
+                            amount REAL NOT NULL,
+                            currency TEXT DEFAULT 'KES',
+                            customer_phone TEXT,
+                            provider TEXT DEFAULT 'intasend',
+                            provider_reference TEXT,
+                            account_ref TEXT,
+                            status TEXT DEFAULT 'pending',
+                            failure_reason TEXT,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
+                    logger.info("✅ Migration: Ensured payments table exists")
+                except Exception as e:
+                    logger.warning(f"Migration warning for payments table: {e}")
                 
                 conn.commit()
     
@@ -800,7 +863,8 @@ class DataStore:
             'fee_payments': os.path.join(self.data_dir, 'fee_payments.json'),
             'exam_results': os.path.join(self.data_dir, 'exam_results.json'),
             'assignments': os.path.join(self.data_dir, 'assignments.json'),
-            'school_notices': os.path.join(self.data_dir, 'school_notices.json')
+            'school_notices': os.path.join(self.data_dir, 'school_notices.json'),
+            'payments': os.path.join(self.data_dir, 'payments.json')
         }
         
         # Initialize empty files
@@ -1006,8 +1070,14 @@ class DataStore:
             with conn.cursor(row_factory=dict_row) as cur:
                 columns = ', '.join(data.keys())
                 placeholders = ', '.join(['%s'] * len(data))
+                values = []
+                for v in data.values():
+                    if isinstance(v, (dict, list)):
+                        values.append(json.dumps(v))
+                    else:
+                        values.append(v)
                 query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING *"
-                cur.execute(query, list(data.values()))
+                cur.execute(query, values)
                 conn.commit()
                 return cur.fetchone()
     
@@ -1019,7 +1089,12 @@ class DataStore:
                 with self._pg_connection() as conn:
                     with conn.cursor() as cur:
                         set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
-                        values = list(data.values())
+                        values = []
+                        for v in data.values():
+                            if isinstance(v, (dict, list)):
+                                values.append(json.dumps(v))
+                            else:
+                                values.append(v)
                         values.append(id)
                         
                         if account_id and table != 'accounts':

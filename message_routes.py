@@ -194,7 +194,12 @@ def mark_as_read(message_id):
         if not message:
             return jsonify({'error': 'Message not found'}), 404
         
-        # Update message status
+        user = request.user
+        user_account_id = user.get('account_id')
+        message_account_id = message.get('accountId')
+        if user_account_id and message_account_id and user_account_id != message_account_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
         ds.update('messages', message_id, {
             'status': 'read',
             'readAt': datetime.now().isoformat()

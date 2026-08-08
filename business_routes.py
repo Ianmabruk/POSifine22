@@ -332,7 +332,7 @@ def create_business_routes(datastore, auth_controller):
             # Remove sensitive data
             users_response = []
             for user in all_users:
-                user_data = {k: v for k, v in user.items() if k != 'password_hash'}
+                user_data = {k: v for k, v in user.items() if k not in ('password_hash', 'pin', 'cashier_pin')}
                 users_response.append(user_data)
             
             return jsonify({

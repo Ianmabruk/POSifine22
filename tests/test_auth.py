@@ -203,3 +203,100 @@ class TestScreenLock:
         
         assert success is False
         assert error is not None
+
+
+class TestRoleArchitecture:
+    """Test role separation: MAIN_ADMIN vs BUSINESS_ADMIN vs CASHIER"""
+
+    def test_signup_creates_business_admin_not_main_admin(self, auth_controller):
+        success, error, result = auth_controller.signup(
+            email='business@example.com',
+            password='ValidPassword123!',
+            name='Business Owner',
+            plan='basic'
+        )
+        assert success is True
+        assert result['user']['role'] == 'admin'
+        assert result['user']['business_role'] == 'admin'
+
+    def test_main_admin_bootstrap_creates_main_admin_role(self, auth_controller, datastore):
+        user = auth_controller.ensure_main_admin(
+            email='platform@example.com',
+            password_hash=auth_controller.hash_password('PlatformPass123!'),
+            display_name='Platform Admin'
+        )
+        assert user['role'] == 'main_admin'
+        assert user['business_role'] == 'main_admin'
+
+    def test_cashier_default_role(self, auth_controller, datastore, test_account):
+        user = datastore.create('users', {
+            'account_id': test_account['account_id'],
+            'email': 'cashier@example.com',
+            'password_hash': auth_controller.hash_password('CashierPass123!'),
+            'name': 'Cashier User',
+            'role': 'cashier',
+            'business_role': 'cashier',
+            'is_active': True,
+            'created_at': '2026-01-01T00:00:00'
+        })
+        assert user['role'] == 'cashier'
+
+    def test_business_admin_cannot_access_main_admin_endpoints(self, auth_controller, client, datastore):
+        success, error, result = auth_controller.signup(
+            email='bizadmin@example.com',
+            password='ValidPassword123!',
+            name='Biz Admin',
+            plan='basic'
+        )
+        assert success is True
+        token = result['token']
+        resp = client.get('/api/main-admin/users', headers={
+            'Authorization': f'Bearer {token}'
+        })
+        assert resp.status_code == 403
+
+    def test_cashier_cannot_access_admin_product_endpoints(self, auth_controller, client, datastore, test_account):
+        user = datastore.create('users', {
+            'account_id': test_account['account_id'],
+            'email': 'cashier2@example.com',
+            'password_hash': auth_controller.hash_password('CashierPass123!'),
+            'name': 'Cashier Two',
+            'role': 'cashier',
+            'business_role': 'cashier',
+            'is_active': True,
+            'created_at': '2026-01-01T00:00:00'
+        })
+        token = auth_controller.generate_token(user)
+        resp = client.post('/api/products', headers={
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json'
+        }, json={'name': 'Test', 'price': 10, 'quantity': 5})
+        assert resp.status_code == 403
+
+    def test_tenant_isolation_users_scoped_to_account(self, auth_controller, client, datastore):
+        success_a, _, result_a = auth_controller.signup(
+            email='tenant_a@example.com',
+            password='ValidPassword123!',
+            name='Tenant A Admin',
+            plan='basic'
+        )
+        success_b, _, result_b = auth_controller.signup(
+            email='tenant_b@example.com',
+            password='ValidPassword123!',
+            name='Tenant B Admin',
+            plan='basic'
+        )
+        assert success_a and success_b
+        token_a = result_a['token']
+        account_a = result_a['user']['account_id']
+        account_b = result_b['user']['account_id']
+        assert account_a != account_b
+
+        resp_a = client.get('/api/users', headers={
+            'Authorization': f'Bearer {token_a}'
+        })
+        assert resp_a.status_code == 200
+        users_a = resp_a.get_json()
+        emails_a = [u['email'] for u in users_a]
+        assert 'tenant_a@example.com' in emails_a
+        assert 'tenant_b@example.com' not in emails_a

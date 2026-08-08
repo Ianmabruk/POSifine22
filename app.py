@@ -25,7 +25,7 @@ from flask_cors import CORS
 
 from database import DataStore
 from stock_engine import StockEngine
-from auth_controller import AuthController
+from auth import AuthManager, AuthService, require_auth, require_admin, require_main_admin, require_business_admin
 from admin_controller import AdminController
 from cashier_controller import CashierController
 from sync_manager import sync_manager
@@ -39,6 +39,8 @@ from business_routes import create_business_routes
 from ai_controller import create_ai_routes
 from message_routes import message_bp
 from notify_service import get_notification_service
+from intasend_service import IntaSendService
+from payment_service import PaymentService
 
 # Optional optimization imports - graceful fallback if not available
 DatabaseOptimizer: Any = None
@@ -135,11 +137,14 @@ def create_app() -> Flask:
     datastore = DataStore(data_dir=os.environ.get("DATA_DIR"), use_postgres=use_postgres)
     stock_engine = StockEngine(datastore)
     session_store = SessionStore()
-    auth_controller = AuthController(datastore, app.config["SECRET_KEY"], session_store=session_store)
+    notify_service = get_notification_service()
+    cache = CacheService()
+    auth_manager = AuthManager(app.config["SECRET_KEY"], session_store=session_store, datastore=datastore)
+    auth_service = AuthService(auth_manager, datastore=datastore, email_service=notify_service)
+    intasend_service = IntaSendService()
+    payment_service = PaymentService(intasend=intasend_service, datastore=datastore)
     admin_controller = AdminController(datastore, stock_engine)
     cashier_controller = CashierController(datastore, stock_engine)
-    cache = CacheService()
-    notify_service = get_notification_service()
     
     # 🔥 NEW COMPREHENSIVE CONTROLLERS
     time_tracking = TimeTrackingController(datastore)
@@ -181,12 +186,12 @@ def create_app() -> Flask:
         return lambda f: f
 
     # Register business management routes
-    business_bp = create_business_routes(datastore, auth_controller)
+    business_bp = create_business_routes(datastore, auth_manager)
     app.register_blueprint(business_bp, url_prefix="/api/business")
     app.register_blueprint(message_bp)
 
     # AI routes
-    ai_bp = create_ai_routes(datastore, auth_controller.require_auth)
+    ai_bp = create_ai_routes(datastore, auth_manager.require_auth)
     app.register_blueprint(ai_bp)
 
     # Simple in-memory rate limiting for auth endpoints
@@ -518,7 +523,7 @@ def create_app() -> Flask:
             if not any(c.isupper() for c in password):
                 return jsonify({"error": "Password must contain at least one uppercase letter"}), 400
             
-            success, error, result = auth_controller.signup(
+            success, error, result = auth_service.signup(
                 email=email,
                 password=password,
                 name=name,
@@ -528,7 +533,7 @@ def create_app() -> Flask:
             
             if success:
                 _record_signup()
-                refresh_token = auth_controller.create_refresh_session(
+                refresh_token = auth_manager.create_refresh_session(
                     user=result.get("user") or {},
                     user_agent=request.headers.get("User-Agent", ""),
                     ip_address=_rate_limit_key()
@@ -566,13 +571,13 @@ def create_app() -> Flask:
             return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
 
         data = request.get_json() or {}
-        success, error, result = auth_controller.login(
+        success, error, result = auth_service.login(
             email=data.get("email"),
             password=data.get("password")
         )
         if success:
             _reset_login_attempts()
-            refresh_token = auth_controller.create_refresh_session(
+            refresh_token = auth_manager.create_refresh_session(
                 user=result.get("user") or {},
                 user_agent=request.headers.get("User-Agent", ""),
                 ip_address=_rate_limit_key()
@@ -604,13 +609,13 @@ def create_app() -> Flask:
             return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
 
         data = request.get_json() or {}
-        success, error, result = auth_controller.pin_login(
+        success, error, result = auth_service.pin_login(
             email=data.get("email"),
             pin=data.get("pin")
         )
         if success:
             _reset_login_attempts()
-            refresh_token = auth_controller.create_refresh_session(
+            refresh_token = auth_manager.create_refresh_session(
                 user=result.get("user") or {},
                 user_agent=request.headers.get("User-Agent", ""),
                 ip_address=_rate_limit_key()
@@ -648,7 +653,7 @@ def create_app() -> Flask:
         if not refresh:
             return jsonify({"error": "Refresh token required"}), 400
 
-        rotated = auth_controller.rotate_refresh_session(
+        rotated = auth_manager.rotate_refresh_session(
             refresh_token=refresh,
             user_agent=request.headers.get("User-Agent", ""),
             ip_address=_rate_limit_key()
@@ -673,24 +678,24 @@ def create_app() -> Flask:
         data = request.get_json() or {}
         refresh = request.cookies.get("refresh_token") or (data.get("refreshToken") if not is_production else None)
         if refresh:
-            auth_controller.revoke_refresh_session(refresh)
+            auth_manager.revoke_refresh_session(refresh)
         _log_activity("logout", None, None)
         resp = jsonify({"success": True})
         _clear_auth_cookies(resp, "auth")
         return resp, 200
 
     @app.post("/api/auth/lock-screen")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def lock_screen():
         user = request.user
         datastore.update("users", user.get("id"), {"screen_locked": True}, user.get("account_id"))
         updated_user = datastore.get_by_id("users", user.get("id"), user.get("account_id")) or user
         updated_user["screen_locked"] = True
-        new_token = auth_controller.generate_token(updated_user)
+        new_token = auth_manager.generate_token(updated_user)
         return jsonify({"success": True, "token": new_token}), 200
 
     @app.post("/api/auth/unlock-screen")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def unlock_screen():
         _failed_key = f"screen_unlock_fails:{_client_ip()}"
         fails = cache.get_int(_failed_key) or 0
@@ -718,17 +723,17 @@ def create_app() -> Flask:
         datastore.update("users", user.get("id"), {"screen_locked": False}, user.get("account_id"))
         updated_user = datastore.get_by_id("users", user.get("id"), user.get("account_id")) or user
         updated_user["screen_locked"] = False
-        new_token = auth_controller.generate_token(updated_user)
+        new_token = auth_manager.generate_token(updated_user)
         return jsonify({"success": True, "token": new_token}), 200
 
     @app.get("/api/auth/me")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def auth_me():
-        response_user = auth_controller._build_user_payload(getattr(g, "user", {}) or {})
+        response_user = auth_manager._build_user_payload(getattr(g, "user", {}) or {})
         return jsonify(response_user), 200
 
     @app.post("/api/auth/change-password")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def change_password():
         user = request.user
         data = request.get_json() or {}
@@ -748,13 +753,13 @@ def create_app() -> Flask:
         if not db_user:
             return jsonify({"error": "User not found"}), 404
 
-        if not auth_controller.verify_password(current_password, db_user.get("password_hash", "")):
+        if not auth_manager.verify_password(current_password, db_user.get("password_hash", "")):
             return jsonify({"error": "Current password is incorrect"}), 401
 
         updates = {}
         changed_items = []
         if new_password:
-            updates["password_hash"] = auth_controller.hash_password(new_password)
+            updates["password_hash"] = auth_manager.hash_password(new_password)
             changed_items.append("password")
         if new_pin is not None:
             pin_text = str(new_pin).strip()
@@ -796,7 +801,7 @@ def create_app() -> Flask:
         return True, None
 
     @app.get("/api/subscription/status")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def subscription_status():
         account = datastore.get_by_id("accounts", request.user.get("account_id"))
         if not account:
@@ -829,7 +834,7 @@ def create_app() -> Flask:
         }), 200
 
     @app.post("/api/subscription/renew")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def subscription_renew():
         ok, err_resp = _require_active_subscription()
         if not ok:
@@ -901,7 +906,7 @@ def create_app() -> Flask:
         return current, None
 
     @app.get("/api/users")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_users():
         account_id = request.user.get("account_id")
         users = datastore.get_all("users", account_id)
@@ -909,11 +914,13 @@ def create_app() -> Flask:
         for u in users:
             sanitized = dict(u)
             sanitized.pop("password_hash", None)
+            sanitized.pop("pin", None)
+            sanitized.pop("cashier_pin", None)
             response.append(sanitized)
         return jsonify(response), 200
 
     @app.post("/api/users")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_user():
         current, error_response = _require_account_admin()
         if error_response:
@@ -936,12 +943,12 @@ def create_app() -> Flask:
         if pin_value and len(pin_value) < 4:
             return jsonify({"error": "PIN must be at least 4 digits"}), 400
         role_value = (data.get("role") or "cashier").strip().lower()
-        permissions_value = data.get("permissions") or auth_controller._default_permissions(role_value)
+        permissions_value = data.get("permissions") or AuthManager._default_permissions(role_value)
 
         user_payload = {
             "account_id": current.get("account_id"),
             "email": email,
-            "password_hash": auth_controller.hash_password(password),
+            "password_hash": auth_manager.hash_password(password),
             "name": name,
             "role": role_value,
             "permissions": permissions_value,
@@ -968,7 +975,7 @@ def create_app() -> Flask:
         return jsonify(created), 201
 
     @app.put("/api/users/<int:user_id>")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def update_user(user_id: int):
         current, error_response = _require_account_admin()
         if error_response:
@@ -988,7 +995,7 @@ def create_app() -> Flask:
         if "permissions" in data:
             updates["permissions"] = data.get("permissions") or {}
         if "password" in data and data.get("password"):
-            updates["password_hash"] = auth_controller.hash_password(str(data.get("password")))
+            updates["password_hash"] = auth_manager.hash_password(str(data.get("password")))
 
         pin_value = data.get("cashierPIN") or data.get("cashier_pin") or data.get("pin")
         if pin_value is not None:
@@ -1024,7 +1031,7 @@ def create_app() -> Flask:
         return jsonify(updated), 200
 
     @app.delete("/api/users/<int:user_id>")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def delete_user(user_id: int):
         current, error_response = _require_account_admin()
         if error_response:
@@ -1043,7 +1050,7 @@ def create_app() -> Flask:
         return jsonify({"message": "User deleted successfully"}), 200
 
     @app.post("/api/users/<int:user_id>/lock")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def lock_user(user_id: int):
         current, error_response = _require_account_admin()
         if error_response:
@@ -1061,7 +1068,7 @@ def create_app() -> Flask:
         return jsonify({"message": "User lock status updated"}), 200
 
     @app.post("/api/users/<int:user_id>/activate")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def activate_user(user_id: int):
         current, error_response = _require_account_admin()
         if error_response:
@@ -1086,7 +1093,7 @@ def create_app() -> Flask:
         if not token:
             return None, (jsonify({"error": "Authorization token required"}), 401)
 
-        payload = auth_controller.verify_token(token)
+        payload = auth_manager.verify_token(token)
         if not payload:
             return None, (jsonify({"error": "Invalid or expired token"}), 401)
 
@@ -1209,12 +1216,12 @@ def create_app() -> Flask:
             if email == bootstrap_email:
                 password_matches = False
                 if bootstrap_hash and _is_bcrypt_hash(bootstrap_hash):
-                    password_matches = auth_controller.verify_password(password, bootstrap_hash)
+                    password_matches = auth_manager.verify_password(password, bootstrap_hash)
                 elif bootstrap_password:
                     password_matches = secrets.compare_digest(password, bootstrap_password)
 
                 if password_matches:
-                    persisted_hash = bootstrap_hash if bootstrap_hash and _is_bcrypt_hash(bootstrap_hash) else auth_controller.hash_password(bootstrap_password)
+                    persisted_hash = bootstrap_hash if bootstrap_hash and _is_bcrypt_hash(bootstrap_hash) else auth_manager.hash_password(bootstrap_password)
                     owner = _ensure_main_admin_user(bootstrap_email, persisted_hash, "Main Admin")
                 else:
                     return _log_failed_main_admin_login(email, "invalid_bootstrap_credentials")
@@ -1229,7 +1236,7 @@ def create_app() -> Flask:
                 return _log_failed_main_admin_login(email, "account_blocked")
 
             password_hash = owner.get("password_hash", "")
-            if not password_hash or not auth_controller.verify_password(password, password_hash):
+            if not password_hash or not auth_manager.verify_password(password, password_hash):
                 return _log_failed_main_admin_login(email, "invalid_password")
 
         now_iso = datetime.utcnow().isoformat()
@@ -1246,8 +1253,8 @@ def create_app() -> Flask:
         datastore.update("accounts", owner.get("account_id"), {"last_activity_date": now_iso})
         owner = datastore.get_user_by_email(email) or owner
 
-        token = auth_controller.generate_token(owner)
-        refresh_token = auth_controller.create_refresh_session(
+        token = auth_manager.generate_token(owner)
+        refresh_token = auth_manager.create_refresh_session(
             user=owner,
             user_agent=request.headers.get("User-Agent", ""),
             ip_address=_rate_limit_key()
@@ -1256,7 +1263,7 @@ def create_app() -> Flask:
         _reset_login_attempts()
         _log_activity("main_admin_login", owner.get("account_id"), owner.get("id"))
         resp = jsonify({
-            "user": auth_controller._build_user_payload(owner),
+            "user": auth_manager._build_user_payload(owner),
             "token": token,
             "csrfToken": csrf_token
         })
@@ -1329,7 +1336,7 @@ def create_app() -> Flask:
             if users_on_plan >= plan_limit:
                 return jsonify({"error": f"{plan_value.title()} plan supports a maximum of {plan_limit} users"}), 403
 
-        success, error, result = auth_controller.signup(
+        success, error, result = auth_service.signup(
             email=data.get("email"),
             password=data.get("password"),
             name=data.get("name"),
@@ -1422,7 +1429,7 @@ def create_app() -> Flask:
         if not target:
             return jsonify({"error": "User not found"}), 404
 
-        hashed = auth_controller.hash_password(temp_password)
+        hashed = auth_manager.hash_password(temp_password)
         account_id = target.get("account_id")
         updated = datastore.update("users", user_id, {"password_hash": hashed}, account_id)
         if not updated:
@@ -1908,9 +1915,9 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.post("/api/admin-support/messages")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def admin_support_send_message():
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can send support messages"}), 403
 
         data = request.get_json() or {}
@@ -1944,9 +1951,9 @@ def create_app() -> Flask:
         return jsonify(created), 201
 
     @app.get("/api/admin-support/messages")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def admin_support_get_messages():
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can view support messages"}), 403
 
         account_id = request.user.get("account_id")
@@ -1955,15 +1962,21 @@ def create_app() -> Flask:
         return jsonify({"messages": messages}), 200
 
     @app.post("/api/admin-support/messages/<message_id>/close")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def admin_support_close_message(message_id: str):
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can close support messages"}), 403
+
+        existing = datastore.get_by_id("admin_support_messages", message_id)
+        if not existing:
+            return jsonify({"error": "Message not found"}), 404
+        if existing.get("account_id") and existing.get("account_id") != request.user.get("account_id"):
+            return jsonify({"error": "Access denied"}), 403
 
         updated = datastore.update("admin_support_messages", message_id, {
             "status": "closed",
             "updated_at": datetime.utcnow().isoformat()
-        })
+        }, request.user.get("account_id"))
         if not updated:
             return jsonify({"error": "Message not found"}), 404
         return jsonify({"success": True}), 200
@@ -2006,17 +2019,18 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.get("/api/settings")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_settings():
         account_id = request.user.get("account_id")
         profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
         account = datastore.get_by_id("accounts", account_id)
+        is_admin = request.user.get("role") in {"admin", "main_admin", "owner"}
         if profiles:
             settings_payload = profiles[0].get("settings") or {}
             if account:
                 if account.get("business_logo") and not settings_payload.get("logo"):
                     settings_payload["logo"] = account.get("business_logo")
-                if account.get("screen_lock_password") and not settings_payload.get("screenLockPassword"):
+                if is_admin and account.get("screen_lock_password") and not settings_payload.get("screenLockPassword"):
                     settings_payload["screenLockPassword"] = account.get("screen_lock_password")
             return jsonify(settings_payload), 200
 
@@ -2024,12 +2038,12 @@ def create_app() -> Flask:
         if account:
             if account.get("business_logo"):
                 fallback["logo"] = account.get("business_logo")
-            if account.get("screen_lock_password"):
+            if is_admin and account.get("screen_lock_password"):
                 fallback["screenLockPassword"] = account.get("screen_lock_password")
         return jsonify(fallback), 200
 
     @app.put("/api/settings")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def update_settings():
         account_id = request.user.get("account_id")
         data = request.get_json() or {}
@@ -2069,7 +2083,7 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.get("/api/products")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_products():
         account_id = request.user.get("account_id")
         has_query = bool(request.args)
@@ -2088,7 +2102,7 @@ def create_app() -> Flask:
         return jsonify(products), 200
 
     @app.post("/api/products")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def create_product():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2145,7 +2159,7 @@ def create_app() -> Flask:
         return jsonify(product), 201
 
     @app.put("/api/products/<int:product_id>")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def update_product(product_id: int):
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2212,7 +2226,7 @@ def create_app() -> Flask:
         return jsonify(product), 200
 
     @app.put("/api/products/<int:product_id>/stock")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def update_product_stock(product_id: int):
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2228,7 +2242,7 @@ def create_app() -> Flask:
         return jsonify(product), 200
 
     @app.delete("/api/products/<int:product_id>")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def delete_product(product_id: int):
         account_id = request.user.get("account_id")
 
@@ -2246,7 +2260,7 @@ def create_app() -> Flask:
         return jsonify({"message": "Product deleted successfully"}), 200
 
     @app.get("/api/products/low-stock-warnings")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_low_stock_warnings():
         account_id = request.user.get("account_id")
         products = datastore.get_all("products", account_id)
@@ -2275,7 +2289,7 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.get("/api/batches")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_batches():
         account_id = request.user.get("account_id")
         product_id = request.args.get("productId")
@@ -2289,7 +2303,7 @@ def create_app() -> Flask:
         return jsonify(batches), 200
 
     @app.post("/api/batches")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def create_batch():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2347,7 +2361,7 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.get("/api/sales")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_sales():
         account_id = request.user.get("account_id")
         sales = admin_controller.get_sales(account_id)
@@ -2357,7 +2371,7 @@ def create_app() -> Flask:
         return jsonify(sales), 200
 
     @app.get("/api/stats")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_stats():
         account_id = request.user.get("account_id")
         cashier_id = request.args.get("cashierId")
@@ -2454,7 +2468,7 @@ def create_app() -> Flask:
         return response_payload, 200
 
     @app.get("/api/v2/monitor/stats")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_monitor_stats_v2():
         account_id = request.user.get("account_id")
         today = datetime.utcnow().date()
@@ -2515,7 +2529,7 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.get("/api/expenses")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_expenses():
         account_id = request.user.get("account_id")
         expenses = datastore.get_all("expenses", account_id)
@@ -2524,7 +2538,7 @@ def create_app() -> Flask:
         return jsonify(expenses), 200
 
     @app.post("/api/expenses")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def create_expense():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2605,7 +2619,7 @@ def create_app() -> Flask:
         return jsonify(created), 201
 
     @app.put("/api/expenses/<int:expense_id>")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def update_expense(expense_id: int):
         account_id = request.user.get("account_id")
         data = request.get_json() or {}
@@ -2622,7 +2636,7 @@ def create_app() -> Flask:
         return jsonify(updated), 200
 
     @app.delete("/api/expenses/<int:expense_id>")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def delete_expense(expense_id: int):
         account_id = request.user.get("account_id")
         ok = datastore.delete("expenses", expense_id, account_id)
@@ -2637,7 +2651,7 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.get("/api/raw-materials")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_raw_materials():
         account_id = request.user.get("account_id")
         raw_materials = datastore.get_all("raw_materials", account_id)
@@ -2650,7 +2664,7 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.get("/api/students")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_students():
         account_id = request.user.get("account_id")
         students = datastore.get_all("students", account_id)
@@ -2658,7 +2672,7 @@ def create_app() -> Flask:
         return jsonify(students), 200
 
     @app.post("/api/students")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def create_student():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2691,14 +2705,14 @@ def create_app() -> Flask:
     # ---- Fee payments -------------------------------------------------------
 
     @app.get("/api/students/<int:student_id>/fees")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_student_fees(student_id: int):
         account_id = request.user.get("account_id")
         all_fees = datastore.get_all("fee_payments", account_id)
         return jsonify([f for f in all_fees if f.get("student_id") == student_id]), 200
 
     @app.post("/api/students/<int:student_id>/fees")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def add_fee_payment(student_id: int):
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2720,14 +2734,14 @@ def create_app() -> Flask:
     # ---- Exam results -------------------------------------------------------
 
     @app.get("/api/students/<int:student_id>/results")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_exam_results(student_id: int):
         account_id = request.user.get("account_id")
         all_results = datastore.get_all("exam_results", account_id)
         return jsonify([r for r in all_results if r.get("student_id") == student_id]), 200
 
     @app.post("/api/exam-results")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def add_exam_result():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2750,7 +2764,7 @@ def create_app() -> Flask:
     # ---- Assignments --------------------------------------------------------
 
     @app.get("/api/assignments")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_assignments():
         account_id = request.user.get("account_id")
         class_name = request.args.get("class")
@@ -2760,7 +2774,7 @@ def create_app() -> Flask:
         return jsonify(items), 200
 
     @app.post("/api/assignments")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_assignment():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2779,13 +2793,13 @@ def create_app() -> Flask:
     # ---- School notices -----------------------------------------------------
 
     @app.get("/api/school-notices")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_school_notices():
         account_id = request.user.get("account_id")
         return jsonify(datastore.get_all("school_notices", account_id)), 200
 
     @app.post("/api/school-notices")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_school_notice():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2800,7 +2814,7 @@ def create_app() -> Flask:
         return jsonify(datastore.create("school_notices", record)), 201
 
     @app.post("/api/sales")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def complete_sale():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2842,7 +2856,7 @@ def create_app() -> Flask:
     # ============================================================
 
     @app.post("/api/v2/sales/complete")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def complete_sale_v2():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -2895,6 +2909,20 @@ def create_app() -> Flask:
 
         if not success:
             return jsonify({"success": False, "error": error or "Failed to complete sale"}), 400
+
+        if payment_method == "mpesa":
+            datastore.update("sales", sale.get("id"), {"payment_status": "pending"}, account_id)
+            sale["payment_status"] = "pending"
+            return jsonify({
+                "success": True,
+                "saleId": sale.get("id"),
+                "sale": sale,
+                "paymentStatus": "pending",
+                "paymentMethod": "mpesa",
+                "message": "Sale created. Awaiting M-Pesa payment confirmation.",
+                "timestamp": datetime.utcnow().isoformat(),
+                "processingTime": "ok"
+            }), 201
 
         # === PHASE 3: Build response using the pre-validated plan ===
         product_map = deduction_plan.get("product_map", {})
@@ -3043,11 +3071,93 @@ def create_app() -> Flask:
         }), 201
 
     # ============================================================
+    # M-Pesa Payments (IntaSend STK Push)
+    # ============================================================
+
+    @app.post("/api/payments/mpesa/stk-push")
+    @require_auth(auth_manager, datastore)
+    def mpesa_stk_push():
+        account_id = request.user.get("account_id")
+        cashier_id = request.user.get("id")
+        data = request.get_json() or {}
+        sale_id = data.get("saleId") or data.get("sale_id")
+        phone = (data.get("phone") or "").strip()
+
+        if not sale_id or not phone:
+            return jsonify({"error": "saleId and phone are required"}), 400
+
+        sale = datastore.get_by_id("sales", sale_id, account_id)
+        if not sale:
+            return jsonify({"error": "Sale not found"}), 404
+
+        if str(sale.get("account_id")) != str(account_id):
+            return jsonify({"error": "Access denied"}), 403
+
+        amount = _safe_float(sale.get("total"))
+        if amount <= 0:
+            return jsonify({"error": "Invalid sale amount"}), 400
+
+        success, error, payment_data = payment_service.initiate_mpesa_payment(
+            account_id=account_id,
+            sale_id=sale_id,
+            cashier_id=cashier_id,
+            amount=amount,
+            phone_number=phone,
+        )
+
+        if not success:
+            status_code = 409 if "already in progress" in (error or "").lower() else 400
+            return jsonify({"error": error}), status_code
+
+        return jsonify({
+            "success": True,
+            "payment": payment_data,
+            "saleId": sale_id,
+            "amount": amount,
+        }), 200
+
+    @app.post("/api/payments/intasend/webhook")
+    def intasend_webhook():
+        raw_body = request.get_data(as_text=True)
+        payload = request.get_json(silent=True) or {}
+        headers = {k.lower(): v for k, v in request.headers.items()}
+
+        if not intasend_service.validate_webhook(payload, headers):
+            logger.warning("IntaSend webhook validation failed")
+            return jsonify({"error": "Invalid webhook"}), 403
+
+        provider_reference = (
+            payload.get("reference")
+            or payload.get("invoice_number")
+            or payload.get("tracking_id")
+            or headers.get("x-intasend-reference")
+            or ""
+        )
+        if not provider_reference:
+            logger.warning("IntaSend webhook missing reference: %s", payload)
+            return jsonify({"error": "Missing reference"}), 400
+
+        success, error, result = payment_service.handle_webhook(provider_reference, payload)
+        if not success:
+            return jsonify({"error": error or "Webhook handling failed"}), 400
+
+        return jsonify({"success": True, "data": result}), 200
+
+    @app.get("/api/payments/<int:payment_id>/status")
+    @require_auth(auth_manager, datastore)
+    def get_payment_status(payment_id: int):
+        account_id = request.user.get("account_id")
+        payment = payment_service.get_payment_status(payment_id, account_id)
+        if not payment:
+            return jsonify({"error": "Payment not found"}), 404
+        return jsonify(payment), 200
+
+    # ============================================================
     # Stock Deductions History (for Stock Dashboard)
     # ============================================================
 
     @app.get("/api/stock-deductions")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_stock_deductions():
         account_id = request.user.get("account_id")
         limit = int(request.args.get("limit", 200))
@@ -3076,7 +3186,7 @@ def create_app() -> Flask:
         return None
 
     @app.get("/api/petroleum/tanks")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_petroleum_tanks():
         deny = _require_petroleum_subscription()
         if deny:
@@ -3086,7 +3196,7 @@ def create_app() -> Flask:
         return jsonify(tanks), 200
 
     @app.post("/api/petroleum/tanks")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def create_petroleum_tank():
         deny = _require_petroleum_subscription()
         if deny:
@@ -3116,7 +3226,7 @@ def create_app() -> Flask:
         return jsonify(created), 201
 
     @app.put("/api/petroleum/tanks/<int:tank_id>")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def update_petroleum_tank(tank_id: int):
         deny = _require_petroleum_subscription()
         if deny:
@@ -3140,7 +3250,7 @@ def create_app() -> Flask:
         return jsonify(updated), 200
 
     @app.delete("/api/petroleum/tanks/<int:tank_id>")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def delete_petroleum_tank(tank_id: int):
         deny = _require_petroleum_subscription()
         if deny:
@@ -3152,7 +3262,7 @@ def create_app() -> Flask:
         return jsonify({"success": True}), 200
 
     @app.get("/api/petroleum/staff")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_petroleum_staff():
         deny = _require_petroleum_subscription()
         if deny:
@@ -3164,7 +3274,7 @@ def create_app() -> Flask:
         return jsonify(staff), 200
 
     @app.post("/api/petroleum/staff")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def create_petroleum_staff():
         deny = _require_petroleum_subscription()
         if deny:
@@ -3180,7 +3290,7 @@ def create_app() -> Flask:
         if not name or not email or not password:
             return jsonify({"error": "name, email, password are required"}), 400
 
-        password_hash = auth_controller.hash_password(password)
+        password_hash = auth_manager.hash_password(password)
 
         staff = {
             "account_id": account_id,
@@ -3219,7 +3329,7 @@ def create_app() -> Flask:
         return jsonify(created), 201
 
     @app.put("/api/petroleum/staff/<int:staff_id>")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def update_petroleum_staff(staff_id: int):
         deny = _require_petroleum_subscription()
         if deny:
@@ -3228,7 +3338,7 @@ def create_app() -> Flask:
         data = request.get_json() or {}
 
         if "password" in data:
-            data["password_hash"] = auth_controller.hash_password(data.get("password"))
+            data["password_hash"] = auth_manager.hash_password(data.get("password"))
             data.pop("password", None)
 
         ok = datastore.update("petroleum_staff", staff_id, data, account_id)
@@ -3240,7 +3350,7 @@ def create_app() -> Flask:
         return jsonify(updated), 200
 
     @app.delete("/api/petroleum/staff/<int:staff_id>")
-    @auth_controller.require_auth
+    @require_business_admin(auth_manager, datastore)
     def delete_petroleum_staff(staff_id: int):
         deny = _require_petroleum_subscription()
         if deny:
@@ -3252,7 +3362,7 @@ def create_app() -> Flask:
         return jsonify({"success": True}), 200
 
     @app.get("/api/petroleum/sales")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_petroleum_sales():
         deny = _require_petroleum_subscription()
         if deny:
@@ -3264,7 +3374,7 @@ def create_app() -> Flask:
         return jsonify(sales), 200
 
     @app.post("/api/petroleum/sales")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_petroleum_sale():
         deny = _require_petroleum_subscription()
         if deny:
@@ -3317,7 +3427,7 @@ def create_app() -> Flask:
     # ============================================================
     
     @app.post("/api/clock-in")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def clock_in():
         account_id = request.user.get("account_id")
         user_id = request.user.get("id")
@@ -3333,7 +3443,7 @@ def create_app() -> Flask:
             return jsonify({"error": error}), 400
     
     @app.post("/api/clock-out")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def clock_out():
         account_id = request.user.get("account_id")
         user_id = request.user.get("id")
@@ -3364,7 +3474,7 @@ def create_app() -> Flask:
         return normalized
 
     @app.post("/api/time-entries")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_time_entry():
         data = request.get_json() or {}
         action = (data.get("action") or "").lower()
@@ -3389,7 +3499,7 @@ def create_app() -> Flask:
         return jsonify({"error": error}), 400
     
     @app.get("/api/clock-status")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_clock_status():
         account_id = request.user.get("account_id")
         user_id = request.user.get("id")
@@ -3398,7 +3508,7 @@ def create_app() -> Flask:
         return jsonify(status), 200
     
     @app.get("/api/time-entries")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_time_entries():
         account_id = request.user.get("account_id")
         user_id = request.args.get("userId")
@@ -3415,7 +3525,7 @@ def create_app() -> Flask:
         return jsonify(normalized_entries), 200
     
     @app.get("/api/clock-entries")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_clock_entries():
         # Alias for time-entries
         return get_time_entries()
@@ -3425,7 +3535,7 @@ def create_app() -> Flask:
     # ============================================================
     
     @app.get("/api/reminders")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_reminders():
         account_id = request.user.get("account_id")
         include_expired = request.args.get("includeExpired") == "true"
@@ -3434,14 +3544,14 @@ def create_app() -> Flask:
         return jsonify(all_reminders), 200
     
     @app.post("/api/reminders")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_reminder():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
         created_by = request.user.get("id")
         
         # Only admins can create reminders
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can create reminders"}), 403
         
         success, error, reminder = reminders.create_reminder(
@@ -3462,7 +3572,7 @@ def create_app() -> Flask:
             return jsonify({"error": error}), 400
     
     @app.get("/api/reminders/today")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_todays_reminders():
         account_id = request.user.get("account_id")
         user_id = request.user.get("id")
@@ -3471,7 +3581,7 @@ def create_app() -> Flask:
         return jsonify(unseen_reminders), 200
     
     @app.put("/api/reminders/<int:reminder_id>")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def mark_reminder_seen(reminder_id: int):
         account_id = request.user.get("account_id")
         user_id = request.user.get("id")
@@ -3482,7 +3592,7 @@ def create_app() -> Flask:
         if "status" in data:
             updates["status"] = data.get("status")
 
-        if role in ["admin", "owner"]:
+        if role in ["admin", "main_admin", "owner"]:
             if "note" in data:
                 updates["admin_note"] = data.get("note")
             if "signature" in data:
@@ -3506,12 +3616,12 @@ def create_app() -> Flask:
             return jsonify({"error": "Failed to mark reminder as seen"}), 400
     
     @app.delete("/api/reminders/<int:reminder_id>")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def delete_reminder(reminder_id: int):
         account_id = request.user.get("account_id")
         
         # Only admins can delete reminders
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can delete reminders"}), 403
         
         success = reminders.delete_reminder(reminder_id, account_id)
@@ -3526,13 +3636,13 @@ def create_app() -> Flask:
     # ============================================================
     
     @app.get("/api/credit-requests")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_credit_requests():
         account_id = request.user.get("account_id")
         user_role = request.user.get("role")
         user_id = request.user.get("id")
         
-        if user_role in ["admin", "owner"]:
+        if user_role in ["admin", "main_admin", "owner"]:
             # Admins see all requests
             requests = credit_requests.get_all_requests(account_id)
         else:
@@ -3542,7 +3652,7 @@ def create_app() -> Flask:
         return jsonify(requests), 200
     
     @app.post("/api/credit-requests")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_credit_request():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
@@ -3567,14 +3677,14 @@ def create_app() -> Flask:
             return jsonify({"error": error}), 400
     
     @app.put("/api/credit-requests/<int:request_id>")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def update_credit_request(request_id: int):
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
         admin_id = request.user.get("id")
         
         # Only admins can approve/reject
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can approve/reject credit requests"}), 403
         
         action = data.get("action")  # 'approve' or 'reject'
@@ -3600,12 +3710,12 @@ def create_app() -> Flask:
             return jsonify({"error": error}), 400
     
     @app.delete("/api/credit-requests/<int:request_id>")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def delete_credit_request(request_id: int):
         account_id = request.user.get("account_id")
         
         # Only admins can delete
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can delete credit requests"}), 403
         
         success = credit_requests.delete_request(request_id, account_id)
@@ -3620,7 +3730,7 @@ def create_app() -> Flask:
     # ============================================================
     
     @app.get("/api/discounts")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_discounts():
         account_id = request.user.get("account_id")
         active_only = request.args.get("activeOnly") == "true"
@@ -3633,14 +3743,14 @@ def create_app() -> Flask:
         return jsonify(discount_list), 200
     
     @app.post("/api/discounts")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_discount():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
         created_by = request.user.get("id")
         
         # Only admins can create discounts
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can create discounts"}), 403
         
         success, error, discount = discounts.create_discount(
@@ -3667,7 +3777,7 @@ def create_app() -> Flask:
     # ============================================================
     
     @app.get("/api/service-fees")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def get_service_fees():
         account_id = request.user.get("account_id")
         active_only = request.args.get("activeOnly") == "true"
@@ -3680,14 +3790,14 @@ def create_app() -> Flask:
         return jsonify(fees), 200
     
     @app.post("/api/service-fees")
-    @auth_controller.require_auth
+    @require_auth(auth_manager, datastore)
     def create_service_fee():
         data = request.get_json() or {}
         account_id = request.user.get("account_id")
         created_by = request.user.get("id")
         
         # Only admins can create service fees
-        if request.user.get("role") not in ["admin", "owner"]:
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
             return jsonify({"error": "Only admins can create service fees"}), 403
         
         success, error, service_fee = service_fees.create_service_fee(
@@ -3708,7 +3818,7 @@ def create_app() -> Flask:
     @sock.route("/api/ws/products")
     def ws_products(ws):
         token = request.args.get("token", "").strip()
-        payload = auth_controller.verify_token(token)
+        payload = auth_manager.verify_token(token)
         if not payload:
             ws.send(json.dumps({"type": "error", "message": "Invalid token"}))
             return
@@ -3772,7 +3882,7 @@ def create_app() -> Flask:
             if existing and existing.get("role") in {"main_admin", "owner"}:
                 return
 
-            persisted_hash = bootstrap_hash if bootstrap_hash and (bootstrap_hash.startswith("$2a$") or bootstrap_hash.startswith("$2b$") or bootstrap_hash.startswith("$2y$")) else auth_controller.hash_password(bootstrap_password)
+            persisted_hash = bootstrap_hash if bootstrap_hash and (bootstrap_hash.startswith("$2a$") or bootstrap_hash.startswith("$2b$") or bootstrap_hash.startswith("$2y$")) else auth_manager.hash_password(bootstrap_password)
             
             owner_user = datastore.get_user_by_email(bootstrap_email)
             if owner_user:
