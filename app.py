@@ -730,7 +730,9 @@ def create_app() -> Flask:
     @require_auth(auth_manager, datastore)
     def auth_me():
         response_user = auth_manager._build_user_payload(getattr(g, "user", {}) or {})
-        return jsonify(response_user), 200
+        resp = jsonify(response_user)
+        resp.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=60"
+        return resp, 200
 
     @app.post("/api/auth/change-password")
     @require_auth(auth_manager, datastore)
@@ -2051,7 +2053,9 @@ def create_app() -> Flask:
                     settings_payload["logo"] = account.get("business_logo")
                 if is_admin and account.get("screen_lock_password") and not settings_payload.get("screenLockPassword"):
                     settings_payload["screenLockPassword"] = account.get("screen_lock_password")
-            return jsonify(settings_payload), 200
+            resp = jsonify(settings_payload)
+            resp.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=120"
+            return resp, 200
 
         fallback = {}
         if account:
@@ -2059,7 +2063,9 @@ def create_app() -> Flask:
                 fallback["logo"] = account.get("business_logo")
             if is_admin and account.get("screen_lock_password"):
                 fallback["screenLockPassword"] = account.get("screen_lock_password")
-        return jsonify(fallback), 200
+        resp = jsonify(fallback)
+        resp.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=120"
+        return resp, 200
 
     @app.put("/api/settings")
     @require_business_admin(auth_manager, datastore)
@@ -2118,7 +2124,9 @@ def create_app() -> Flask:
         products = _apply_sort(products, request.args.get("sort"))
         products = _apply_limit(products, request.args.get("limit"))
         products = _apply_fields(products, request.args.get("fields"))
-        return jsonify(products), 200
+        resp = jsonify(products)
+        resp.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=30"
+        return resp, 200
 
     @app.post("/api/products")
     @require_business_admin(auth_manager, datastore)
@@ -2387,7 +2395,9 @@ def create_app() -> Flask:
         sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
         sales = _apply_limit(sales, request.args.get("limit"))
         sales = _apply_fields(sales, request.args.get("fields"))
-        return jsonify(sales), 200
+        resp = jsonify(sales)
+        resp.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
+        return resp, 200
 
     @app.get("/api/stats")
     @require_auth(auth_manager, datastore)
