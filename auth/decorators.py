@@ -73,7 +73,7 @@ class require_auth:
             if plan == "trial" and trial_end:
                 try:
                     from datetime import datetime as _dt
-                    if _dt.utcnow().isoformat() > trial_end:
+                    if _dt.utcnow() > _dt.fromisoformat(trial_end):
                         return jsonify({
                             "error": "Trial expired. Please subscribe to continue.",
                             "code": "TRIAL_EXPIRED"
@@ -150,13 +150,7 @@ class require_business_admin:
             if isinstance(result, tuple) and result[1] >= 400:
                 return result
             role = request.user.get("role")
-            if role not in {"admin", "main_admin"}:
+            if role not in {"admin"}:
                 return jsonify({"error": "Business admin access required"}), 403
-            if role == "main_admin":
-                logger.warning(
-                    "Main admin accessed business endpoint %s %s — "
-                    "main_admin should use /api/main-admin/* endpoints only.",
-                    request.method, request.path,
-                )
-            return f(*args, **kwargs)
+            return result
         return decorated

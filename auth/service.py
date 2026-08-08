@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import uuid
+import secrets
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
@@ -59,14 +60,14 @@ class AuthService:
 
         account_id = f"acc_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow().isoformat()
-        trial_duration_days = 15
+        trial_duration_days = 30
         trial_end = (datetime.utcnow() + timedelta(days=trial_duration_days)).isoformat()
 
         account = {
             "id": account_id,
             "owner_email": email,
             "business_name": name,
-            "plan": plan or "free",
+            "plan": "trial",
             "is_active": True,
             "is_locked": False,
             "trial_ends_at": trial_end,
@@ -75,7 +76,7 @@ class AuthService:
             "business_logo": None,
             "currency": "KES",
             "tax_rate": 0.0,
-            "screen_lock_password": "2005",
+            "screen_lock_password": secrets.token_hex(8),
             "days_used": 0,
             "last_activity_date": None,
             "requested_trial": trial_end is not None,

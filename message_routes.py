@@ -28,7 +28,9 @@ def require_auth(f):
             return jsonify({'error': 'No token provided'}), 401
         
         try:
-            secret = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
+            secret = os.environ.get('JWT_SECRET')
+            if not secret:
+                return jsonify({'error': 'Server misconfigured: JWT_SECRET missing'}), 500
             payload = jwt.decode(token, secret, algorithms=['HS256'])
             request.user = payload
             return f(*args, **kwargs)

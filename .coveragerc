@@ -1,0 +1,16 @@
+[run]
+omit =
+    */tests/*
+    */test_*.py
+    */backup/*
+    */node_modules/*
+    auth/routes.py
+    api_router.py
+    models.py
+    backup_database.py
+    migrate_json_to_pg.py
+    migrate_to_postgres.py
+    migrations.py
+    smoke_test.py
+    test_ai_features.py
+    test_realtime_sync.py

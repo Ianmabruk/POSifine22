@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a complete redesign of the Posify landing page into a modern SaaS POS product website, built with React, Tailwind CSS, and Framer Motion on the frontend, and Node.js + Express + MongoDB on the backend.
+This is a complete redesign of the Posify landing page into a modern SaaS POS product website, built with React, Tailwind CSS, and Framer Motion on the frontend, and Python + Flask + PostgreSQL on the backend.
 
 ## Brand Identity
 
@@ -26,7 +26,7 @@ This is a complete redesign of the Posify landing page into a modern SaaS POS pr
 ## Backend Features
 
 ### Trial System
-- 15-day free trial for each selected package
+- 30-day free trial for each selected package
 - Automatic trial record creation
 - Trial end date tracking
 - Automatic feature locking after trial expires
@@ -78,30 +78,14 @@ my-react-app/
       apiClient.js            # API client for backend
       mainAdminApi.js         # Admin API client
 
-backend-express/
-  server.js                  # Express server
-  config/
-    database.js              # Configuration
-  models/
-    Business.js              # Business model
-    Trial.js                 # Trial model
-    Subscription.js          # Subscription model
-    Payment.js               # Payment model
-    User.js                  # User model
-  routes/
-    auth.js                  # Auth routes
-    trials.js                # Trial routes
-    subscriptions.js         # Subscription routes
-    payments.js              # Payment routes
-    admin.js                 # Admin routes
-  controllers/
-    authController.js        # Auth logic
-    trialController.js       # Trial logic
-    subscriptionController.js # Subscription logic
-    paymentController.js     # Payment logic
-    adminController.js       # Admin logic
-  middleware/
-    auth.js                  # JWT auth middleware
+app.py                      # Flask application entrypoint
+auth/
+  service.py                # Authentication service
+  manager.py                # JWT and session management
+  decorators.py             # Route protection decorators
+services/
+  data_store.py             # Database abstraction layer
+  session_store.py          # Session management
 ```
 
 ## Getting Started
@@ -117,22 +101,22 @@ npm run dev
 ### Backend
 
 ```bash
-cd backend-express
-npm install
-npm run dev
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 app.py
 ```
 
 ### Environment Variables
 
-Create `.env` in `backend-express/`:
+Copy `.env.example` to `.env` and configure:
 
 ```env
-PORT=5000
-MONGODB_URI=mongodb://localhost:27017/posify
+DATABASE_URL=postgresql://user:pass@host/db
 JWT_SECRET=your-secret-key-here
-PESAPAL_CONSUMER_KEY=your-key
-PESAPAL_CONSUMER_SECRET=your-secret
-PESAPAL_BASE_URL=https://cybqa.pesapal.com/pesapalv3
+REFRESH_TOKEN_SECRET=your-refresh-secret-here
+USE_POSTGRES=true
+CORS_ORIGIN=http://localhost:5173
 ```
 
 ## Key Routes
@@ -167,9 +151,9 @@ PESAPAL_BASE_URL=https://cybqa.pesapal.com/pesapalv3
 ## Tech Stack
 
 - **Frontend:** React 18, Tailwind CSS 3, Framer Motion, Recharts
-- **Backend:** Node.js, Express, MongoDB (Mongoose)
-- **Authentication:** JWT
-- **Payment:** PesaPal (structure ready)
+- **Backend:** Python 3.11, Flask, PostgreSQL
+- **Authentication:** JWT (HS256) with refresh tokens
+- **Payment:** IntaSend integration ready
 
 ## Design Principles
 

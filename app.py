@@ -792,12 +792,20 @@ def create_app() -> Flask:
             return True, None
         if plan == "trial":
             trial_end = account.get("trial_ends_at")
-            if trial_end and datetime.utcnow().isoformat() > trial_end:
-                return False, (jsonify({"error": "Trial expired. Please subscribe to continue.", "code": "TRIAL_EXPIRED"}), 403)
+            if trial_end:
+                try:
+                    if datetime.utcnow() > datetime.fromisoformat(trial_end):
+                        return False, (jsonify({"error": "Trial expired. Please subscribe to continue.", "code": "TRIAL_EXPIRED"}), 403)
+                except Exception:
+                    pass
             return True, None
         sub_end = account.get("subscription_ends_at")
-        if sub_end and datetime.utcnow().isoformat() > sub_end:
-            return False, (jsonify({"error": "Subscription expired. Please renew to continue.", "code": "SUBSCRIPTION_EXPIRED"}), 403)
+        if sub_end:
+            try:
+                if datetime.utcnow() > datetime.fromisoformat(sub_end):
+                    return False, (jsonify({"error": "Subscription expired. Please renew to continue.", "code": "SUBSCRIPTION_EXPIRED"}), 403)
+            except Exception:
+                pass
         return True, None
 
     @app.get("/api/subscription/status")
@@ -843,7 +851,10 @@ def create_app() -> Flask:
         if error_response:
             return error_response
         data = request.get_json() or {}
-        plan_id = data.get("plan_id") or request.user.get("plan") or "business"
+        plan_id = data.get("plan_id") or "business"
+        valid_plans = {"starter", "business", "enterprise", "custom", "free", "trial"}
+        if plan_id not in valid_plans:
+            return jsonify({"error": "Invalid plan"}), 400
         method = data.get("payment_method", "mpesa")
         now = datetime.utcnow()
         new_end = (now + timedelta(days=30)).isoformat()
@@ -867,9 +878,9 @@ def create_app() -> Flask:
     def subscription_plans():
         return jsonify({
             "plans": [
-                {"id": "starter", "name": "Starter", "price": 999, "currency": "KES", "trial_days": 15},
-                {"id": "business", "name": "Business", "price": 2499, "currency": "KES", "trial_days": 15},
-                {"id": "enterprise", "name": "Enterprise", "price": 4999, "currency": "KES", "trial_days": 15},
+                {"id": "starter", "name": "Starter", "price": 999, "currency": "KES", "trial_days": 30},
+                {"id": "business", "name": "Business", "price": 2499, "currency": "KES", "trial_days": 30},
+                {"id": "enterprise", "name": "Enterprise", "price": 4999, "currency": "KES", "trial_days": 30},
             ]
         }), 200
 
@@ -880,10 +891,10 @@ def create_app() -> Flask:
         valid_plans = {"starter", "business", "enterprise", "custom"}
         if package_type not in valid_plans:
             return jsonify({"error": "Invalid plan"}), 400
-        
-        trial_days = 15
+
+        trial_days = 30
         trial_end = (datetime.utcnow() + timedelta(days=trial_days)).isoformat()
-        
+
         return jsonify({
             "success": True,
             "message": "Trial created successfully",
@@ -901,7 +912,7 @@ def create_app() -> Flask:
 
     def _require_account_admin():
         current = request.user
-        if current.get("role") not in {"admin", "main_admin", "owner"}:
+        if current.get("role") not in {"admin"}:
             return None, (jsonify({"error": "Admin access required"}), 403)
         return current, None
 
@@ -942,7 +953,11 @@ def create_app() -> Flask:
         pin_value = (data.get("cashier_pin") or data.get("cashierPIN") or data.get("pin") or "").strip() or None
         if pin_value and len(pin_value) < 4:
             return jsonify({"error": "PIN must be at least 4 digits"}), 400
-        role_value = (data.get("role") or "cashier").strip().lower()
+        role_value = "cashier"
+        if data.get("role"):
+            requested_role = (data.get("role") or "").strip().lower()
+            if requested_role in {"cashier"}:
+                role_value = requested_role
         permissions_value = data.get("permissions") or AuthManager._default_permissions(role_value)
 
         user_payload = {
@@ -1010,7 +1025,11 @@ def create_app() -> Flask:
         if "locked" in data:
             updates["is_locked"] = bool(data.get("locked"))
         if "role" in data:
-            updates["role"] = str(data.get("role") or target.get("role") or "cashier").strip().lower()
+            requested_role = str(data.get("role") or target.get("role") or "cashier").strip().lower()
+            if requested_role not in {"cashier"}:
+                updates.pop("role", None)
+            else:
+                updates["role"] = requested_role
         if "businessType" in data or "business_type" in data:
             updates["business_type"] = data.get("businessType") or data.get("business_type")
         if "businessRole" in data or "business_role" in data:

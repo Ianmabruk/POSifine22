@@ -5,26 +5,15 @@ echo "   Starting Posify Development        "
 echo "======================================"
 echo ""
 
-# Check if MongoDB is running
-if ! pgrep -x "mongod" > /dev/null; then
-    echo "Starting MongoDB..."
-    mongod --dbpath /data/db --fork --logpath /var/log/mongod.log 2>/dev/null || {
-        echo "Warning: Could not start MongoDB. Please ensure MongoDB is installed and running."
-        echo "You can start MongoDB with: mongod --dbpath /data/db"
-    }
-else
-    echo "MongoDB is already running."
-fi
-
 echo ""
 echo "Starting backend server..."
-cd backend-express
-npm run dev &
+cd /home/ian-mabruk/universal
+python3 app.py &
 BACKEND_PID=$!
 
 echo ""
 echo "Starting frontend development server..."
-cd ../my-react-app
+cd /home/ian-mabruk/universal/my-react-app
 npm run dev &
 FRONTEND_PID=$!
 

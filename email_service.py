@@ -136,7 +136,7 @@ class EmailService:
                         Hi <strong>{name}</strong>,
                     </p>
                     <p style="color: #475569; font-size: 15px; line-height: 1.7; margin: 0 0 24px;">
-                        Welcome to <strong>POSIFY</strong>! Your account is ready and your 15-day free trial has started.
+                        Welcome to <strong>POSIFY</strong>! Your account is ready and your 30-day free trial has started.
                         We're excited to help you run your entire business from one powerful platform.
                     </p>
                     
@@ -213,7 +213,7 @@ class EmailService:
         text_content = f"""
         Welcome to POSIFY, {name}!
         
-        Your account is ready and your 15-day free trial has started.
+        Your account is ready and your 30-day free trial has started.
         
         Go to your dashboard: {login_url or 'https://posify.co.ke/auth/login'}
         

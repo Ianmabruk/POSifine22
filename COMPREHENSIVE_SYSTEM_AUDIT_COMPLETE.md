@@ -111,7 +111,7 @@ const plans = {
 ```
 
 #### Trial Management
-- **15-day Free Trial**: Auto-expires with popup notification
+- **30-day Free Trial**: Auto-expires with popup notification
 - **Trial Status**: Stored in DB and checked on every login
 - **Auto-popup**: "Your free trial has ended. Please subscribe to continue."
 
@@ -313,7 +313,7 @@ CORS_ORIGINS=https://app.posifine.com
 
 #### Revenue Optimization
 - **Subscription Tiers**: Clear value proposition
-- **Trial Conversion**: 15-day free trial
+- **Trial Conversion**: 30-day free trial
 - **Upselling**: Industry-specific features
 - **Retention**: Real-time collaboration features
 
