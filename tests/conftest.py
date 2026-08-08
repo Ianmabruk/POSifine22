@@ -70,8 +70,8 @@ def datastore():
 
 
 @pytest.fixture
-def auth_controller(datastore):
-    """Create auth manager for testing"""
+def auth_service(datastore):
+    """Create auth service for testing"""
     manager = AuthManager(TEST_SECRET_KEY, datastore=datastore)
     service = AuthService(manager, datastore=datastore)
     return service
@@ -96,9 +96,9 @@ def cashier_controller(datastore, stock_engine):
 
 
 @pytest.fixture
-def test_account(datastore, auth_controller):
+def test_account(datastore, auth_service):
     """Create test account"""
-    success, error, user_data = auth_controller.signup(
+    success, error, user_data = auth_service.signup(
         email='test@example.com',
         password='TestPassword123!',
         name='Test User',

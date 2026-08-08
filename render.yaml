@@ -5,8 +5,8 @@ services:
     region: oregon
     plan: free
     runtime: python
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: cd backend && bash start.sh
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
     envVars:
       - key: JWT_SECRET
         generateValue: true

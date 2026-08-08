@@ -37,7 +37,7 @@ except ImportError:
         return "/admin"
 
 
-def create_business_routes(datastore, auth_controller):
+def create_business_routes(datastore, auth_manager):
     """Create business management routes"""
     
     business_bp = Blueprint('business', __name__)
@@ -93,7 +93,7 @@ def create_business_routes(datastore, auth_controller):
     # ============================================================
     
     @business_bp.route('/select', methods=['POST', 'OPTIONS'])
-    @auth_controller.require_auth
+    @auth_manager.require_auth
     def select_business_type():
         """
         Allow Pro/Custom plan admin to select or change their business type.
@@ -176,7 +176,7 @@ def create_business_routes(datastore, auth_controller):
             return jsonify({'error': str(e)}), 500
     
     @business_bp.route('/profile', methods=['GET', 'OPTIONS'])
-    @auth_controller.require_auth
+    @auth_manager.require_auth
     def get_business_profile():
         """Get business profile for the current user's account"""
         try:
@@ -210,7 +210,7 @@ def create_business_routes(datastore, auth_controller):
             return jsonify({'error': str(e)}), 500
     
     @business_bp.route('/users', methods=['POST', 'OPTIONS'])
-    @auth_controller.require_auth
+    @auth_manager.require_auth
     def create_business_user():
         """
         Create a user under the admin's business with a specific business role.
@@ -319,7 +319,7 @@ def create_business_routes(datastore, auth_controller):
             return jsonify({'error': str(e)}), 500
     
     @business_bp.route('/users', methods=['GET', 'OPTIONS'])
-    @auth_controller.require_auth
+    @auth_manager.require_auth
     def get_business_users():
         """Get all users in the admin's business"""
         try:
@@ -345,7 +345,7 @@ def create_business_routes(datastore, auth_controller):
             return jsonify({'error': str(e)}), 500
     
     @business_bp.route('/users/<user_id>', methods=['PUT', 'OPTIONS'])
-    @auth_controller.require_auth
+    @auth_manager.require_auth
     def update_business_user(user_id):
         """Update a business user's information or role"""
         try:
@@ -405,7 +405,7 @@ def create_business_routes(datastore, auth_controller):
             return jsonify({'error': str(e)}), 500
     
     @business_bp.route('/users/<user_id>', methods=['DELETE', 'OPTIONS'])
-    @auth_controller.require_auth
+    @auth_manager.require_auth
     def delete_business_user(user_id):
         """Delete a business user"""
         try:

@@ -105,6 +105,14 @@ class AuthService:
             "business_role": "admin",
         }
 
+        safe_types = {
+            k: type(v).__name__
+            for k, v in user.items()
+            if k not in {"password_hash", "pin", "cashier_pin"}
+        }
+        logger.info("Signup user fields: %s", list(user.keys()))
+        logger.info("Signup user field types: %s", safe_types)
+
         if self.datastore:
             user = self.datastore.create("users", user)
 

@@ -2299,7 +2299,7 @@ def create_app() -> Flask:
                 product_id_int = int(product_id)
             except ValueError:
                 return jsonify({"error": "Invalid productId"}), 400
-            batches = [b for b in batches if int(b.get("productId")) == product_id_int]
+            batches = [b for b in batches if int(b.get("productId") or b.get("product_id") or 0) == product_id_int]
         return jsonify(batches), 200
 
     @app.post("/api/batches")

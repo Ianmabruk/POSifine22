@@ -578,6 +578,26 @@ class DataStore:
                     )
                 """)
                 
+                # Safe migration: rename legacy product_id to productId in batches if needed
+                try:
+                    cur.execute("""
+                        DO $$
+                        BEGIN
+                            IF EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name = 'batches' AND column_name = 'product_id'
+                            ) AND NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name = 'batches' AND column_name = 'productId'
+                            ) THEN
+                                ALTER TABLE batches RENAME COLUMN product_id TO productId;
+                            END IF;
+                        END $$;
+                    """)
+                    logger.info("✅ Migration: Ensured batches table uses productId column")
+                except Exception as e:
+                    logger.warning(f"Migration warning for batches.productId: {e}")
+                
                 # Business profiles table (Pro Plan)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS business_profiles (
@@ -1071,8 +1091,9 @@ class DataStore:
                 columns = ', '.join(data.keys())
                 placeholders = ', '.join(['%s'] * len(data))
                 values = []
-                for v in data.values():
+                for k, v in data.items():
                     if isinstance(v, (dict, list)):
+                        logger.debug("Serializing dict/list for %s.%s: %s", table, k, type(v).__name__)
                         values.append(json.dumps(v))
                     else:
                         values.append(v)
@@ -1090,8 +1111,9 @@ class DataStore:
                     with conn.cursor() as cur:
                         set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
                         values = []
-                        for v in data.values():
+                        for k, v in data.items():
                             if isinstance(v, (dict, list)):
+                                logger.debug("Serializing dict/list for UPDATE %s.%s: %s", table, k, type(v).__name__)
                                 values.append(json.dumps(v))
                             else:
                                 values.append(v)

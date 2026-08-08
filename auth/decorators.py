@@ -7,12 +7,15 @@ Flask decorators for protecting routes and checking roles.
 from __future__ import annotations
 
 import time as _time
+import logging
 from typing import Callable, Optional, Dict, Any
 from functools import wraps
 
 from flask import request, jsonify, g
 
 from auth.manager import AuthManager
+
+logger = logging.getLogger(__name__)
 
 
 class require_auth:
