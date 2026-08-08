@@ -904,22 +904,26 @@ def create_app() -> Flask:
                 "started_at": datetime.utcnow().isoformat(),
             }
         }), 201
-
+ 
     # ============================================================
     # Account User Management (Admin/Cashier Management)
     # ============================================================
-
+ 
     def _require_account_admin():
         current = request.user
         if current.get("role") not in {"admin"}:
             return None, (jsonify({"error": "Admin access required"}), 403)
         return current, None
-
+ 
     @app.get("/api/users")
     @require_auth(auth_manager, datastore)
     def get_users():
         account_id = request.user.get("account_id")
-        users = datastore.get_all("users", account_id)
+        try:
+            users = datastore.get_all("users", account_id)
+        except Exception as exc:
+            logger.error("Failed to load users: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
         response = []
         for u in users:
             sanitized = dict(u)
@@ -982,7 +986,8 @@ def create_app() -> Flask:
 
         try:
             created = datastore.create("users", user_payload)
-        except Exception:
+        except Exception as exc:
+            logger.error("Failed to create user: %s", exc, exc_info=True)
             return jsonify({"error": "Unable to create cashier right now. Please try again."}), 500
 
         created.pop("password_hash", None)
@@ -2115,7 +2120,11 @@ def create_app() -> Flask:
             if cached is not None:
                 return jsonify(cached), 200
 
-        products = admin_controller.get_products(account_id)
+        try:
+            products = admin_controller.get_products(account_id)
+        except Exception as exc:
+            logger.error("Failed to load products: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
         if cache.enabled and not has_query:
             cache.set_json(cache_key, products, ttl_seconds=15)
         products = _apply_sort(products, request.args.get("sort"))
@@ -2388,7 +2397,11 @@ def create_app() -> Flask:
     @require_auth(auth_manager, datastore)
     def get_sales():
         account_id = request.user.get("account_id")
-        sales = admin_controller.get_sales(account_id)
+        try:
+            sales = admin_controller.get_sales(account_id)
+        except Exception as exc:
+            logger.error("Failed to load sales: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
         sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
         sales = _apply_limit(sales, request.args.get("limit"))
         sales = _apply_fields(sales, request.args.get("fields"))
