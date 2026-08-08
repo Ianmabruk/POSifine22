@@ -21,7 +21,6 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from flask import Flask, jsonify, request, g
 from flask_sock import Sock
-from flask_cors import CORS
 
 from database import DataStore
 from stock_engine import StockEngine
@@ -102,31 +101,29 @@ def create_app() -> Flask:
     app.config["PREFERRED_URL_SCHEME"] = "https"
 
     # CORS
-    cors_origins = os.environ.get("CORS_ORIGINS", "*")
-    if cors_origins == "*":
-        if is_production:
-            raise RuntimeError("CORS_ORIGINS cannot be '*' in production")
-        CORS(
-            app,
-            resources={r"/*": {"origins": "*"}},
-            supports_credentials=False,
-            allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
-            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-        )
-    else:
-        allowed_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
-        # Always allow Netlify production frontend if not explicitly set
-        if "https://posifine11.netlify.app" not in allowed_origins:
-            allowed_origins.append("https://posifine11.netlify.app")
-        CORS(
-            app,
-            resources={r"/*": {"origins": allowed_origins}},
-            supports_credentials=True,
-            allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
-            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-        )
+    cors_origins = os.environ.get("CORS_ORIGINS", os.environ.get("CORS_ORIGIN", ""))
+    allowed_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+    netlify_prod_origins = [
+        "https://posifine11.netlify.app",
+    ]
+    for origin in netlify_prod_origins:
+        if origin not in allowed_origins:
+            allowed_origins.append(origin)
 
-    # Global preflight handler
+    @app.after_request
+    def apply_cors(response):
+        origin = request.headers.get("Origin")
+        if not origin:
+            return response
+        is_allowed = origin in allowed_origins or origin.endswith(".netlify.app")
+        if is_allowed:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-CSRF-Token"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            response.headers["Vary"] = "Origin"
+        return response
+
     @app.before_request
     def _handle_preflight():
         if request.method == "OPTIONS":
