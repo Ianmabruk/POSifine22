@@ -146,9 +146,7 @@ class require_business_admin:
     def __call__(self, f: Callable) -> Callable:
         @wraps(f)
         def decorated(*args, **kwargs):
-            # Run auth check first
             auth_decorated = self._auth(f)
-            # Check role before calling the actual function
             token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
             if not token:
                 return jsonify({"error": "Authorization token required"}), 401
@@ -163,7 +161,7 @@ class require_business_admin:
             if not user:
                 return jsonify({"error": "User not found"}), 401
             role = user.get("role", "cashier")
-            if role not in {"admin", "main_admin", "owner"}:
+            if role not in {"admin"}:
                 return jsonify({"error": "Admin access required"}), 403
             return auth_decorated(*args, **kwargs)
         return decorated
