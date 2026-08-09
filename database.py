@@ -116,25 +116,46 @@ class DataStore:
                 separator = '&' if '?' in db_url else '?'
                 db_url = f"{db_url}{separator}sslmode=require"
             
-            # Create connection pool (min 1, max 5 for Render/cloud environments)
             self.pg_pool = ConnectionPool(
                 db_url,
                 min_size=1,
-                max_size=5,
-                timeout=30,
+                max_size=20,
+                timeout=10,
                 open=False
             )
             self.pg_pool.open()
             
-            # Create tables
             self._create_tables()
             logger.info("PostgreSQL connection pool created")
+            
+            self._start_pool_keepalive()
         except Exception as e:
             logger.error(f"PostgreSQL initialization failed: {e}")
             logger.info("Falling back to JSON file storage")
             self.use_postgres = False
             self.pg_pool = None
             self._init_json_files()
+    
+    def _start_pool_keepalive(self):
+        """Background keepalive to prevent stale connections and pool exhaustion"""
+        import threading
+        
+        def keepalive():
+            while True:
+                try:
+                    if not self.use_postgres or not self.pg_pool:
+                        break
+                    with self.pg_pool.connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT 1")
+                            cur.fetchone()
+                    logger.debug("Pool keepalive OK")
+                except Exception as exc:
+                    logger.warning(f"Pool keepalive failed: {exc}")
+                time.sleep(30)
+        
+        t = threading.Thread(target=keepalive, daemon=True)
+        t.start()
     
     def _create_tables(self):
         """Create database tables if they don't exist"""
@@ -1049,11 +1070,16 @@ class DataStore:
         import time
         for attempt in range(3):
             try:
-                return self.pg_pool.connection()
+                conn = self.pg_pool.connection()
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                return conn
             except Exception as e:
-                if attempt < 2:
-                    time.sleep(0.1 * (attempt + 1))
-                    continue
+                if 'PoolTimeout' in str(type(e).__name__) or 'couldn\'t get a connection' in str(e):
+                    if attempt < 2:
+                        time.sleep(0.2 * (attempt + 1))
+                        continue
                 raise
     
     def _pg_get_all(self, table: str, account_id: Optional[str] = None) -> List[Dict]:

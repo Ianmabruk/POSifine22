@@ -26,7 +26,7 @@ class AuthManager:
         self.session_store = session_store
         self.datastore = datastore
         self._auth_cache: Dict[str, Tuple[Any, float]] = {}
-        self._AUTH_CACHE_TTL = 30
+        self._AUTH_CACHE_TTL = 300
 
     # ============================================================
     # Password hashing
