@@ -10,9 +10,9 @@ import os
 import uuid
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 
 from auth.manager import AuthManager
 from auth.service import AuthService

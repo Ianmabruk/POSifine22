@@ -10,12 +10,28 @@ import os
 import uuid
 import secrets
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
 
 from auth.manager import AuthManager
 
 logger = logging.getLogger(__name__)
+
+
+def _send_welcome_email_async(email_service, to_email, name, business_name, login_url):
+    """Send a welcome email in a background thread so it never blocks the signup response."""
+    if not email_service or not getattr(email_service, "available", False):
+        return
+
+    def _do():
+        try:
+            email_service.send_welcome_email(to_email, name, business_name, login_url)
+        except Exception as exc:
+            logger.warning("Async welcome email failed for %s: %s", to_email, exc)
+
+    threading.Thread(target=_do, daemon=True).start()
+
 
 
 class AuthService:
@@ -60,8 +76,7 @@ class AuthService:
 
         account_id = f"acc_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow().isoformat()
-        trial_duration_days = 30
-        trial_end = (datetime.utcnow() + timedelta(days=trial_duration_days)).isoformat()
+        trial_end = (datetime.utcnow() + timedelta(days=30)).isoformat()
 
         account = {
             "id": account_id,
@@ -106,56 +121,25 @@ class AuthService:
             "business_role": "admin",
         }
 
-        safe_types = {
-            k: type(v).__name__
-            for k, v in user.items()
-            if k not in {"password_hash", "pin", "cashier_pin"}
-        }
-        logger.info("Signup user fields: %s", list(user.keys()))
-        logger.info("Signup user field types: %s", safe_types)
-
         if self.datastore:
-            user = self.datastore.create("users", user)
+            created_user = self.datastore.create("users", user)
+        else:
+            created_user = user
 
-        token = self.manager.generate_token(user)
+        token = self.manager.generate_token(created_user)
 
         try:
-            created_user = (
-                self.datastore.get_by_id("users", user.get("id"), account_id)
-                if self.datastore
-                else user
+            _send_welcome_email_async(
+                self.email_service, email, name, name,
+                os.environ.get("APP_LOGIN_URL", "https://posify.co.ke/auth/login"),
             )
-            if not created_user:
-                created_user = user
-            if created_user.get("screen_locked") != False:
-                if self.datastore:
-                    self.datastore.update(
-                        "users",
-                        created_user.get("id"),
-                        {"screen_locked": False},
-                        account_id,
-                    )
-                created_user["screen_locked"] = False
-            token = self.manager.generate_token(created_user)
-            try:
-                es = self.email_service
-                if es and getattr(es, "available", False):
-                    login_url = os.environ.get(
-                        "APP_LOGIN_URL", "https://posify.co.ke/auth/login"
-                    )
-                    es.send_welcome_email(email, name, name, login_url)
-            except Exception as e:
-                logger.warning(f"Failed to send welcome email to {email}: {str(e)}")
-            return True, None, {
-                "user": self.manager._build_user_payload(created_user),
-                "token": token,
-            }
         except Exception as e:
-            logger.error(f"Error finalizing signup for {email}: {str(e)}")
-            return True, None, {
-                "user": {"email": email, "name": name, "role": "admin", "active": True},
-                "token": token,
-            }
+            logger.warning(f"Failed to queue welcome email to {email}: {str(e)}")
+
+        return True, None, {
+            "user": self.manager._build_user_payload(created_user, account),
+            "token": token,
+        }
 
     # ============================================================
     # Login
@@ -187,15 +171,9 @@ class AuthService:
         if not self.manager.verify_password(password, user.get("password_hash", "")):
             return False, "Invalid credentials", None
 
-        self.datastore.update(
-            "users",
-            user["id"],
-            {"last_login": datetime.utcnow().isoformat()},
-            user.get("account_id"),
-        )
         token = self.manager.generate_token(user)
         return True, None, {
-            "user": self.manager._build_user_payload(user),
+            "user": self.manager._build_user_payload(user, account),
             "token": token,
         }
 
@@ -233,15 +211,9 @@ class AuthService:
         if not self.manager.verify_pin(pin, stored_pin):
             return False, "Invalid PIN", None
 
-        self.datastore.update(
-            "users",
-            user["id"],
-            {"last_login": datetime.utcnow().isoformat()},
-            user.get("account_id"),
-        )
         token = self.manager.generate_token(user)
         return True, None, {
-            "user": self.manager._build_user_payload(user),
+            "user": self.manager._build_user_payload(user, account),
             "token": token,
         }
 

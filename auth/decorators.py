@@ -128,7 +128,7 @@ class require_admin:
                 return result
             if request.user.get("role") not in {"admin", "main_admin", "owner"}:
                 return jsonify({"error": "Admin access required"}), 403
-            return f(*args, **kwargs)
+            return result
         return decorated
 
 
@@ -148,7 +148,7 @@ class require_main_admin:
                 return result
             if request.user.get("role") not in {"main_admin", "owner"}:
                 return jsonify({"error": "Access denied"}), 403
-            return f(*args, **kwargs)
+            return result
         return decorated
 
 

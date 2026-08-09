@@ -18,6 +18,30 @@ import jwt
 
 logger = logging.getLogger(__name__)
 
+_BCRYPT_ROUNDS = 10
+_env_rounds = __import__("os").environ.get("BCRYPT_ROUNDS")
+if _env_rounds and _env_rounds.isdigit():
+    _env_val = int(_env_rounds)
+    if 4 <= _env_val <= 14:
+        _BCRYPT_ROUNDS = _env_val
+
+def _parse_token_expiry() -> timedelta:
+    raw = __import__("os").environ.get("JWT_EXPIRES_IN", "24h").strip().lower()
+    if raw.endswith("d"):
+        return timedelta(days=float(raw[:-1]))
+    if raw.endswith("h"):
+        return timedelta(hours=float(raw[:-1]))
+    if raw.endswith("m"):
+        return timedelta(minutes=float(raw[:-1]))
+    if raw.endswith("s"):
+        return timedelta(seconds=float(raw[:-1]))
+    try:
+        return timedelta(seconds=float(raw))
+    except ValueError:
+        return timedelta(hours=24)
+
+_TOKEN_EXPIRY = _parse_token_expiry()
+
 
 class AuthManager:
     """Core authentication primitives: hashing, JWT, refresh tokens."""
@@ -35,23 +59,27 @@ class AuthManager:
     # ============================================================
 
     def hash_password(self, password: str) -> str:
-        salt = bcrypt.gensalt(rounds=10)
+        salt = bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)
         hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
         return hashed.decode("utf-8")
 
     def verify_password(self, password: str, password_hash: str) -> bool:
         try:
+            if not password_hash or not password_hash.startswith(("$2a$", "$2b$", "$2y$")):
+                return False
             return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
         except Exception:
             return False
 
     def hash_pin(self, pin: str) -> str:
-        salt = bcrypt.gensalt(rounds=10)
+        salt = bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)
         hashed = bcrypt.hashpw(pin.encode("utf-8"), salt)
         return hashed.decode("utf-8")
 
     def verify_pin(self, pin: str, pin_hash: str) -> bool:
         try:
+            if not pin_hash or not pin_hash.startswith(("$2a$", "$2b$", "$2y$")):
+                return False
             return bcrypt.checkpw(pin.encode("utf-8"), pin_hash.encode("utf-8"))
         except Exception:
             return False
@@ -67,7 +95,7 @@ class AuthManager:
             "email": user["email"],
             "account_id": user["account_id"],
             "role": user.get("role", "cashier"),
-            "exp": datetime.utcnow() + timedelta(hours=24),
+            "exp": datetime.utcnow() + _TOKEN_EXPIRY,
             "iat": datetime.utcnow(),
         }
         return jwt.encode(payload, self.secret_key, algorithm="HS256")
@@ -247,15 +275,18 @@ class AuthManager:
         sanitized.pop("cashier_pin", None)
         return sanitized
 
-    def _build_user_payload(self, user: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_user_payload(self, user: Dict[str, Any], account: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Build a minimal, safe user payload for API responses.
+
+        Args:
+            user: The user record (must come from the datastore).
+            account: Optional pre-fetched account dict to avoid a redundant DB lookup.
+        """
         try:
             sanitized = self._sanitize_user(user)
             account_id = user.get("account_id")
-            account = (
-                self.datastore.get_by_id("accounts", account_id)
-                if self.datastore and account_id
-                else None
-            )
+            if account is None and self.datastore and account_id:
+                account = self.datastore.get_by_id("accounts", account_id)
             if account:
                 sanitized["plan"] = account.get("plan")
                 sanitized["subscription"] = account.get("plan")
@@ -265,16 +296,6 @@ class AuthManager:
                     sanitized["business_logo"] = account.get("business_logo")
                 if account.get("business_type") and not sanitized.get("business_type"):
                     sanitized["business_type"] = account.get("business_type")
-
-            if account_id and not sanitized.get("business_type") and self.datastore:
-                try:
-                    profiles = self.datastore.get_by_field(
-                        "business_profiles", "account_id", account_id
-                    )
-                    if profiles:
-                        sanitized["business_type"] = profiles[0].get("business_type")
-                except Exception:
-                    pass
 
             if "active" not in sanitized:
                 sanitized["active"] = bool(sanitized.get("is_active", True))

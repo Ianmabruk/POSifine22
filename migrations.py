@@ -188,6 +188,14 @@ def run_migrations():
                     CREATE INDEX IF NOT EXISTS idx_audit_log_createdat ON audit_log(createdat);
                 ''')
                 
+                # 8. Add auth optimization indexes
+                print("📍 Adding auth optimization indexes...")
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token_hash ON sessions(refresh_token_hash);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_account_id ON sessions(account_id);
+                ''')
+
                 # School / Pro-plan tables
                 print("📍 Creating school tables (students, fee_payments, exam_results, assignments, school_notices)...")
                 cursor.execute('''

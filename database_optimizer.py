@@ -23,6 +23,7 @@ class DatabaseOptimizer:
             "CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
             "CREATE INDEX IF NOT EXISTS idx_users_account_id ON users(account_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token_hash ON sessions(refresh_token_hash)",
             "CREATE INDEX IF NOT EXISTS idx_expenses_account_id ON expenses(account_id)",
             "CREATE INDEX IF NOT EXISTS idx_batches_product_id ON batches(productId)",
         ]

@@ -11,6 +11,7 @@ import logging
 import uuid
 import json
 import secrets
+import threading
 from datetime import datetime, timedelta
 import time
 import asyncio
@@ -541,16 +542,6 @@ def create_app() -> Flask:
                 result["refreshToken"] = refresh_token
                 result["csrfToken"] = csrf_token
                 _log_activity("signup", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
-                # Auto clock-in on signup
-                try:
-                    signup_user = result.get("user") or {}
-                    time_tracking.clock_in(
-                        signup_user.get("id"),
-                        signup_user.get("name") or signup_user.get("email"),
-                        signup_user.get("account_id")
-                    )
-                except Exception:
-                    pass
                 resp = jsonify(result)
                 _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
                 return resp, 201
@@ -587,16 +578,6 @@ def create_app() -> Flask:
             result["refreshToken"] = refresh_token
             result["csrfToken"] = csrf_token
             _log_activity("login", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
-            # Auto clock-in on login
-            try:
-                login_user = result.get("user") or {}
-                time_tracking.clock_in(
-                    login_user.get("id"),
-                    login_user.get("name") or login_user.get("email"),
-                    login_user.get("account_id")
-                )
-            except Exception:
-                pass
             resp = jsonify(result)
             _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
             return resp, 200
@@ -626,16 +607,6 @@ def create_app() -> Flask:
             result["refreshToken"] = refresh_token
             result["csrfToken"] = csrf_token
             _log_activity("pin_login", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
-            # Auto clock-in on pin login
-            try:
-                pin_user = result.get("user") or {}
-                time_tracking.clock_in(
-                    pin_user.get("id"),
-                    pin_user.get("name") or pin_user.get("email"),
-                    pin_user.get("account_id")
-                )
-            except Exception:
-                pass
             resp = jsonify(result)
             _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
             return resp, 200
@@ -663,7 +634,6 @@ def create_app() -> Flask:
         if not rotated:
             return jsonify({"error": "Invalid or expired refresh token"}), 401
 
-        _log_activity("refresh_token", rotated.get("user", {}).get("account_id"), rotated.get("user", {}).get("id"))
         csrf_token = uuid.uuid4().hex
         next_refresh = rotated.pop("refreshToken", None)
         rotated["csrfToken"] = csrf_token
@@ -694,8 +664,13 @@ def create_app() -> Flask:
     def lock_screen():
         user = request.user
         datastore.update("users", user.get("id"), {"screen_locked": True}, user.get("account_id"))
-        updated_user = datastore.get_by_id("users", user.get("id"), user.get("account_id")) or user
+        updated_user = dict(user)
         updated_user["screen_locked"] = True
+        updated_user["id"] = user.get("id")
+        updated_user["account_id"] = user.get("account_id")
+        updated_user["email"] = user.get("email")
+        updated_user["name"] = user.get("name")
+        updated_user["role"] = user.get("role")
         new_token = auth_manager.generate_token(updated_user)
         return jsonify({"success": True, "token": new_token}), 200
 
@@ -712,25 +687,36 @@ def create_app() -> Flask:
         if not pin:
             return jsonify({"message": "PIN is required"}), 400
 
-        user = request.user
-        account = datastore.get_by_id("accounts", user.get("account_id"))
+        user = g.user
+        account = g.account
 
-        # Accept either the user's personal PIN or the account screen-lock password
+        # Accept either the user's personal PIN (hashed) or the account screen-lock password (plaintext)
         user_pin = (user.get("pin") or user.get("cashier_pin") or "").strip()
         account_pin = (account.get("screen_lock_password") or "") if account else ""
 
         if not user_pin and not account_pin:
             return jsonify({"message": "No PIN configured. Please set a screen lock password in settings."}), 401
 
-        if pin != user_pin and pin != account_pin:
+        pin_valid = False
+        if user_pin:
+            pin_valid = auth_manager.verify_pin(pin, user_pin)
+        if not pin_valid and account_pin:
+            pin_valid = pin == account_pin
+
+        if not pin_valid:
             cache.set_int(_failed_key, fails + 1, ttl_seconds=300)
             return jsonify({"message": "Incorrect PIN"}), 401
 
         # Clear fail counter on success
         cache.delete(_failed_key)
         datastore.update("users", user.get("id"), {"screen_locked": False}, user.get("account_id"))
-        updated_user = datastore.get_by_id("users", user.get("id"), user.get("account_id")) or user
+        updated_user = dict(user)
         updated_user["screen_locked"] = False
+        updated_user["id"] = user.get("id")
+        updated_user["account_id"] = user.get("account_id")
+        updated_user["email"] = user.get("email")
+        updated_user["name"] = user.get("name")
+        updated_user["role"] = user.get("role")
         new_token = auth_manager.generate_token(updated_user)
         return jsonify({"success": True, "token": new_token}), 200
 
@@ -738,7 +724,7 @@ def create_app() -> Flask:
     @require_auth(auth_manager, datastore)
     def auth_me():
         try:
-            response_user = auth_manager._build_user_payload(getattr(g, "user", {}) or {})
+            response_user = auth_manager._build_user_payload(getattr(g, "user", {}) or {}, getattr(g, "account", None))
             resp = jsonify(response_user)
             resp.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=60"
             return resp, 200
@@ -1173,7 +1159,8 @@ def create_app() -> Flask:
                 if password_hash:
                     update_data["password_hash"] = password_hash
                 datastore.update("users", owner_user.get("id"), update_data, owner_user.get("account_id"))
-                return datastore.get_user_by_email(email_value) or owner_user
+                owner_user.update(update_data)
+                return owner_user
 
             account = datastore.get_account_by_email(email_value)
             if not account:
@@ -1279,6 +1266,7 @@ def create_app() -> Flask:
                 return _log_failed_main_admin_login(email, "invalid_password")
 
         now_iso = datetime.utcnow().isoformat()
+        account = datastore.get_by_id("accounts", owner.get("account_id")) if datastore else None
         # Migrate legacy owner role to main_admin to avoid repeated access denials.
         if owner.get("role") == "owner":
             datastore.update("users", owner.get("id"), {
@@ -1286,11 +1274,23 @@ def create_app() -> Flask:
                 "business_role": "main_admin",
                 "business_type": "main_admin",
             }, owner.get("account_id"))
-            owner = datastore.get_user_by_email(email) or owner
+            owner["role"] = "main_admin"
+            owner["business_role"] = "main_admin"
+            owner["business_type"] = "main_admin"
+            if account:
+                account["business_type"] = "main_admin"
 
-        datastore.update("users", owner.get("id"), {"last_login": now_iso}, owner.get("account_id"))
-        datastore.update("accounts", owner.get("account_id"), {"last_activity_date": now_iso})
-        owner = datastore.get_user_by_email(email) or owner
+        # Non-blocking last_login / last_activity telemetry — fire and forget
+        _record_activity_async = threading.Thread(
+            target=lambda: (
+                datastore.update("users", owner.get("id"), {"last_login": now_iso}, owner.get("account_id"))
+                if datastore else None,
+                datastore.update("accounts", owner.get("account_id"), {"last_activity_date": now_iso})
+                if datastore else None,
+            ),
+            daemon=True
+        )
+        _record_activity_async.start()
 
         token = auth_manager.generate_token(owner)
         refresh_token = auth_manager.create_refresh_session(
@@ -1302,7 +1302,7 @@ def create_app() -> Flask:
         _reset_login_attempts()
         _log_activity("main_admin_login", owner.get("account_id"), owner.get("id"))
         resp = jsonify({
-            "user": auth_manager._build_user_payload(owner),
+            "user": auth_manager._build_user_payload(owner, account),
             "token": token,
             "refreshToken": refresh_token,
             "csrfToken": csrf_token

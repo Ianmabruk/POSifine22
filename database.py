@@ -719,6 +719,7 @@ class DataStore:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token_hash ON sessions(refresh_token_hash)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_logs(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_logs(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_products_account ON products(account_id)")
