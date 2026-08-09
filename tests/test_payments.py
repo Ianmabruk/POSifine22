@@ -171,7 +171,7 @@ class TestPaymentService:
         assert success is True
         provider_ref = payment['provider_reference']
 
-        success, error, result = payment_service.handle_webhook(provider_ref, {
+        success, error, result = payment_service.handle_webhook('intasend', provider_ref, {
             'state': 'completed',
             'reference': provider_ref,
             'amount': '1500'
@@ -193,7 +193,7 @@ class TestPaymentService:
         )
         provider_ref = payment['provider_reference']
 
-        payment_service.handle_webhook(provider_ref, {'state': 'completed', 'reference': provider_ref})
-        success, error, result = payment_service.handle_webhook(provider_ref, {'state': 'completed', 'reference': provider_ref})
+        payment_service.handle_webhook('intasend', provider_ref, {'state': 'completed', 'reference': provider_ref})
+        success, error, result = payment_service.handle_webhook('intasend', provider_ref, {'state': 'completed', 'reference': provider_ref})
         assert success is True
         assert result.get('idempotent') is True
