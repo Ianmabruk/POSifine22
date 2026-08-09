@@ -120,9 +120,10 @@ class DataStore:
             
             self.pg_pool = ConnectionPool(
                 db_url,
-                min_size=1,
-                max_size=20,
+                min_size=2,
+                max_size=5,
                 timeout=10,
+                max_lifetime=1800,
                 open=False
             )
             self.pg_pool.open()
@@ -140,22 +141,18 @@ class DataStore:
     
     def _start_pool_keepalive(self):
         """Background keepalive to prevent stale connections and pool exhaustion"""
-        import threading
-        
         def keepalive():
             while True:
                 try:
                     if not self.use_postgres or not self.pg_pool:
                         break
-                    with self.pg_pool.connection() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT 1")
-                            cur.fetchone()
+                    # Use pool's internal health check via try_connect
+                    self.pg_pool.check()
                     logger.debug("Pool keepalive OK")
                 except Exception as exc:
                     logger.warning(f"Pool keepalive failed: {exc}")
                 time.sleep(30)
-        
+
         t = threading.Thread(target=keepalive, daemon=True)
         t.start()
     
@@ -1079,22 +1076,25 @@ class DataStore:
     
     @contextmanager
     def _pg_connection(self):
-        """Get PostgreSQL connection with retry on stale connections"""
-        import time
-        for attempt in range(3):
-            try:
-                with self.pg_pool.connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT 1")
-                        cur.fetchone()
-                    yield conn
-                    return
-            except Exception as e:
-                if 'PoolTimeout' in str(type(e).__name__) or 'couldn\'t get a connection' in str(e):
-                    if attempt < 2:
-                        time.sleep(0.2 * (attempt + 1))
-                        continue
-                raise
+        """Get PostgreSQL connection from pool.
+
+        Relies on psycopg_pool's built-in stale-connection handling.
+        No manual SELECT 1 health-check needed — the pool validates
+        connections on checkout and return.
+        """
+        conn = None
+        try:
+            conn = self.pg_pool.getconn(timeout=10)
+            yield conn
+        except Exception:
+            if conn:
+                try:
+                    self.pg_pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+            raise
+        else:
+            self.pg_pool.putconn(conn)
     
     def _pg_get_all(self, table: str, account_id: Optional[str] = None) -> List[Dict]:
         """PostgreSQL: Get all records"""
@@ -1108,21 +1108,13 @@ class DataStore:
     
     def _pg_get_by_id(self, table: str, id: int, account_id: Optional[str] = None) -> Optional[Dict]:
         """PostgreSQL: Get record by ID"""
-        import time
-        for attempt in range(3):
-            try:
-                with self._pg_connection() as conn:
-                    with conn.cursor(row_factory=dict_row) as cur:
-                        if account_id and table != 'accounts':
-                            cur.execute(f"SELECT * FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
-                        else:
-                            cur.execute(f"SELECT * FROM {table} WHERE id = %s", (id,))
-                        return cur.fetchone()
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(0.1 * (attempt + 1))
-                    continue
-                raise
+        with self._pg_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                if account_id and table != 'accounts':
+                    cur.execute(f"SELECT * FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
+                else:
+                    cur.execute(f"SELECT * FROM {table} WHERE id = %s", (id,))
+                return cur.fetchone()
     
     def _pg_create(self, table: str, data: Dict) -> Dict:
         """PostgreSQL: Create record"""
@@ -1144,54 +1136,38 @@ class DataStore:
     
     def _pg_update(self, table: str, id: int, data: Dict, account_id: Optional[str] = None) -> bool:
         """PostgreSQL: Update record"""
-        import time
-        for attempt in range(3):
-            try:
-                with self._pg_connection() as conn:
-                    with conn.cursor() as cur:
-                        set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
-                        values = []
-                        for k, v in data.items():
-                            if isinstance(v, (dict, list)):
-                                logger.debug("Serializing dict/list for UPDATE %s.%s: %s", table, k, type(v).__name__)
-                                values.append(json.dumps(v))
-                            else:
-                                values.append(v)
-                        values.append(id)
-                        
-                        if account_id and table != 'accounts':
-                            query = f"UPDATE {table} SET {set_clause} WHERE id = %s AND account_id = %s"
-                            values.append(account_id)
-                        else:
-                            query = f"UPDATE {table} SET {set_clause} WHERE id = %s"
-                        
-                        cur.execute(query, values)
-                        conn.commit()
-                        return cur.rowcount > 0
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(0.1 * (attempt + 1))
-                    continue
-                raise
+        with self._pg_connection() as conn:
+            with conn.cursor() as cur:
+                set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
+                values = []
+                for k, v in data.items():
+                    if isinstance(v, (dict, list)):
+                        logger.debug("Serializing dict/list for UPDATE %s.%s: %s", table, k, type(v).__name__)
+                        values.append(json.dumps(v))
+                    else:
+                        values.append(v)
+                values.append(id)
+                
+                if account_id and table != 'accounts':
+                    query = f"UPDATE {table} SET {set_clause} WHERE id = %s AND account_id = %s"
+                    values.append(account_id)
+                else:
+                    query = f"UPDATE {table} SET {set_clause} WHERE id = %s"
+                
+                cur.execute(query, values)
+                conn.commit()
+                return cur.rowcount > 0
     
     def _pg_delete(self, table: str, id: int, account_id: Optional[str] = None) -> bool:
         """PostgreSQL: Delete record"""
-        import time
-        for attempt in range(3):
-            try:
-                with self._pg_connection() as conn:
-                    with conn.cursor() as cur:
-                        if account_id and table != 'accounts':
-                            cur.execute(f"DELETE FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
-                        else:
-                            cur.execute(f"DELETE FROM {table} WHERE id = %s", (id,))
-                        conn.commit()
-                        return cur.rowcount > 0
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(0.1 * (attempt + 1))
-                    continue
-                raise
+        with self._pg_connection() as conn:
+            with conn.cursor() as cur:
+                if account_id and table != 'accounts':
+                    cur.execute(f"DELETE FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
+                else:
+                    cur.execute(f"DELETE FROM {table} WHERE id = %s", (id,))
+                conn.commit()
+                return cur.rowcount > 0
     
     # ============================================================
     # JSON FILE IMPLEMENTATIONS
@@ -1283,18 +1259,10 @@ class DataStore:
     def get_user_by_email(self, email: str) -> Optional[Dict]:
         """Get user by email"""
         if self.use_postgres:
-            import time
-            for attempt in range(3):
-                try:
-                    with self._pg_connection() as conn:
-                        with conn.cursor(row_factory=dict_row) as cur:
-                            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-                            return cur.fetchone()
-                except Exception as e:
-                    if attempt < 2:
-                        time.sleep(0.1 * (attempt + 1))
-                        continue
-                    raise
+            with self._pg_connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                    return cur.fetchone()
         else:
             normalized_email = (email or '').strip().lower()
             users = self._read_json(self.files['users'])
