@@ -170,8 +170,8 @@ class TestScreenLock:
     
     def test_unlock_screen_with_correct_pin(self, auth_service, test_account, datastore):
         """Test unlocking with correct PIN"""
-        # Set PIN for user
-        datastore.update('users', test_account['user_id'], {'pin': '1234'}, test_account['account_id'])
+        hashed_pin = auth_service.manager.hash_pin('1234')
+        datastore.update('users', test_account['user_id'], {'pin': hashed_pin, 'cashier_pin': hashed_pin}, test_account['account_id'])
         
         # Lock screen
         auth_service.lock_screen(test_account['user_id'], test_account['account_id'])
@@ -188,8 +188,8 @@ class TestScreenLock:
     
     def test_unlock_screen_with_wrong_pin(self, auth_service, test_account, datastore):
         """Test unlocking fails with wrong PIN"""
-        # Set PIN for user
-        datastore.update('users', test_account['user_id'], {'pin': '1234'}, test_account['account_id'])
+        hashed_pin = auth_service.manager.hash_pin('1234')
+        datastore.update('users', test_account['user_id'], {'pin': hashed_pin, 'cashier_pin': hashed_pin}, test_account['account_id'])
         
         # Lock screen
         auth_service.lock_screen(test_account['user_id'], test_account['account_id'])

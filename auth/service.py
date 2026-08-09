@@ -230,7 +230,7 @@ class AuthService:
         stored_pin = str(user.get("pin") or user.get("cashier_pin") or "").strip()
         if not stored_pin:
             return False, "PIN not set for this user", None
-        if stored_pin != pin:
+        if not self.manager.verify_pin(pin, stored_pin):
             return False, "Invalid PIN", None
 
         self.datastore.update(
@@ -265,7 +265,7 @@ class AuthService:
         if not user:
             return False, "User not found"
         valid_pin = user.get("pin") or user.get("cashier_pin")
-        if not valid_pin or str(valid_pin) != str(pin):
+        if not valid_pin or not self.manager.verify_pin(pin, valid_pin):
             return False, "Invalid PIN"
         self.datastore.update(
             "users", user_id, {"screen_locked": False}, account_id
@@ -305,8 +305,9 @@ class AuthService:
             pin_text = str(new_pin).strip()
             if len(pin_text) < 4:
                 return False, "PIN must be at least 4 digits"
-            updates["pin"] = pin_text
-            updates["cashier_pin"] = pin_text
+            hashed_pin = self.manager.hash_pin(pin_text)
+            updates["pin"] = hashed_pin
+            updates["cashier_pin"] = hashed_pin
             changed.append("PIN")
         if not updates:
             return False, "No changes provided"

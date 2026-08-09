@@ -146,22 +146,10 @@ class require_business_admin:
     def __call__(self, f: Callable) -> Callable:
         @wraps(f)
         def decorated(*args, **kwargs):
-            auth_decorated = self._auth(f)
-            token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-            if not token:
-                return jsonify({"error": "Authorization token required"}), 401
-            payload = self.manager.verify_token(token)
-            if not payload:
-                return jsonify({"error": "Invalid or expired token"}), 401
-            user_id = payload.get("user_id")
-            account_id = payload.get("account_id")
-            if not self.datastore:
-                return jsonify({"error": "Database not available"}), 500
-            user = self.datastore.get_by_id("users", user_id, account_id)
-            if not user:
-                return jsonify({"error": "User not found"}), 401
-            role = user.get("role", "cashier")
-            if role not in {"admin"}:
+            result = self._auth(f)(*args, **kwargs)
+            if isinstance(result, tuple) and len(result) == 2 and result[1] >= 400:
+                return result
+            if request.user.get("role") not in {"admin", "main_admin", "owner"}:
                 return jsonify({"error": "Admin access required"}), 403
-            return auth_decorated(*args, **kwargs)
+            return result
         return decorated

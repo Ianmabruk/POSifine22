@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import uuid
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
@@ -27,6 +28,7 @@ class AuthManager:
         self.datastore = datastore
         self._auth_cache: Dict[str, Tuple[Any, float]] = {}
         self._AUTH_CACHE_TTL = 300
+        self._revoked_tokens: set = set()
 
     # ============================================================
     # Password hashing
@@ -43,12 +45,24 @@ class AuthManager:
         except Exception:
             return False
 
+    def hash_pin(self, pin: str) -> str:
+        salt = bcrypt.gensalt(rounds=10)
+        hashed = bcrypt.hashpw(pin.encode("utf-8"), salt)
+        return hashed.decode("utf-8")
+
+    def verify_pin(self, pin: str, pin_hash: str) -> bool:
+        try:
+            return bcrypt.checkpw(pin.encode("utf-8"), pin_hash.encode("utf-8"))
+        except Exception:
+            return False
+
     # ============================================================
     # Token handling
     # ============================================================
 
     def generate_token(self, user: Dict[str, Any]) -> str:
         payload = {
+            "jti": uuid.uuid4().hex,
             "user_id": user["id"],
             "email": user["email"],
             "account_id": user["account_id"],
@@ -60,9 +74,24 @@ class AuthManager:
 
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
         try:
-            return jwt.decode(token, self.secret_key, algorithms=["HS256"])
+            payload = jwt.decode(token, self.secret_key, algorithms=["HS256"])
+            jti = payload.get("jti")
+            if jti and jti in self._revoked_tokens:
+                return None
+            return payload
         except Exception:
             return None
+
+    def revoke_token(self, token: str) -> bool:
+        try:
+            payload = jwt.decode(token, self.secret_key, algorithms=["HS256"], options={"verify_exp": False})
+            jti = payload.get("jti")
+            if jti:
+                self._revoked_tokens.add(jti)
+                return True
+        except Exception:
+            pass
+        return False
 
     def _hash_refresh_token(self, token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()

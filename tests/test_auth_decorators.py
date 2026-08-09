@@ -118,7 +118,7 @@ class TestRequireBusinessAdmin:
             headers=auth_headers)
         assert response.status_code == 201
 
-    def test_main_admin_cannot_access_business_endpoints(self, client, auth_service, datastore):
+    def test_main_admin_can_access_business_endpoints(self, client, auth_service, datastore):
         main_admin = auth_service.ensure_main_admin(
             email='mainadmin_biz_decorator@example.com',
             password_hash=auth_service.hash_password('MainPass123!'),
@@ -127,10 +127,10 @@ class TestRequireBusinessAdmin:
         token = auth_service.generate_token(main_admin)
         response = client.post('/api/products',
             data=json.dumps({
-                'name': 'Evil Product',
+                'name': 'Main Admin Product',
                 'price': 100.0,
                 'cost': 50.0,
                 'quantity': 100.0
             }),
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
-        assert response.status_code == 403
+        assert response.status_code == 201

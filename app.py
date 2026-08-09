@@ -538,6 +538,7 @@ def create_app() -> Flask:
                 csrf_token = uuid.uuid4().hex
                 result["refreshToken"] = refresh_token
                 result["csrfToken"] = csrf_token
+                _log_activity("signup", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
                 # Auto clock-in on signup
                 try:
                     signup_user = result.get("user") or {}
@@ -556,6 +557,7 @@ def create_app() -> Flask:
             
         except ValueError as e:
             logger.error(f"Signup validation error: {str(e)}")
+            _log_activity("signup_failed", None, None, {"reason": str(e)})
             return jsonify({"error": f"Invalid input: {str(e)}"}), 400
         except Exception as e:
             logger.error(f"Signup error: {str(e)}", exc_info=True)
@@ -596,7 +598,8 @@ def create_app() -> Flask:
             resp = jsonify(result)
             _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
             return resp, 200
-        _record_failed_login()
+        
+        _log_activity("login_failed", None, None, {"email": data.get("email"), "reason": error})
         return jsonify({"error": error or "Invalid credentials"}), 401
 
     @app.post("/api/auth/pin-login")
@@ -674,8 +677,11 @@ def create_app() -> Flask:
 
         data = request.get_json() or {}
         refresh = request.cookies.get("refresh_token") or (data.get("refreshToken") if not is_production else None)
+        token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
         if refresh:
             auth_manager.revoke_refresh_session(refresh)
+        if token:
+            auth_manager.revoke_token(token)
         _log_activity("logout", None, None)
         resp = jsonify({"success": True})
         _clear_auth_cookies(resp, "auth")
@@ -709,7 +715,10 @@ def create_app() -> Flask:
 
         # Accept either the user's personal PIN or the account screen-lock password
         user_pin = (user.get("pin") or user.get("cashier_pin") or "").strip()
-        account_pin = (account.get("screen_lock_password") or "2005") if account else "2005"
+        account_pin = (account.get("screen_lock_password") or "") if account else ""
+
+        if not user_pin and not account_pin:
+            return jsonify({"message": "No PIN configured. Please set a screen lock password in settings."}), 401
 
         if pin != user_pin and pin != account_pin:
             cache.set_int(_failed_key, fails + 1, ttl_seconds=300)
@@ -764,8 +773,8 @@ def create_app() -> Flask:
             pin_text = str(new_pin).strip()
             if len(pin_text) < 4:
                 return jsonify({"error": "PIN must be at least 4 digits"}), 400
-            updates["pin"] = pin_text
-            updates["cashier_pin"] = pin_text
+            updates["pin"] = auth_manager.hash_pin(pin_text)
+            updates["cashier_pin"] = auth_manager.hash_pin(pin_text)
             changed_items.append("PIN")
 
         updates["updated_at"] = datetime.utcnow().isoformat()
@@ -774,6 +783,7 @@ def create_app() -> Flask:
             return jsonify({"error": "Failed to update credentials"}), 400
 
         changed_str = " and ".join(changed_items)
+        _log_audit("change_password", user, f"user:{user.get('id')}", {"changed": changed_items})
         return jsonify({"message": f"{changed_str} changed successfully"}), 200
 
     # ============================================================
@@ -784,7 +794,7 @@ def create_app() -> Flask:
         account = datastore.get_by_id("accounts", request.user.get("account_id"))
         if not account:
             return False, (jsonify({"error": "Account not found"}), 404)
-        if not account.get("is_active") or account.get("is_locked"):
+        if not account.get("is_active", True) or account.get("is_locked"):
             return False, (jsonify({"error": "Account suspended. Please contact support."}), 403)
         plan = account.get("plan", "free")
         if plan == "free":
@@ -1175,7 +1185,7 @@ def create_app() -> Flask:
                     "business_logo": None,
                     "currency": "KES",
                     "tax_rate": 0.0,
-                    "screen_lock_password": "2005",
+                    "screen_lock_password": "",
                     "days_used": 0,
                     "last_activity_date": None,
                     "requested_trial": False,
@@ -3954,7 +3964,7 @@ def create_app() -> Flask:
                     "business_logo": None,
                     "currency": "KES",
                     "tax_rate": 0.0,
-                    "screen_lock_password": "2005",
+                    "screen_lock_password": "",
                     "days_used": 0,
                     "last_activity_date": None,
                     "requested_trial": False,

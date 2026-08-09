@@ -155,7 +155,7 @@ def create_business_routes(datastore, auth_manager):
                 logger.info(f"✅ Created business profile for {account_id}: {business_type}")
             
             # Return updated user info with business type
-            updated_user = datastore.get_by_id('users', user['id'])
+            updated_user = datastore.get_by_id('users', user['id'], account_id)
             return jsonify({
                 'success': True,
                 'message': f'Business type set to {config["name"]}',
@@ -357,7 +357,7 @@ def create_business_routes(datastore, auth_manager):
                 return jsonify({'error': 'Only admins can update business users'}), 403
             
             # Get the user to update
-            user_to_update = datastore.get_by_id('users', user_id)
+            user_to_update = datastore.get_by_id('users', user_id, account_id)
             if not user_to_update:
                 return jsonify({'error': 'User not found'}), 404
             
@@ -391,7 +391,7 @@ def create_business_routes(datastore, auth_manager):
             datastore.update('users', user_id, update_data)
             
             # Get updated user
-            updated_user = datastore.get_by_id('users', user_id)
+            updated_user = datastore.get_by_id('users', user_id, account_id)
             user_response = {k: v for k, v in updated_user.items() if k != 'password_hash'}
             
             return jsonify({
@@ -417,7 +417,7 @@ def create_business_routes(datastore, auth_manager):
                 return jsonify({'error': 'Only admins can delete business users'}), 403
             
             # Get the user to delete
-            user_to_delete = datastore.get_by_id('users', user_id)
+            user_to_delete = datastore.get_by_id('users', user_id, account_id)
             if not user_to_delete:
                 return jsonify({'error': 'User not found'}), 404
             
