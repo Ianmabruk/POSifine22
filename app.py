@@ -221,7 +221,7 @@ def create_app() -> Flask:
         return _client_ip()
 
     def _set_auth_cookies(resp, refresh_token: str | None, csrf_token: str | None, scope: str = "auth"):
-        cookie_path = "/api/main-admin" if scope == "main_admin" else "/api/auth"
+        cookie_path = "/api/auth"
         if refresh_token:
             resp.set_cookie(
                 "refresh_token",
@@ -244,7 +244,7 @@ def create_app() -> Flask:
             )
 
     def _clear_auth_cookies(resp, scope: str = "auth"):
-        cookie_path = "/api/main-admin" if scope == "main_admin" else "/api/auth"
+        cookie_path = "/api/auth"
         resp.set_cookie("refresh_token", "", expires=0, secure=True, httponly=True, samesite=auth_cookie_samesite, path=cookie_path)
         resp.set_cookie("csrf_token", "", expires=0, secure=True, httponly=False, samesite=auth_cookie_samesite, path=cookie_path)
 
@@ -1300,6 +1300,7 @@ def create_app() -> Flask:
         resp = jsonify({
             "user": auth_manager._build_user_payload(owner),
             "token": token,
+            "refreshToken": refresh_token,
             "csrfToken": csrf_token
         })
         _set_auth_cookies(resp, refresh_token, csrf_token, "main_admin")
@@ -1638,6 +1639,7 @@ def create_app() -> Flask:
                 "status": account.get("status", "active"),
                 "isActive": bool(account.get("is_active", True)),
                 "isLocked": bool(account.get("is_locked", False)),
+                "paymentRequired": bool(account.get("payment_required", False)),
                 "trialStatus": trial_status,
                 "trialEndsAt": trial_end,
                 "daysRemaining": days_remaining,
@@ -1944,6 +1946,54 @@ def create_app() -> Flask:
             return jsonify({"error": "Template not found"}), 404
         _log_audit("delete_email_template", user, f"email_template:{template_id}")
         return jsonify({"success": True}), 200
+
+    @app.post("/api/main-admin/businesses/<string:business_id>/request-payment")
+    def main_admin_request_payment(business_id: str):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        account = datastore.get_by_id("accounts", business_id)
+        if not account:
+            return jsonify({"error": "Business not found"}), 404
+
+        datastore.update("accounts", business_id, {
+            "payment_required": True,
+        })
+
+        _log_audit("request_payment", user, f"account:{business_id}", {
+            "business_name": account.get("business_name"),
+        })
+
+        return jsonify({
+            "success": True,
+            "message": "Payment requested. The business will be notified to make payment to continue using the service.",
+        }), 200
+
+    @app.post("/api/main-admin/businesses/<string:business_id>/clear-payment")
+    def main_admin_clear_payment(business_id: str):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        account = datastore.get_by_id("accounts", business_id)
+        if not account:
+            return jsonify({"error": "Business not found"}), 404
+
+        datastore.update("accounts", business_id, {
+            "payment_required": False,
+            "is_active": True,
+            "is_locked": False,
+        })
+
+        _log_audit("clear_payment", user, f"account:{business_id}", {
+            "business_name": account.get("business_name"),
+        })
+
+        return jsonify({
+            "success": True,
+            "message": "Payment status cleared. The business can now access the service.",
+        }), 200
 
     # ============================================================
     # Admin Support Messaging (Admin -> Main Admin)

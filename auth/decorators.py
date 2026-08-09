@@ -81,6 +81,12 @@ class require_auth:
                 except Exception:
                     pass
 
+            if g.account.get("payment_required"):
+                return jsonify({
+                    "error": "Kindly make payment to continue using the service.",
+                    "code": "PAYMENT_REQUIRED"
+                }), 403
+
             request.user = {
                 "id": user["id"],
                 "email": user["email"],

@@ -811,8 +811,7 @@ class DataStore:
                     """)
                     logger.info("✅ Migration: Ensured credit_requests has customer_name and notes columns")
                 except Exception as e:
-                    logger.warning(f"Migration warning for credit_requests columns: {e}")
-                
+                     logger.warning(f"Migration warning for credit_requests columns: {e}")
                 # Migration: Add missing business_type column to accounts
                 try:
                     cur.execute("""
@@ -821,8 +820,18 @@ class DataStore:
                     """)
                     logger.info("✅ Migration: Ensured accounts table has business_type column")
                 except Exception as e:
-                     logger.warning(f"Migration warning for accounts.business_type: {e}")
+                    logger.warning(f"Migration warning for accounts.business_type: {e}")
                  
+                # Migration: Add payment_required flag to accounts
+                try:
+                    cur.execute("""
+                        ALTER TABLE accounts
+                            ADD COLUMN IF NOT EXISTS payment_required BOOLEAN DEFAULT FALSE
+                    """)
+                    logger.info("✅ Migration: Ensured accounts table has payment_required column")
+                except Exception as e:
+                    logger.warning(f"Migration warning for accounts.payment_required: {e}")
+                
                 # Migration: Add payment_status to sales
                 try:
                     cur.execute("""
