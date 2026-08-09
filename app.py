@@ -737,10 +737,14 @@ def create_app() -> Flask:
     @app.get("/api/auth/me")
     @require_auth(auth_manager, datastore)
     def auth_me():
-        response_user = auth_manager._build_user_payload(getattr(g, "user", {}) or {})
-        resp = jsonify(response_user)
-        resp.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=60"
-        return resp, 200
+        try:
+            response_user = auth_manager._build_user_payload(getattr(g, "user", {}) or {})
+            resp = jsonify(response_user)
+            resp.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=60"
+            return resp, 200
+        except Exception as exc:
+            logger.error("auth_me error: %s", exc, exc_info=True)
+            return jsonify({"error": "Failed to load user profile"}), 500
 
     @app.post("/api/auth/change-password")
     @require_auth(auth_manager, datastore)
@@ -2106,30 +2110,34 @@ def create_app() -> Flask:
     @app.get("/api/settings")
     @require_auth(auth_manager, datastore)
     def get_settings():
-        account_id = request.user.get("account_id")
-        profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
-        account = datastore.get_by_id("accounts", account_id)
-        is_admin = request.user.get("role") in {"admin", "main_admin", "owner"}
-        if profiles:
-            settings_payload = profiles[0].get("settings") or {}
+        try:
+            account_id = request.user.get("account_id")
+            profiles = datastore.get_by_field("business_profiles", "account_id", account_id)
+            account = datastore.get_by_id("accounts", account_id)
+            is_admin = request.user.get("role") in {"admin", "main_admin", "owner"}
+            if profiles:
+                settings_payload = profiles[0].get("settings") or {}
+                if account:
+                    if account.get("business_logo") and not settings_payload.get("logo"):
+                        settings_payload["logo"] = account.get("business_logo")
+                    if is_admin and account.get("screen_lock_password") and not settings_payload.get("screenLockPassword"):
+                        settings_payload["screenLockPassword"] = account.get("screen_lock_password")
+                resp = jsonify(settings_payload)
+                resp.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=120"
+                return resp, 200
+
+            fallback = {}
             if account:
-                if account.get("business_logo") and not settings_payload.get("logo"):
-                    settings_payload["logo"] = account.get("business_logo")
-                if is_admin and account.get("screen_lock_password") and not settings_payload.get("screenLockPassword"):
-                    settings_payload["screenLockPassword"] = account.get("screen_lock_password")
-            resp = jsonify(settings_payload)
+                if account.get("business_logo"):
+                    fallback["logo"] = account.get("business_logo")
+                if is_admin and account.get("screen_lock_password"):
+                    fallback["screenLockPassword"] = account.get("screen_lock_password")
+            resp = jsonify(fallback)
             resp.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=120"
             return resp, 200
-
-        fallback = {}
-        if account:
-            if account.get("business_logo"):
-                fallback["logo"] = account.get("business_logo")
-            if is_admin and account.get("screen_lock_password"):
-                fallback["screenLockPassword"] = account.get("screen_lock_password")
-        resp = jsonify(fallback)
-        resp.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=120"
-        return resp, 200
+        except Exception as exc:
+            logger.error("get_settings error: %s", exc, exc_info=True)
+            return jsonify({"error": "Failed to load settings"}), 500
 
     @app.put("/api/settings")
     @require_business_admin(auth_manager, datastore)

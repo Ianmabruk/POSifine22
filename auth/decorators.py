@@ -34,7 +34,11 @@ class require_auth:
             if not token:
                 return jsonify({"error": "Authorization token required"}), 401
 
-            payload = self.manager.verify_token(token)
+            try:
+                payload = self.manager.verify_token(token)
+            except Exception as exc:
+                logger.error("Token verification failed: %s", exc)
+                return jsonify({"error": "Invalid or expired token"}), 401
             if not payload:
                 return jsonify({"error": "Invalid or expired token"}), 401
 
@@ -43,61 +47,68 @@ class require_auth:
             cache_key = f"auth:{user_id}:{account_id}"
             now = _time.time()
 
-            cached = self.manager._cache_get(cache_key)
-            if cached:
-                user, account = cached
-            else:
-                if not self.datastore:
-                    return jsonify({"error": "Database not available"}), 500
-                user = self.datastore.get_by_id("users", user_id, account_id)
-                if not user and user_id:
-                    user = self.datastore.get_by_id("users", user_id, None)
-                    if user:
-                        account_id = user.get("account_id")
-                if not user:
-                    return jsonify({"error": "User not found"}), 401
-                account = self.datastore.get_by_id("accounts", account_id)
-                if not account:
-                    return jsonify({"error": "Account not found"}), 401
-                self.manager._cache_set(cache_key, (user, account))
+            try:
+                cached = self.manager._cache_get(cache_key)
+                if cached:
+                    user, account = cached
+                else:
+                    if not self.datastore:
+                        return jsonify({"error": "Database not available"}), 500
+                    user = self.datastore.get_by_id("users", user_id, account_id)
+                    if not user and user_id:
+                        user = self.datastore.get_by_id("users", user_id, None)
+                        if user:
+                            account_id = user.get("account_id")
+                    if not user:
+                        return jsonify({"error": "User not found"}), 401
+                    account = self.datastore.get_by_id("accounts", account_id)
+                    if not account:
+                        return jsonify({"error": "Account not found"}), 401
+                    self.manager._cache_set(cache_key, (user, account))
 
-            g.user = user
-            g.account = account
-            if g.account.get("is_locked"):
-                return jsonify({"error": "Account locked"}), 403
-            if g.account.get("is_active") is False:
-                return jsonify({"error": "Account inactive. Please choose a subscription."}), 403
+                g.user = user
+                g.account = account
+                if g.account.get("is_locked"):
+                    return jsonify({"error": "Account locked"}), 403
+                if g.account.get("is_active") is False:
+                    return jsonify({"error": "Account inactive. Please choose a subscription."}), 403
 
-            trial_end = g.account.get("trial_ends_at")
-            plan = g.account.get("plan", "free")
-            if plan == "trial" and trial_end:
-                try:
-                    from datetime import datetime as _dt
-                    if _dt.utcnow() > _dt.fromisoformat(trial_end):
-                        return jsonify({
-                            "error": "Trial expired. Please subscribe to continue.",
-                            "code": "TRIAL_EXPIRED"
-                        }), 403
-                except Exception:
-                    pass
+                trial_end = g.account.get("trial_ends_at")
+                plan = g.account.get("plan", "free")
+                if plan == "trial" and trial_end:
+                    try:
+                        from datetime import datetime as _dt
+                        if _dt.utcnow() > _dt.fromisoformat(trial_end):
+                            return jsonify({
+                                "error": "Trial expired. Please subscribe to continue.",
+                                "code": "TRIAL_EXPIRED"
+                            }), 403
+                    except Exception:
+                        pass
 
-            if g.account.get("payment_required"):
-                return jsonify({
-                    "error": "Kindly make payment to continue using the service.",
-                    "code": "PAYMENT_REQUIRED"
-                }), 403
+                if g.account.get("payment_required"):
+                    return jsonify({
+                        "error": "Kindly make payment to continue using the service.",
+                        "code": "PAYMENT_REQUIRED"
+                    }), 403
 
-            request.user = {
-                "id": user["id"],
-                "email": user["email"],
-                "name": user.get("name"),
-                "role": user.get("role"),
-                "account_id": user.get("account_id"),
-                "business_type": user.get("business_type"),
-                "business_role": user.get("business_role"),
-                "permissions": user.get("permissions") or self.manager._default_permissions(user.get("role")),
-            }
-            return f(*args, **kwargs)
+                request.user = {
+                    "id": user["id"],
+                    "email": user["email"],
+                    "name": user.get("name"),
+                    "role": user.get("role"),
+                    "account_id": user.get("account_id"),
+                    "business_type": user.get("business_type"),
+                    "business_role": user.get("business_role"),
+                    "permissions": user.get("permissions") or self.manager._default_permissions(user.get("role")),
+                }
+                return f(*args, **kwargs)
+            except Exception as exc:
+                from werkzeug.exceptions import HTTPException
+                if isinstance(exc, HTTPException):
+                    raise exc
+                logger.error("Auth middleware error: %s", exc, exc_info=True)
+                return jsonify({"error": "Authentication error"}), 500
         return decorated
 
 
