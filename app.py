@@ -39,6 +39,7 @@ from ai_controller import create_ai_routes
 from message_routes import message_bp
 from notify_service import get_notification_service
 from intasend_service import IntaSendService
+from cloudpay_service import CloudPayService
 from payment_service import PaymentService
 
 # Optional optimization imports - graceful fallback if not available
@@ -139,7 +140,8 @@ def create_app() -> Flask:
     auth_manager = AuthManager(app.config["SECRET_KEY"], session_store=session_store, datastore=datastore)
     auth_service = AuthService(auth_manager, datastore=datastore, email_service=notify_service)
     intasend_service = IntaSendService()
-    payment_service = PaymentService(intasend=intasend_service, datastore=datastore)
+    cloudpay_service = CloudPayService()
+    payment_service = PaymentService(intasend=intasend_service, datastore=datastore, cloudpay=cloudpay_service)
     admin_controller = AdminController(datastore, stock_engine)
     cashier_controller = CashierController(datastore, stock_engine)
     
@@ -3131,6 +3133,10 @@ def create_app() -> Flask:
         data = request.get_json() or {}
         sale_id = data.get("saleId") or data.get("sale_id")
         phone = (data.get("phone") or "").strip()
+        provider = (data.get("provider") or "intasend").strip().lower()
+
+        if provider not in ("intasend", "cloudpay"):
+            return jsonify({"error": "Unsupported payment provider. Use 'intasend' or 'cloudpay'."}), 400
 
         if not sale_id or not phone:
             return jsonify({"error": "saleId and phone are required"}), 400
@@ -3152,6 +3158,7 @@ def create_app() -> Flask:
             cashier_id=cashier_id,
             amount=amount,
             phone_number=phone,
+            provider=provider,
         )
 
         if not success:
@@ -3186,11 +3193,43 @@ def create_app() -> Flask:
             logger.warning("IntaSend webhook missing reference: %s", payload)
             return jsonify({"error": "Missing reference"}), 400
 
-        success, error, result = payment_service.handle_webhook(provider_reference, payload)
+        success, error, result = payment_service.handle_webhook("intasend", provider_reference, payload)
         if not success:
             return jsonify({"error": error or "Webhook handling failed"}), 400
 
         return jsonify({"success": True, "data": result}), 200
+
+    @app.post("/api/payments/cloudpay/webhook")
+    def cloudpay_webhook():
+        raw_body = request.get_data()
+        headers = {k.lower(): v for k, v in request.headers.items()}
+
+        is_valid, event = cloudpay_service.validate_webhook(raw_body, headers)
+        if not is_valid:
+            logger.warning("CloudPay webhook validation failed")
+            return jsonify({"error": "Invalid webhook signature"}), 403
+
+        reference = event.get("reference") or event.get("TransactionReference") or ""
+        if not reference:
+            logger.warning("CloudPay webhook missing reference: %s", event)
+            return jsonify({"error": "Missing reference"}), 400
+
+        success, error, result = payment_service.handle_webhook("cloudpay", reference, event)
+        if not success:
+            logger.error("CloudPay webhook handling failed: %s", error)
+            return jsonify({"error": error or "Webhook handling failed"}), 400
+
+        return jsonify({"success": True, "data": result}), 200
+
+    @app.get("/api/payments/cloudpay/status/<reference>")
+    def cloudpay_payment_status(reference: str):
+        account_id = request.user.get("account_id") if hasattr(request, "user") else None
+        result = cloudpay_service.verify_payment_status(reference)
+        if not result.get("success"):
+            status_code = result.get("status_code", 400)
+            return jsonify({"error": result.get("error", "Failed to fetch status")}), status_code
+
+        return jsonify(result.get("data", {})), 200
 
     @app.get("/api/payments/<int:payment_id>/status")
     @require_auth(auth_manager, datastore)

@@ -1,7 +1,7 @@
 """
 Payment Service
 ===============
-Business logic for M-Pesa payments via IntaSend.
+Business logic for M-Pesa payments via IntaSend and CloudPay.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
 
 from intasend_service import IntaSendService
+from cloudpay_service import CloudPayService
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,9 @@ class PaymentService:
     STATUS_CANCELLED = "cancelled"
     STATUS_EXPIRED = "expired"
 
-    def __init__(self, intasend: Optional[IntaSendService] = None, datastore=None):
+    def __init__(self, intasend: Optional[IntaSendService] = None, datastore=None, cloudpay: Optional[CloudPayService] = None):
         self.intasend = intasend or IntaSendService()
+        self.cloudpay = cloudpay or CloudPayService()
         self.datastore = datastore
 
     def initiate_mpesa_payment(
@@ -37,9 +39,13 @@ class PaymentService:
         cashier_id: int,
         amount: float,
         phone_number: str,
+        provider: str = "intasend",
     ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         """
         Initiate an M-Pesa STK Push payment for a sale.
+
+        Args:
+            provider: "intasend" or "cloudpay"
 
         Returns:
             (success, error, payment_data)
@@ -55,25 +61,37 @@ class PaymentService:
                 {"payment_id": existing_pending.get("id"), "status": existing_pending.get("status")},
             )
 
-        normalized_phone = self.intasend.normalize_phone(phone_number)
+        normalized_phone = self.cloudpay.normalize_phone(phone_number) if provider == "cloudpay" else self.intasend.normalize_phone(phone_number)
         if not normalized_phone or len(normalized_phone) < 12:
             return False, "Invalid M-Pesa phone number. Please enter a valid Kenyan mobile number.", None
 
         account_ref = f"POS-{account_id}-{sale_id}-{secrets.token_hex(4)}"
-        stk_result = self.intasend.initiate_stk_push(
-            phone_number=normalized_phone,
-            amount=amount,
-            account_ref=account_ref,
-            narrative=f"POS Sale #{sale_id}",
-            currency="KES",
-        )
+
+        if provider == "cloudpay":
+            stk_result = self.cloudpay.initiate_stk_push(
+                phone_number=normalized_phone,
+                amount=amount,
+                transaction_reference=account_ref,
+                description=f"POS Sale #{sale_id}",
+            )
+            provider_name = "cloudpay"
+        else:
+            stk_result = self.intasend.initiate_stk_push(
+                phone_number=normalized_phone,
+                amount=amount,
+                account_ref=account_ref,
+                narrative=f"POS Sale #{sale_id}",
+                currency="KES",
+            )
+            provider_name = "intasend"
 
         if not stk_result.get("success"):
             error_msg = stk_result.get("error") or "Failed to initiate M-Pesa payment"
-            logger.error("IntaSend STK Push failed for sale %s: %s", sale_id, error_msg)
+            logger.error("%s STK Push failed for sale %s: %s", provider_name.capitalize(), sale_id, error_msg)
             return False, error_msg, None
 
-        provider_reference = stk_result.get("provider_reference")
+        provider_reference = stk_result.get("reference")
+        checkout_request_id = stk_result.get("checkout_request_id")
         payment_record = {
             "account_id": account_id,
             "sale_id": sale_id,
@@ -81,7 +99,7 @@ class PaymentService:
             "amount": amount,
             "currency": "KES",
             "customer_phone": normalized_phone,
-            "provider": "intasend",
+            "provider": provider_name,
             "provider_reference": provider_reference,
             "account_ref": account_ref,
             "status": self.STATUS_PENDING,
@@ -98,21 +116,23 @@ class PaymentService:
             account_id,
         )
 
-        logger.info("M-Pesa payment initiated: payment_id=%s sale_id=%s ref=%s", payment.get("id"), sale_id, provider_reference)
+        logger.info("M-Pesa payment initiated via %s: payment_id=%s sale_id=%s ref=%s", provider_name, payment.get("id"), sale_id, provider_reference)
         return True, None, {
             "payment_id": payment.get("id"),
             "status": self.STATUS_PENDING,
             "provider_reference": provider_reference,
             "account_ref": account_ref,
+            "checkout_request_id": checkout_request_id,
             "customer_phone": normalized_phone,
             "amount": amount,
+            "provider": provider_name,
         }
 
     def handle_webhook(
-        self, provider_reference: str, event_data: Dict[str, Any]
+        self, provider: str, provider_reference: str, event_data: Dict[str, Any]
     ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         """
-        Process IntaSend webhook event.
+        Process payment webhook event from IntaSend or CloudPay.
 
         Idempotent: safe to process the same webhook multiple times.
         """
@@ -133,24 +153,35 @@ class PaymentService:
             logger.info("Webhook ignored for completed payment_id=%s status=%s", payment_id, current_status)
             return True, None, {"payment_id": payment_id, "status": current_status, "idempotent": True}
 
-        provider_status = (event_data.get("state") or event_data.get("status") or "").lower()
-        mapped_status = self._map_provider_status(provider_status)
-
-        updates = {
-            "status": mapped_status,
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-        if event_data.get("failure_reason"):
-            updates["failure_reason"] = event_data.get("failure_reason")
-        if event_data.get("provider_reference") and not payment.get("provider_reference"):
-            updates["provider_reference"] = event_data.get("provider_reference")
+        if provider == "cloudpay":
+            provider_status = (event_data.get("status") or "").lower()
+            mapped_status = CloudPayService.map_provider_status(provider_status)
+            updates = {
+                "status": mapped_status,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            if event_data.get("receipt"):
+                updates["provider_reference"] = event_data.get("receipt")
+            if event_data.get("resultCode") and mapped_status == self.STATUS_FAILED:
+                updates["failure_reason"] = f"ResultCode: {event_data.get('resultCode')}"
+        else:
+            provider_status = (event_data.get("state") or event_data.get("status") or "").lower()
+            mapped_status = self._map_provider_status(provider_status)
+            updates = {
+                "status": mapped_status,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            if event_data.get("failure_reason"):
+                updates["failure_reason"] = event_data.get("failure_reason")
+            if event_data.get("provider_reference") and not payment.get("provider_reference"):
+                updates["provider_reference"] = event_data.get("provider_reference")
 
         self.datastore.update("payments", payment_id, updates, account_id)
 
         if mapped_status == self.STATUS_SUCCESS and sale_id:
             self._finalize_sale(sale_id, account_id, payment_id, payment.get("amount"))
 
-        logger.info("Payment updated via webhook: payment_id=%s sale_id=%s status=%s", payment_id, sale_id, mapped_status)
+        logger.info("Payment updated via webhook: payment_id=%s sale_id=%s status=%s provider=%s", payment_id, sale_id, mapped_status, provider)
         return True, None, {"payment_id": payment_id, "status": mapped_status, "sale_id": sale_id}
 
     def get_payment_status(self, payment_id: int, account_id: str) -> Optional[Dict[str, Any]]:
