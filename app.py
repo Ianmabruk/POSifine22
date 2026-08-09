@@ -2184,25 +2184,29 @@ def create_app() -> Flask:
     def get_products():
         account_id = request.user.get("account_id")
         has_query = bool(request.args)
-        cache_key = f"cache:products:{account_id}"
-        if cache.enabled and not has_query:
-            cached = cache.get_json(cache_key)
-            if cached is not None:
-                return jsonify(cached), 200
-
         try:
-            products = admin_controller.get_products(account_id)
+            cache_key = f"cache:products:{account_id}"
+            if cache.enabled and not has_query:
+                cached = cache.get_json(cache_key)
+                if cached is not None:
+                    return jsonify(cached), 200
+
+            try:
+                products = admin_controller.get_products(account_id)
+            except Exception as exc:
+                logger.error("Failed to load products from controller: %s", exc, exc_info=True)
+                return jsonify({"error": "Server error - please try again"}), 500
+            if cache.enabled and not has_query:
+                cache.set_json(cache_key, products, ttl_seconds=15)
+            products = _apply_sort(products, request.args.get("sort"))
+            products = _apply_limit(products, request.args.get("limit"))
+            products = _apply_fields(products, request.args.get("fields"))
+            resp = jsonify(products)
+            resp.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=30"
+            return resp, 200
         except Exception as exc:
-            logger.error("Failed to load products: %s", exc, exc_info=True)
+            logger.error("Unexpected error in get_products: %s", exc, exc_info=True)
             return jsonify({"error": "Server error - please try again"}), 500
-        if cache.enabled and not has_query:
-            cache.set_json(cache_key, products, ttl_seconds=15)
-        products = _apply_sort(products, request.args.get("sort"))
-        products = _apply_limit(products, request.args.get("limit"))
-        products = _apply_fields(products, request.args.get("fields"))
-        resp = jsonify(products)
-        resp.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=30"
-        return resp, 200
 
     @app.post("/api/products")
     @require_business_admin(auth_manager, datastore)
@@ -2469,15 +2473,15 @@ def create_app() -> Flask:
         account_id = request.user.get("account_id")
         try:
             sales = admin_controller.get_sales(account_id)
+            sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
+            sales = _apply_limit(sales, request.args.get("limit"))
+            sales = _apply_fields(sales, request.args.get("fields"))
+            resp = jsonify(sales)
+            resp.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
+            return resp, 200
         except Exception as exc:
             logger.error("Failed to load sales: %s", exc, exc_info=True)
             return jsonify({"error": "Server error - please try again"}), 500
-        sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
-        sales = _apply_limit(sales, request.args.get("limit"))
-        sales = _apply_fields(sales, request.args.get("fields"))
-        resp = jsonify(sales)
-        resp.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
-        return resp, 200
 
     @app.get("/api/stats")
     @require_auth(auth_manager, datastore)
@@ -2641,10 +2645,14 @@ def create_app() -> Flask:
     @require_auth(auth_manager, datastore)
     def get_expenses():
         account_id = request.user.get("account_id")
-        expenses = datastore.get_all("expenses", account_id)
-        expenses = _apply_sort(expenses, request.args.get("sort") or "-created_at")
-        expenses = _apply_limit(expenses, request.args.get("limit"))
-        return jsonify(expenses), 200
+        try:
+            expenses = datastore.get_all("expenses", account_id)
+            expenses = _apply_sort(expenses, request.args.get("sort") or "-created_at")
+            expenses = _apply_limit(expenses, request.args.get("limit"))
+            return jsonify(expenses), 200
+        except Exception as exc:
+            logger.error("Failed to load expenses: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
 
     @app.post("/api/expenses")
     @require_business_admin(auth_manager, datastore)
@@ -2763,10 +2771,14 @@ def create_app() -> Flask:
     @require_auth(auth_manager, datastore)
     def get_raw_materials():
         account_id = request.user.get("account_id")
-        raw_materials = datastore.get_all("raw_materials", account_id)
-        raw_materials = _apply_sort(raw_materials, request.args.get("sort") or "name")
-        raw_materials = _apply_limit(raw_materials, request.args.get("limit"))
-        return jsonify(raw_materials), 200
+        try:
+            raw_materials = datastore.get_all("raw_materials", account_id)
+            raw_materials = _apply_sort(raw_materials, request.args.get("sort") or "name")
+            raw_materials = _apply_limit(raw_materials, request.args.get("limit"))
+            return jsonify(raw_materials), 200
+        except Exception as exc:
+            logger.error("Failed to load raw materials: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
 
     # ============================================================
     # School - Students
@@ -2776,9 +2788,13 @@ def create_app() -> Flask:
     @require_auth(auth_manager, datastore)
     def get_students():
         account_id = request.user.get("account_id")
-        students = datastore.get_all("students", account_id)
-        students = _apply_sort(students, request.args.get("sort") or "-created_at")
-        return jsonify(students), 200
+        try:
+            students = datastore.get_all("students", account_id)
+            students = _apply_sort(students, request.args.get("sort") or "-created_at")
+            return jsonify(students), 200
+        except Exception as exc:
+            logger.error("Failed to load students: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
 
     @app.post("/api/students")
     @require_business_admin(auth_manager, datastore)
@@ -3514,10 +3530,14 @@ def create_app() -> Flask:
         if deny:
             return deny
         account_id = request.user.get("account_id")
-        sales = datastore.get_all("petroleum_sales", account_id)
-        sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
-        sales = _apply_limit(sales, request.args.get("limit"))
-        return jsonify(sales), 200
+        try:
+            sales = datastore.get_all("petroleum_sales", account_id)
+            sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
+            sales = _apply_limit(sales, request.args.get("limit"))
+            return jsonify(sales), 200
+        except Exception as exc:
+            logger.error("Failed to load petroleum sales: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
 
     @app.post("/api/petroleum/sales")
     @require_auth(auth_manager, datastore)
