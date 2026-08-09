@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 import logging
 from functools import lru_cache
+from contextlib import contextmanager
 
 # PostgreSQL support (optional)
 try:
@@ -1074,16 +1075,18 @@ class DataStore:
     # POSTGRESQL IMPLEMENTATIONS
     # ============================================================
     
+    @contextmanager
     def _pg_connection(self):
         """Get PostgreSQL connection with retry on stale connections"""
         import time
         for attempt in range(3):
             try:
-                conn = self.pg_pool.connection()
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-                    cur.fetchone()
-                return conn
+                with self.pg_pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1")
+                        cur.fetchone()
+                    yield conn
+                    return
             except Exception as e:
                 if 'PoolTimeout' in str(type(e).__name__) or 'couldn\'t get a connection' in str(e):
                     if attempt < 2:
