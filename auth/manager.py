@@ -10,6 +10,7 @@ import hashlib
 import secrets
 import uuid
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
 
@@ -17,6 +18,10 @@ import bcrypt
 import jwt
 
 logger = logging.getLogger(__name__)
+
+# Fallback TTL (8 days) for revoked JWT identifiers when the token being
+# revoked carried no ``exp`` claim.
+_REVOKED_JTI_TTL = 8 * 86400
 
 _BCRYPT_ROUNDS = 10
 _env_rounds = __import__("os").environ.get("BCRYPT_ROUNDS")
@@ -46,10 +51,11 @@ _TOKEN_EXPIRY = _parse_token_expiry()
 class AuthManager:
     """Core authentication primitives: hashing, JWT, refresh tokens."""
 
-    def __init__(self, secret_key: str, session_store=None, datastore=None):
+    def __init__(self, secret_key: str, session_store=None, datastore=None, cache_service=None):
         self.secret_key = secret_key
         self.session_store = session_store
         self.datastore = datastore
+        self.cache_service = cache_service
         self._auth_cache: Dict[str, Tuple[Any, float]] = {}
         self._AUTH_CACHE_TTL = 300
         self._revoked_tokens: set = set()
@@ -104,22 +110,56 @@ class AuthManager:
         try:
             payload = jwt.decode(token, self.secret_key, algorithms=["HS256"])
             jti = payload.get("jti")
-            if jti and jti in self._revoked_tokens:
+            if jti and self._is_jti_revoked(jti):
                 return None
             return payload
         except Exception:
             return None
 
+    def _is_jti_revoked(self, jti: str) -> bool:
+        """Check whether a JWT ``jti`` has been revoked.
+
+        Uses the shared Redis store when available so revocation is honoured
+        by all 3 server instances; falls back to the in-process set otherwise.
+        """
+        cache = self.cache_service
+        if cache is not None and cache.enabled and cache.client is not None:
+            try:
+                if cache.client.exists(f"{cache.NS_REVOKED}:{jti}"):
+                    return True
+            except Exception:
+                pass
+        return jti in self._revoked_tokens
+
     def revoke_token(self, token: str) -> bool:
         try:
             payload = jwt.decode(token, self.secret_key, algorithms=["HS256"], options={"verify_exp": False})
             jti = payload.get("jti")
-            if jti:
-                self._revoked_tokens.add(jti)
-                return True
+            if not jti:
+                return False
+            ttl: Optional[int] = None
+            exp = payload.get("exp")
+            if exp:
+                try:
+                    ttl = max(60, int(float(exp) - time.time()))
+                except Exception:
+                    ttl = None
+            # Store the revoked JTI in the shared Redis store when available so
+            # every server honours the revocation; fall back to in-process set.
+            cache = self.cache_service
+            if cache is not None and cache.enabled and cache.client is not None:
+                try:
+                    cache.client.setex(
+                        f"{cache.NS_REVOKED}:{jti}",
+                        ttl or _REVOKED_JTI_TTL,
+                        "1",
+                    )
+                except Exception:
+                    pass
+            self._revoked_tokens.add(jti)
+            return True
         except Exception:
-            pass
-        return False
+            return False
 
     def _hash_refresh_token(self, token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -316,6 +356,13 @@ class AuthManager:
     # ============================================================
 
     def _cache_get(self, key: str):
+        cache = self.cache_service
+        if cache is not None and cache.enabled and cache.client is not None:
+            try:
+                stored = cache.get_json(f"{cache.NS_USER_CACHE}:{key}")
+                return stored
+            except Exception:
+                pass
         now = datetime.utcnow().timestamp()
         cached = self._auth_cache.get(key)
         if cached and (now - cached[1]) < self._AUTH_CACHE_TTL:
@@ -323,6 +370,19 @@ class AuthManager:
         return None
 
     def _cache_set(self, key: str, value):
+        cache = self.cache_service
+        if cache is not None and cache.enabled and cache.client is not None:
+            try:
+                sanitised = self._sanitize_for_cache(value)
+                cache.set_json(
+                    f"{cache.NS_USER_CACHE}:{key}",
+                    sanitised,
+                    ttl_seconds=self._AUTH_CACHE_TTL,
+                )
+                return
+            except Exception:
+                # Non-serialisable payload or Redis hiccup -> keep in-memory.
+                pass
         now = datetime.utcnow().timestamp()
         self._auth_cache[key] = (value, now)
         if len(self._auth_cache) > 200:
@@ -330,6 +390,37 @@ class AuthManager:
             self._auth_cache = {
                 k: v for k, v in self._auth_cache.items() if v[1] > cutoff
             }
+
+    @staticmethod
+    def _sanitize_for_cache(value):
+        """Strip secrets before the user/account pair is cached in shared Redis."""
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            user, account = value
+            if isinstance(user, dict):
+                user = dict(user)
+                user.pop("password_hash", None)
+                user.pop("pin", None)
+                user.pop("cashier_pin", None)
+            if isinstance(account, dict):
+                account = dict(account)
+                account.pop("screen_lock_password", None)
+            return [user, account]
+        return list(value) if isinstance(value, tuple) else value
+
+    def invalidate_user_cache(self, cache_key: str) -> None:
+        """Drop a cached user/account lookup from Redis (and local cache).
+
+        ``cache_key`` must match the key the decorator stored, e.g.
+        ``"auth:{user_id}:{account_id}"``.
+        """
+        cache = self.cache_service
+        if cache is not None:
+            cache.delete(f"{cache.NS_USER_CACHE}:{cache_key}")
+        self._auth_cache.pop(cache_key, None)
+
+    def invalidate_user_session_cache(self, user_id: Any, account_id: Any) -> None:
+        """Convenience wrapper matching the decorator's cache key shape."""
+        self.invalidate_user_cache(f"auth:{user_id}:{account_id}")
 
     @property
     def require_auth(self):

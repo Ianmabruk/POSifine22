@@ -398,15 +398,34 @@ class StockEngine:
                             conn.execute("BEGIN")
                             timestamp = datetime.now().isoformat()
 
-                            # Update product stock (delta)
+                            # Update product stock (delta) with atomic quantity check
                             for product_id, qty in deduction_plan['deductions'].items():
                                 cur.execute(
                                     """
                                     UPDATE products SET quantity = quantity - %s, updated_at = %s
-                                    WHERE id = %s AND account_id = %s
+                                    WHERE id = %s AND account_id = %s AND quantity >= %s
                                     """,
-                                    (round_decimal(qty), timestamp, product_id, account_id)
+                                    (round_decimal(qty), timestamp, product_id, account_id, round_decimal(qty))
                                 )
+                                if cur.rowcount == 0:
+                                    conn.rollback()
+                                    product = product_map.get(product_id, {})
+                                    return False, f"Insufficient stock for {product.get('name', product_id)}", None
+
+                            # Update raw materials stock (delta) with atomic quantity check
+                            for material_id, qty in deduction_plan.get('raw_material_deductions', {}).items():
+                                if material_id in raw_material_map:
+                                    cur.execute(
+                                        """
+                                        UPDATE raw_materials SET quantity = quantity - %s, updated_at = %s
+                                        WHERE id = %s AND account_id = %s AND quantity >= %s
+                                        """,
+                                        (round_decimal(qty), timestamp, material_id, account_id, round_decimal(qty))
+                                    )
+                                    if cur.rowcount == 0:
+                                        conn.rollback()
+                                        material = raw_material_map.get(material_id, {})
+                                        return False, f"Insufficient raw material stock for {material.get('name', material_id)}", None
 
                             # Update raw materials stock (delta)
                             for material_id, qty in deduction_plan.get('raw_material_deductions', {}).items():

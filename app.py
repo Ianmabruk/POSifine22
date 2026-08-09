@@ -131,6 +131,50 @@ def create_app() -> Flask:
         if request.method == "OPTIONS":
             return ("", 200)
 
+    # ============================================================
+    # MULTI-SERVER MODE: Route filtering by SERVER_MODE env var
+    # ============================================================
+    _SERVER_MODE = (os.environ.get("SERVER_MODE") or "").strip().lower()
+    _AUTH_PREFIXES = ("/api/auth", "/api/main-admin", "/health", "/ready", "/static")
+    _API_PREFIXES = ("/api/", "/health", "/ready", "/static")
+
+    if _SERVER_MODE == "auth":
+        _ALLOWED_PREFIXES = _AUTH_PREFIXES
+    elif _SERVER_MODE == "api":
+        # API servers need /api/auth/me and /api/auth/refresh for session validation
+        _ALLOWED_PREFIXES = (
+            "/api/",
+            "/api/auth/me",
+            "/api/auth/refresh",
+            "/health",
+            "/ready",
+            "/static",
+        )
+    else:
+        _ALLOWED_PREFIXES = None  # full app
+
+    if _ALLOWED_PREFIXES is not None:
+        @app.before_request
+        def _filter_routes_by_server_mode():
+            path = request.path
+            for prefix in _ALLOWED_PREFIXES:
+                if path == prefix or path.startswith(prefix) or path.startswith(prefix + "?"):
+                    return None
+            # Allow exact matches for specific auth endpoints on API servers
+            if _SERVER_MODE == "api" and path in ("/api/auth/me", "/api/auth/refresh"):
+                return None
+            logger.warning("Blocked route %s on %s server", path, _SERVER_MODE)
+            return jsonify({"error": "This endpoint is not available on this server", "server_mode": _SERVER_MODE, "path": path}), 404
+
+    # Server identification
+    _SERVER_ID = os.environ.get("SERVER_ID", ("AUTH-1" if _SERVER_MODE == "auth" else "API-1"))
+
+    @app.after_request
+    def _add_server_headers(response):
+        response.headers["X-Server-ID"] = _SERVER_ID
+        response.headers["X-Server-Mode"] = _SERVER_MODE or "full"
+        return response
+
     # Services
     use_postgres = bool(os.environ.get("DATABASE_URL"))
     datastore = DataStore(data_dir=os.environ.get("DATA_DIR"), use_postgres=use_postgres)
@@ -138,7 +182,7 @@ def create_app() -> Flask:
     session_store = SessionStore()
     notify_service = get_notification_service()
     cache = CacheService()
-    auth_manager = AuthManager(app.config["SECRET_KEY"], session_store=session_store, datastore=datastore)
+    auth_manager = AuthManager(app.config["SECRET_KEY"], session_store=session_store, datastore=datastore, cache_service=cache)
     auth_service = AuthService(auth_manager, datastore=datastore, email_service=notify_service)
     intasend_service = IntaSendService()
     cloudpay_service = CloudPayService()
@@ -490,13 +534,57 @@ def create_app() -> Flask:
 
     @app.get("/health")
     def health_check():
+        redis_info = cache.health_check() if cache else {
+            "enabled": False,
+            "status": "disabled",
+        }
+        overall_ok = datastore is not None
         return jsonify({
-            "status": "ok",
+            "status": "ok" if overall_ok else "degraded",
             "services": {
-                "database": "postgres" if datastore.use_postgres else "json"
+                "database": "postgres" if datastore.use_postgres else "json",
+                "redis": redis_info,
+                "shared_state": "redis" if redis_info.get("enabled") else "in-memory",
+                "servers": {
+                    "mode": _SERVER_MODE or "full",
+                    "id": _SERVER_ID,
+                },
             },
             "timestamp": datetime.utcnow().isoformat()
-        }), 200
+        }), 200 if overall_ok else 503
+
+    @app.get("/ready")
+    def ready_check():
+        """Readiness probe: verifies the datastore.
+
+        Redis is optional (graceful in-memory fallback), so its availability
+        is reported but does not gate readiness — the app can still serve
+        requests when Redis is unreachable.
+        """
+        redis_info = {}
+        if cache:
+            redis_info = cache.health_check()
+        db_ok = datastore is not None
+        status = 200 if db_ok else 503
+        return jsonify({
+            "ready": status == 200,
+            "database": bool(db_ok),
+            "redis": redis_info,
+            "shared_state": "redis" if (redis_info.get("enabled")) else "in-memory",
+        }), status
+
+    @app.get("/health/redis")
+    def redis_health_check():
+        """Dedicated Redis health-check endpoint for the 3-server cluster."""
+        if not cache:
+            return jsonify({
+                "status": "unavailable",
+                "configured": False,
+                "message": "CacheService not initialized",
+            }), 503
+        info = cache.health_check()
+        status_code = 200 if info.get("status") == "connected" else 503
+        return jsonify(info), status_code
 
     # ============================================================
     # Auth
@@ -648,7 +736,7 @@ def create_app() -> Flask:
             return jsonify({"error": "Too many logout attempts. Try again later.", "retry_after": retry_after}), 429
 
         data = request.get_json() or {}
-        refresh = request.cookies.get("refresh_token") or (data.get("refreshToken") if not is_production else None)
+        refresh = data.get("refreshToken") or request.cookies.get("refresh_token")
         token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
         if refresh:
             auth_manager.revoke_refresh_session(refresh)
@@ -664,6 +752,7 @@ def create_app() -> Flask:
     def lock_screen():
         user = request.user
         datastore.update("users", user.get("id"), {"screen_locked": True}, user.get("account_id"))
+        auth_manager.invalidate_user_session_cache(user.get("id"), user.get("account_id"))
         updated_user = dict(user)
         updated_user["screen_locked"] = True
         updated_user["id"] = user.get("id")
@@ -710,6 +799,7 @@ def create_app() -> Flask:
         # Clear fail counter on success
         cache.delete(_failed_key)
         datastore.update("users", user.get("id"), {"screen_locked": False}, user.get("account_id"))
+        auth_manager.invalidate_user_session_cache(user.get("id"), user.get("account_id"))
         updated_user = dict(user)
         updated_user["screen_locked"] = False
         updated_user["id"] = user.get("id")
@@ -773,6 +863,7 @@ def create_app() -> Flask:
         success = datastore.update("users", user.get("id"), updates, user.get("account_id"))
         if not success:
             return jsonify({"error": "Failed to update credentials"}), 400
+        auth_manager.invalidate_user_session_cache(user.get("id"), user.get("account_id"))
 
         changed_str = " and ".join(changed_items)
         _log_audit("change_password", user, f"user:{user.get('id')}", {"changed": changed_items})
@@ -922,18 +1013,47 @@ def create_app() -> Flask:
     def get_users():
         account_id = request.user.get("account_id")
         try:
-            users = datastore.get_all("users", account_id)
+            page = request.args.get("page")
+            limit = request.args.get("limit")
+            search = request.args.get("search")
+            sort = request.args.get("sort") or "-id"
+            
+            # Backward compatibility: return array if no pagination params
+            if not page and not limit:
+                users = datastore.get_all("users", account_id)
+                response = []
+                for u in users:
+                    sanitized = dict(u)
+                    sanitized.pop("password_hash", None)
+                    sanitized.pop("pin", None)
+                    sanitized.pop("cashier_pin", None)
+                    response.append(sanitized)
+                return jsonify(response), 200
+            
+            # Paginated response
+            page = int(page or 1)
+            limit = min(int(limit or 20), 100)
+            
+            result = datastore.get_paginated(
+                table="users",
+                account_id=account_id,
+                page=page,
+                limit=limit,
+                search=search,
+                sort=sort,
+                search_fields=["name", "email", "role"]
+            )
+            
+            # Sanitize sensitive fields
+            for user in result.get("items", []):
+                user.pop("password_hash", None)
+                user.pop("pin", None)
+                user.pop("cashier_pin", None)
+            
+            return jsonify(result), 200
         except Exception as exc:
             logger.error("Failed to load users: %s", exc, exc_info=True)
             return jsonify({"error": "Server error - please try again"}), 500
-        response = []
-        for u in users:
-            sanitized = dict(u)
-            sanitized.pop("password_hash", None)
-            sanitized.pop("pin", None)
-            sanitized.pop("cashier_pin", None)
-            response.append(sanitized)
-        return jsonify(response), 200
 
     @app.post("/api/users")
     @require_auth(auth_manager, datastore)
@@ -1053,6 +1173,7 @@ def create_app() -> Flask:
 
         updated = datastore.get_by_id("users", user_id, current.get("account_id")) or target
         updated.pop("password_hash", None)
+        auth_manager.invalidate_user_session_cache(user_id, current.get("account_id"))
         return jsonify(updated), 200
 
     @app.delete("/api/users/<int:user_id>")
@@ -1072,6 +1193,7 @@ def create_app() -> Flask:
         success = datastore.delete("users", user_id, current.get("account_id"))
         if not success:
             return jsonify({"error": "Failed to delete user"}), 400
+        auth_manager.invalidate_user_session_cache(user_id, current.get("account_id"))
         return jsonify({"message": "User deleted successfully"}), 200
 
     @app.post("/api/users/<int:user_id>/lock")
@@ -1090,6 +1212,7 @@ def create_app() -> Flask:
         }, current.get("account_id"))
         if not success:
             return jsonify({"error": "User not found"}), 404
+        auth_manager.invalidate_user_session_cache(user_id, current.get("account_id"))
         return jsonify({"message": "User lock status updated"}), 200
 
     @app.post("/api/users/<int:user_id>/activate")
@@ -1107,6 +1230,7 @@ def create_app() -> Flask:
         }, current.get("account_id"))
         if not success:
             return jsonify({"error": "User not found"}), 404
+        auth_manager.invalidate_user_session_cache(user_id, current.get("account_id"))
         return jsonify({"message": "User active status updated"}), 200
 
     # ============================================================
@@ -2183,25 +2307,41 @@ def create_app() -> Flask:
     @require_auth(auth_manager, datastore)
     def get_products():
         account_id = request.user.get("account_id")
-        has_query = bool(request.args)
         try:
-            cache_key = f"cache:products:{account_id}"
-            if cache.enabled and not has_query:
-                cached = cache.get_json(cache_key)
-                if cached is not None:
-                    return jsonify(cached), 200
-
-            try:
-                products = admin_controller.get_products(account_id)
-            except Exception as exc:
-                logger.error("Failed to load products from controller: %s", exc, exc_info=True)
-                return jsonify({"error": "Server error - please try again"}), 500
-            if cache.enabled and not has_query:
-                cache.set_json(cache_key, products, ttl_seconds=15)
-            products = _apply_sort(products, request.args.get("sort"))
-            products = _apply_limit(products, request.args.get("limit"))
-            products = _apply_fields(products, request.args.get("fields"))
-            resp = jsonify(products)
+            page = request.args.get("page")
+            limit = request.args.get("limit")
+            search = request.args.get("search")
+            sort = request.args.get("sort")
+            
+            # Backward compatibility: return array if no pagination params
+            if not page and not limit:
+                try:
+                    products = admin_controller.get_products(account_id)
+                except Exception as exc:
+                    logger.error("Failed to load products from controller: %s", exc, exc_info=True)
+                    return jsonify({"error": "Server error - please try again"}), 500
+                products = _apply_sort(products, sort)
+                products = _apply_limit(products, request.args.get("limit"))
+                products = _apply_fields(products, request.args.get("fields"))
+                resp = jsonify(products)
+                resp.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=30"
+                return resp, 200
+            
+            # Paginated response
+            page = int(page or 1)
+            limit = min(int(limit or 20), 100)
+            
+            result = datastore.get_paginated(
+                table="products",
+                account_id=account_id,
+                page=page,
+                limit=limit,
+                search=search,
+                sort=sort,
+                search_fields=["name", "sku", "barcode", "category"]
+            )
+            
+            resp = jsonify(result)
             resp.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=30"
             return resp, 200
         except Exception as exc:
@@ -2400,14 +2540,43 @@ def create_app() -> Flask:
     def get_batches():
         account_id = request.user.get("account_id")
         product_id = request.args.get("productId")
-        batches = datastore.get_all("batches", account_id)
-        if product_id is not None:
-            try:
-                product_id_int = int(product_id)
-            except ValueError:
-                return jsonify({"error": "Invalid productId"}), 400
-            batches = [b for b in batches if int(b.get("productId") or b.get("product_id") or 0) == product_id_int]
-        return jsonify(batches), 200
+        try:
+            page = int(request.args.get("page", 1))
+            limit = min(int(request.args.get("limit", 20)), 100)
+            
+            if product_id is not None:
+                try:
+                    product_id_int = int(product_id)
+                except ValueError:
+                    return jsonify({"error": "Invalid productId"}), 400
+                
+                result = datastore.get_paginated(
+                    table="batches",
+                    account_id=account_id,
+                    page=page,
+                    limit=limit,
+                    sort="-created_at",
+                    search_fields=["productid", "batchnumber"]
+                )
+                # Filter by product_id after paginated query (since productid is not in search_fields)
+                items = [b for b in result["items"] if int(b.get("productid") or b.get("product_id") or 0) == product_id_int]
+                result["items"] = items
+                result["total"] = len(items)
+                result["total_pages"] = max(1, (result["total"] + limit - 1) // limit)
+                return jsonify(result), 200
+            else:
+                result = datastore.get_paginated(
+                    table="batches",
+                    account_id=account_id,
+                    page=page,
+                    limit=limit,
+                    sort="-created_at",
+                    search_fields=["batchnumber"]
+                )
+                return jsonify(result), 200
+        except Exception as exc:
+            logger.error("Failed to load batches: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
 
     @app.post("/api/batches")
     @require_business_admin(auth_manager, datastore)
@@ -2472,11 +2641,36 @@ def create_app() -> Flask:
     def get_sales():
         account_id = request.user.get("account_id")
         try:
-            sales = admin_controller.get_sales(account_id)
-            sales = _apply_sort(sales, request.args.get("sort") or "-created_at")
-            sales = _apply_limit(sales, request.args.get("limit"))
-            sales = _apply_fields(sales, request.args.get("fields"))
-            resp = jsonify(sales)
+            page = request.args.get("page")
+            limit = request.args.get("limit")
+            search = request.args.get("search")
+            sort = request.args.get("sort") or "-created_at"
+            
+            # Backward compatibility: return array if no pagination params
+            if not page and not limit:
+                sales = admin_controller.get_sales(account_id)
+                sales = _apply_sort(sales, sort)
+                sales = _apply_limit(sales, request.args.get("limit"))
+                sales = _apply_fields(sales, request.args.get("fields"))
+                resp = jsonify(sales)
+                resp.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
+                return resp, 200
+            
+            # Paginated response
+            page = int(page or 1)
+            limit = min(int(limit or 20), 100)
+            
+            result = datastore.get_paginated(
+                table="sales",
+                account_id=account_id,
+                page=page,
+                limit=limit,
+                search=search,
+                sort=sort,
+                search_fields=["receipt_number", "payment_method", "cashier_name"]
+            )
+            
+            resp = jsonify(result)
             resp.headers["Cache-Control"] = "private, max-age=10, stale-while-revalidate=30"
             return resp, 200
         except Exception as exc:
@@ -2646,10 +2840,32 @@ def create_app() -> Flask:
     def get_expenses():
         account_id = request.user.get("account_id")
         try:
-            expenses = datastore.get_all("expenses", account_id)
-            expenses = _apply_sort(expenses, request.args.get("sort") or "-created_at")
-            expenses = _apply_limit(expenses, request.args.get("limit"))
-            return jsonify(expenses), 200
+            page = request.args.get("page")
+            limit = request.args.get("limit")
+            search = request.args.get("search")
+            sort = request.args.get("sort") or "-created_at"
+            
+            # Backward compatibility
+            if not page and not limit:
+                expenses = datastore.get_all("expenses", account_id)
+                expenses = _apply_sort(expenses, sort)
+                expenses = _apply_limit(expenses, request.args.get("limit"))
+                return jsonify(expenses), 200
+            
+            page = int(page or 1)
+            limit = min(int(limit or 20), 100)
+            
+            result = datastore.get_paginated(
+                table="expenses",
+                account_id=account_id,
+                page=page,
+                limit=limit,
+                search=search,
+                sort=sort,
+                search_fields=["category", "description"]
+            )
+            
+            return jsonify(result), 200
         except Exception as exc:
             logger.error("Failed to load expenses: %s", exc, exc_info=True)
             return jsonify({"error": "Server error - please try again"}), 500
@@ -3705,9 +3921,41 @@ def create_app() -> Flask:
     def get_reminders():
         account_id = request.user.get("account_id")
         include_expired = request.args.get("includeExpired") == "true"
-        
-        all_reminders = reminders.get_all_reminders(account_id, include_expired)
-        return jsonify(all_reminders), 200
+        try:
+            page = int(request.args.get("page", 1))
+            limit = min(int(request.args.get("limit", 20)), 100)
+            search = request.args.get("search")
+            sort = request.args.get("sort") or "-created_at"
+            
+            all_reminders = reminders.get_all_reminders(account_id, include_expired)
+            
+            # Filter by search
+            if search:
+                search_lower = search.lower()
+                all_reminders = [r for r in all_reminders 
+                               if search_lower in (r.get("title", "").lower() + " " + r.get("message", "").lower())]
+            
+            # Sort
+            reverse = sort.startswith("-")
+            sort_field = sort[1:] if sort.startswith("-") else sort
+            all_reminders.sort(key=lambda r: str(r.get(sort_field) or ''), reverse=reverse)
+            
+            # Paginate
+            total = len(all_reminders)
+            start = (page - 1) * limit
+            end = start + limit
+            items = all_reminders[start:end]
+            
+            return jsonify({
+                "items": items,
+                "total": total,
+                "page": page,
+                "limit": limit,
+                "total_pages": max(1, (total + limit - 1) // limit)
+            }), 200
+        except Exception as exc:
+            logger.error("Failed to load reminders: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
     
     @app.post("/api/reminders")
     @require_auth(auth_manager, datastore)
@@ -3808,14 +4056,46 @@ def create_app() -> Flask:
         user_role = request.user.get("role")
         user_id = request.user.get("id")
         
-        if user_role in ["admin", "main_admin", "owner"]:
-            # Admins see all requests
-            requests = credit_requests.get_all_requests(account_id)
-        else:
-            # Cashiers see only their requests
-            requests = credit_requests.get_cashier_requests(account_id, user_id)
-        
-        return jsonify(requests), 200
+        try:
+            page = int(request.args.get("page", 1))
+            limit = min(int(request.args.get("limit", 20)), 100)
+            search = request.args.get("search")
+            sort = request.args.get("sort") or "-created_at"
+            
+            if user_role in ["admin", "main_admin", "owner"]:
+                # Admins see all requests
+                requests_list = credit_requests.get_all_requests(account_id)
+            else:
+                # Cashiers see only their requests
+                requests_list = credit_requests.get_cashier_requests(account_id, user_id)
+            
+            # Search
+            if search:
+                search_lower = search.lower()
+                requests_list = [r for r in requests_list 
+                               if search_lower in (r.get("customer_name", "").lower() + " " + str(r.get("amount", "")))]
+            
+            # Sort
+            reverse = sort.startswith("-")
+            sort_field = sort[1:] if sort.startswith("-") else sort
+            requests_list.sort(key=lambda r: str(r.get(sort_field) or ''), reverse=reverse)
+            
+            # Paginate
+            total = len(requests_list)
+            start = (page - 1) * limit
+            end = start + limit
+            items = requests_list[start:end]
+            
+            return jsonify({
+                "items": items,
+                "total": total,
+                "page": page,
+                "limit": limit,
+                "total_pages": max(1, (total + limit - 1) // limit)
+            }), 200
+        except Exception as exc:
+            logger.error("Failed to load credit requests: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
     
     @app.post("/api/credit-requests")
     @require_auth(auth_manager, datastore)

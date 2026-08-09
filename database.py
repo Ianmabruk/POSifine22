@@ -118,12 +118,19 @@ class DataStore:
                 separator = '&' if '?' in db_url else '?'
                 db_url = f"{db_url}{separator}sslmode=require"
             
+            if 'channel_binding=' in db_url:
+                db_url = db_url.replace('channel_binding=require&', '').replace('&channel_binding=require', '').replace('?channel_binding=require', '?')
+            
+            if 'connect_timeout=' not in db_url:
+                separator = '&' if '?' in db_url else '?'
+                db_url = f"{db_url}{separator}connect_timeout=10"
+            
             self.pg_pool = ConnectionPool(
                 db_url,
                 min_size=2,
                 max_size=5,
-                timeout=10,
-                max_lifetime=1800,
+                timeout=30,
+                max_lifetime=300,
                 open=False
             )
             self.pg_pool.open()
@@ -146,12 +153,11 @@ class DataStore:
                 try:
                     if not self.use_postgres or not self.pg_pool:
                         break
-                    # Use pool's internal health check via try_connect
                     self.pg_pool.check()
                     logger.debug("Pool keepalive OK")
                 except Exception as exc:
                     logger.warning(f"Pool keepalive failed: {exc}")
-                time.sleep(30)
+                time.sleep(10)
 
         t = threading.Thread(target=keepalive, daemon=True)
         t.start()
@@ -984,11 +990,130 @@ class DataStore:
                     cur.execute(query, (value,))
                     return cur.fetchall()
         else:
-            filepath = self.files.get(table)
-            if not filepath:
-                return []
-            all_items = self._read_json(filepath)
-            return [item for item in all_items if item.get(field) == value]
+                filepath = self.files.get(table)
+                if not filepath:
+                    return []
+                all_items = self._read_json(filepath)
+                return [item for item in all_items if item.get(field) == value]
+    
+    def get_paginated(self, table: str, account_id: Optional[str] = None, page: int = 1, limit: int = 20, search: Optional[str] = None, sort: Optional[str] = None, search_fields: Optional[list] = None) -> Dict[str, Any]:
+        """Get paginated records from a table with optional search and sort.
+        
+        Args:
+            table: Table name
+            account_id: Optional account_id filter
+            page: Page number (1-indexed)
+            limit: Items per page
+            search: Optional search string
+            sort: Optional sort field, prefix with - for descending
+            search_fields: Optional list of fields to search in (defaults to name, email)
+            
+        Returns:
+            Dict with items, total, page, limit, total_pages
+        """
+        if table not in self.ALLOWED_TABLES:
+            logger.warning(f"Blocked query on disallowed table: {table}")
+            return {"items": [], "total": 0, "page": page, "limit": limit, "total_pages": 0}
+        
+        if self.use_postgres:
+            return self._pg_get_paginated(table, account_id, page, limit, search, sort, search_fields)
+        else:
+            return self._json_get_paginated(table, account_id, page, limit, search, sort, search_fields)
+    
+    def _pg_get_paginated(self, table: str, account_id: Optional[str], page: int, limit: int, search: Optional[str], sort: Optional[str], search_fields: Optional[list]) -> Dict[str, Any]:
+        """PostgreSQL paginated query"""
+        with self._pg_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                # Build WHERE clause
+                where_clauses = []
+                params = []
+                
+                if account_id and table != 'accounts':
+                    where_clauses.append("account_id = %s")
+                    params.append(account_id)
+                
+                if search and search_fields:
+                    search_conditions = []
+                    for field in search_fields:
+                        search_conditions.append(f"{field} ILIKE %s")
+                        params.append(f"%{search}%")
+                    where_clauses.append(f"({' OR '.join(search_conditions)})")
+                
+                where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+                
+                # Count total
+                count_query = f"SELECT COUNT(*) as total FROM {table} {where_sql}"
+                cur.execute(count_query, params)
+                total = cur.fetchone()['total']
+                
+                # Build ORDER BY
+                order_sql = ""
+                if sort:
+                    reverse = sort.startswith("-")
+                    sort_field = sort[1:] if reverse else sort
+                    order_sql = f"ORDER BY {sort_field} {'DESC' if reverse else 'ASC'}"
+                else:
+                    order_sql = "ORDER BY id DESC"
+                
+                # Paginated query
+                offset = (page - 1) * limit
+                query = f"SELECT * FROM {table} {where_sql} {order_sql} LIMIT %s OFFSET %s"
+                params.extend([limit, offset])
+                cur.execute(query, params)
+                items = cur.fetchall()
+                
+                total_pages = max(1, (total + limit - 1) // limit)
+                return {
+                    "items": items,
+                    "total": total,
+                    "page": page,
+                    "limit": limit,
+                    "total_pages": total_pages,
+                }
+    
+    def _json_get_paginated(self, table: str, account_id: Optional[str], page: int, limit: int, search: Optional[str], sort: Optional[str], search_fields: Optional[list]) -> Dict[str, Any]:
+        """JSON file paginated query (fallback)"""
+        filepath = self.files.get(table)
+        if not filepath:
+            return {"items": [], "total": 0, "page": page, "limit": limit, "total_pages": 0}
+        
+        all_items = self._read_json(filepath)
+        
+        # Filter by account_id
+        if account_id and table != 'accounts':
+            all_items = [item for item in all_items if item.get('account_id') == account_id]
+        
+        # Search
+        if search and search_fields:
+            search_lower = search.lower()
+            filtered = []
+            for item in all_items:
+                for field in search_fields:
+                    if str(item.get(field, '')).lower().find(search_lower) != -1:
+                        filtered.append(item)
+                        break
+            all_items = filtered
+        
+        total = len(all_items)
+        
+        # Sort
+        if sort:
+            reverse = sort.startswith("-")
+            sort_field = sort[1:] if reverse else sort
+            all_items.sort(key=lambda x: str(x.get(sort_field) or ''), reverse=reverse)
+        
+        # Paginate
+        offset = (page - 1) * limit
+        items = all_items[offset:offset + limit]
+        total_pages = max(1, (total + limit - 1) // limit)
+        
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+        }
     
     def find(self, table: str, filters: Dict[str, Any], account_id: Optional[str] = None) -> List[Dict]:
         """Find records matching ALL filter conditions.
@@ -1076,15 +1201,12 @@ class DataStore:
     
     @contextmanager
     def _pg_connection(self):
-        """Get PostgreSQL connection from pool.
-
-        Relies on psycopg_pool's built-in stale-connection handling.
-        No manual SELECT 1 health-check needed — the pool validates
-        connections on checkout and return.
-        """
+        """Get PostgreSQL connection from pool with validation."""
         conn = None
         try:
-            conn = self.pg_pool.getconn(timeout=10)
+            conn = self.pg_pool.getconn(timeout=30)
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
             yield conn
         except Exception:
             if conn:

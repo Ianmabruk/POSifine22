@@ -297,7 +297,7 @@ def create_auth_blueprint(
         if is_limited:
             return jsonify({"error": "Too many logout attempts. Try again later.", "retry_after": retry_after}), 429
         data = request.get_json() or {}
-        refresh = request.cookies.get("refresh_token") or (data.get("refreshToken") if False else None)
+        refresh = data.get("refreshToken") or request.cookies.get("refresh_token")
         if refresh:
             manager.revoke_refresh_session(refresh)
         resp = jsonify({"success": True})
@@ -534,6 +534,7 @@ def create_main_admin_auth_blueprint(
         resp = jsonify({
             "user": manager._build_user_payload(owner),
             "token": token,
+            "refreshToken": refresh_token,
             "csrfToken": csrf_token,
         })
         _set_auth_cookies(resp, refresh_token, csrf_token, samesite, "main_admin")
