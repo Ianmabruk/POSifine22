@@ -2352,68 +2352,71 @@ def create_app() -> Flask:
     @app.post("/api/products")
     @require_business_admin(auth_manager, datastore)
     def create_product():
-        data = request.get_json() or {}
-        account_id = request.user.get("account_id")
-        created_by = request.user.get("id")
-
-        allowed_fields = {
-            "barcode",
-            "sku",
-            "image",
-            "reorder_level",
-            "max_stock_level",
-            "cost_per_unit",
-            "enable_weight_pricing",
-            "product_type"
-        }
-
-        extra_fields = {k: data.get(k) for k in allowed_fields if k in data}
-        if "cost_per_unit" not in extra_fields and data.get("cost") is not None:
-            extra_fields["cost_per_unit"] = data.get("cost")
-        if "enable_weight_pricing" in extra_fields:
-            extra_fields["enable_weight_pricing"] = bool(extra_fields.get("enable_weight_pricing"))
-        for float_field in ("reorder_level", "max_stock_level", "cost_per_unit"):
-            if float_field in extra_fields and extra_fields.get(float_field) != "":
-                extra_fields[float_field] = _safe_float(extra_fields.get(float_field))
-        # Handle visibleToCashier -> stored as visible_to_cashier
-        visible = data.get("visibleToCashier") if "visibleToCashier" in data else data.get("visible_to_cashier")
-        if visible is not None:
-            extra_fields["visible_to_cashier"] = bool(visible)
-
         try:
-            resolved_cost = data.get("cost")
-            if (resolved_cost is None or resolved_cost == "") and extra_fields.get("cost_per_unit") is not None:
-                resolved_cost = extra_fields.get("cost_per_unit")
+            data = request.get_json() or {}
+            account_id = request.user.get("account_id")
+            created_by = request.user.get("id")
 
-            success, error, product = admin_controller.create_product(
-                account_id=account_id,
-                created_by=created_by,
-                name=data.get("name"),
-                price=_safe_float(data.get("price")),
-                cost=_safe_float(resolved_cost) if resolved_cost not in (None, "") else 0.0,
-                quantity=_safe_float(data.get("quantity")),
-                category=data.get("category", "general"),
-                unit=data.get("unit", "pcs"),
-                is_composite=bool(data.get("is_composite") or data.get("isComposite", False) or str(data.get("category", "")).lower() == "composite"),
-                recipe=data.get("recipe"),
-                **extra_fields
-            )
-        except (TypeError, ValueError) as exc:
-            logger.error("Product creation validation error: %s", exc, exc_info=True)
-            return jsonify({"error": "Invalid product data. Please check price, cost, and quantity fields."}), 400
+            allowed_fields = {
+                "barcode",
+                "sku",
+                "image",
+                "reorder_level",
+                "max_stock_level",
+                "cost_per_unit",
+                "enable_weight_pricing",
+                "product_type"
+            }
+
+            extra_fields = {k: data.get(k) for k in allowed_fields if k in data}
+            if "cost_per_unit" not in extra_fields and data.get("cost") is not None:
+                extra_fields["cost_per_unit"] = data.get("cost")
+            if "enable_weight_pricing" in extra_fields:
+                extra_fields["enable_weight_pricing"] = bool(extra_fields.get("enable_weight_pricing"))
+            for float_field in ("reorder_level", "max_stock_level", "cost_per_unit"):
+                if float_field in extra_fields and extra_fields.get(float_field) != "":
+                    extra_fields[float_field] = _safe_float(extra_fields.get(float_field))
+            visible = data.get("visibleToCashier") if "visibleToCashier" in data else data.get("visible_to_cashier")
+            if visible is not None:
+                extra_fields["visible_to_cashier"] = bool(visible)
+
+            try:
+                resolved_cost = data.get("cost")
+                if (resolved_cost is None or resolved_cost == "") and extra_fields.get("cost_per_unit") is not None:
+                    resolved_cost = extra_fields.get("cost_per_unit")
+
+                success, error, product = admin_controller.create_product(
+                    account_id=account_id,
+                    created_by=created_by,
+                    name=data.get("name"),
+                    price=_safe_float(data.get("price")),
+                    cost=_safe_float(resolved_cost) if resolved_cost not in (None, "") else 0.0,
+                    quantity=_safe_float(data.get("quantity")),
+                    category=data.get("category", "general"),
+                    unit=data.get("unit", "pcs"),
+                    is_composite=bool(data.get("is_composite") or data.get("isComposite", False) or str(data.get("category", "")).lower() == "composite"),
+                    recipe=data.get("recipe"),
+                    **extra_fields
+                )
+            except (TypeError, ValueError) as exc:
+                logger.error("Product creation validation error: %s", exc, exc_info=True)
+                return jsonify({"error": "Invalid product data. Please check price, cost, and quantity fields."}), 400
+            except Exception as exc:
+                logger.error("Product creation error: %s", exc, exc_info=True)
+                return jsonify({"error": "Server error while creating product. Please try again."}), 500
+
+            if not success:
+                return jsonify({"error": error or "Failed to create product"}), 400
+            try:
+                sync_manager.broadcast_product_update(account_id, product, action='created')
+            except Exception as exc:
+                logger.warning("Product broadcast failed: %s", exc, exc_info=True)
+            if cache.enabled:
+                cache.delete(f"cache:products:{account_id}")
+            return jsonify(product), 201
         except Exception as exc:
-            logger.error("Product creation error: %s", exc, exc_info=True)
+            logger.error("Unexpected product creation error: %s", exc, exc_info=True)
             return jsonify({"error": "Server error while creating product. Please try again."}), 500
-
-        if not success:
-            return jsonify({"error": error or "Failed to create product"}), 400
-        try:
-            sync_manager.broadcast_product_update(account_id, product, action='created')
-        except Exception as exc:
-            logger.warning("Product broadcast failed: %s", exc, exc_info=True)
-        if cache.enabled:
-            cache.delete(f"cache:products:{account_id}")
-        return jsonify(product), 201
 
     @app.put("/api/products/<int:product_id>")
     @require_business_admin(auth_manager, datastore)
@@ -4274,6 +4277,47 @@ def create_app() -> Flask:
     @sock.route("/api/ws/products")
     def ws_products(ws):
         token = request.args.get("token", "").strip()
+        payload = auth_manager.verify_token(token)
+        if not payload:
+            ws.send(json.dumps({"type": "error", "message": "Invalid token"}))
+            return
+
+        account_id = payload.get("account_id")
+        user_id = payload.get("user_id")
+        if not account_id or not user_id:
+            ws.send(json.dumps({"type": "error", "message": "Invalid session"}))
+            return
+
+        sync_manager.register_connection(ws, account_id, user_id)
+
+        products = datastore.get_all("products", account_id)
+        ws.send(json.dumps({
+            "type": "products_snapshot",
+            "data": {"allProducts": products},
+            "timestamp": datetime.utcnow().isoformat()
+        }))
+
+        try:
+            while True:
+                msg = ws.receive()
+                if msg is None:
+                    break
+                if msg == "ping":
+                    ws.send(json.dumps({"type": "pong", "timestamp": datetime.utcnow().isoformat()}))
+        finally:
+            sync_manager.unregister_connection(ws)
+
+    @sock.route("/ws")
+    def ws_generic(ws):
+        token = request.args.get("token", "").strip()
+        if not token:
+            try:
+                raw = ws.receive()
+                if raw:
+                    body = json.loads(raw)
+                    token = (body.get("token") or "").strip()
+            except Exception:
+                pass
         payload = auth_manager.verify_token(token)
         if not payload:
             ws.send(json.dumps({"type": "error", "message": "Invalid token"}))
