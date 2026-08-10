@@ -885,15 +885,16 @@ def create_app() -> Flask:
         plan = account.get("plan", "free")
         if plan == "free":
             return True, None
-        if plan == "trial":
-            trial_end = account.get("trial_ends_at")
-            if trial_end:
-                try:
-                    if datetime.utcnow() > datetime.fromisoformat(trial_end):
-                        return False, (jsonify({"error": "Trial expired. Please subscribe to continue.", "code": "TRIAL_EXPIRED"}), 403)
-                except Exception:
-                    pass
+
+        trial_end = account.get("trial_ends_at")
+        if trial_end:
+            try:
+                if datetime.utcnow() > datetime.fromisoformat(trial_end):
+                    return False, (jsonify({"error": "Trial expired. Please subscribe to continue.", "code": "TRIAL_EXPIRED"}), 403)
+            except Exception:
+                pass
             return True, None
+
         sub_end = account.get("subscription_ends_at")
         if sub_end:
             try:
@@ -915,13 +916,10 @@ def create_app() -> Flask:
         sub_end = account.get("subscription_ends_at")
         status = "active"
         days_remaining = None
-        if plan == "trial":
-            if trial_end:
-                days_remaining = max(0, (datetime.fromisoformat(trial_end) - datetime.utcnow()).days)
-                if now > trial_end:
-                    status = "expired"
-            else:
-                status = "active"
+        if trial_end:
+            days_remaining = max(0, (datetime.fromisoformat(trial_end) - datetime.utcnow()).days)
+            if now > trial_end:
+                status = "expired"
         elif plan not in ("free",):
             if sub_end:
                 days_remaining = max(0, (datetime.fromisoformat(sub_end) - datetime.utcnow()).days)

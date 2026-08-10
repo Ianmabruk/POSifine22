@@ -63,7 +63,7 @@ class AuthService:
         email: str,
         password: str,
         name: str,
-        plan: str = "free",
+        plan: str = "trial",
         business_type: Optional[str] = None,
     ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         email = (email or "").strip().lower()
@@ -80,12 +80,16 @@ class AuthService:
         account_id = f"acc_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow().isoformat()
         trial_end = (datetime.utcnow() + timedelta(days=30)).isoformat()
+        normalized_plan = (plan or "trial").strip().lower()
+        valid_plans = {"starter", "business", "enterprise", "custom", "trial", "free"}
+        if normalized_plan not in valid_plans:
+            normalized_plan = "trial"
 
         account = {
             "id": account_id,
             "owner_email": email,
             "business_name": name,
-            "plan": "trial",
+            "plan": normalized_plan,
             "is_active": True,
             "is_locked": False,
             "trial_ends_at": trial_end,
