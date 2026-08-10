@@ -74,6 +74,9 @@ class AuthService:
         if self.datastore and self.datastore.get_user_by_email(email):
             return False, "Email already registered", None
 
+        if self.datastore and self.datastore.get_account_by_email(email):
+            return False, "An account with this email already exists", None
+
         account_id = f"acc_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow().isoformat()
         trial_end = (datetime.utcnow() + timedelta(days=30)).isoformat()

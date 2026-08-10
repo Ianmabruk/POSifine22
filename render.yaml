@@ -19,7 +19,7 @@ services:
       - key: USE_POSTGRES
         value: "true"
       - key: CORS_ORIGINS
-        value: https://posifine11.netlify.app,https://posifine-frontend.netlify.app
+        value: https://posifine11.netlify.app,https://posifine-frontend.netlify.app,https://posifine22.onrender.com
       - key: DATABASE_URL
         value: postgresql://neondb_owner:npg_YMaFfsJ6v5cq@ep-ancient-credit-axnn05nf-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require
       - key: OPENAI_API_KEY

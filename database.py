@@ -20,17 +20,17 @@ from pathlib import Path
 import logging
 from functools import lru_cache
 from contextlib import contextmanager
+from urllib.parse import urlparse, urlunparse, parse_qs
 
 # PostgreSQL support (optional)
 try:
     import psycopg
     from psycopg.rows import dict_row
-    from psycopg_pool import ConnectionPool
     HAS_POSTGRES = True
 except ImportError:
     HAS_POSTGRES = False
     psycopg = None
-    ConnectionPool = None
+    dict_row = None
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,9 @@ class DataStore:
         
         # Storage backend
         self.use_postgres = use_postgres and HAS_POSTGRES
-        self.pg_pool: Optional[ConnectionPool] = None
+        self.pg_pool = None
+        self.pg_url = None
+        self._pg_local = threading.local()
         
         # In-memory cache for frequently accessed data
         self._cache = {}
@@ -108,59 +110,34 @@ class DataStore:
     # ============================================================
     
     def _init_postgres(self):
-        """Initialize PostgreSQL connection pool"""
+        """Initialize PostgreSQL (direct connections, no app-level pool)."""
         try:
             db_url = os.environ.get('DATABASE_URL', '')
             if db_url.startswith('postgres://'):
                 db_url = db_url.replace('postgres://', 'postgresql://', 1)
-            
-            if 'sslmode=' not in db_url:
-                separator = '&' if '?' in db_url else '?'
-                db_url = f"{db_url}{separator}sslmode=require"
-            
-            if 'channel_binding=' in db_url:
-                db_url = db_url.replace('channel_binding=require&', '').replace('&channel_binding=require', '').replace('?channel_binding=require', '?')
-            
-            if 'connect_timeout=' not in db_url:
-                separator = '&' if '?' in db_url else '?'
-                db_url = f"{db_url}{separator}connect_timeout=10"
-            
-            self.pg_pool = ConnectionPool(
-                db_url,
-                min_size=2,
-                max_size=5,
-                timeout=30,
-                max_lifetime=300,
-                open=False
-            )
-            self.pg_pool.open()
-            
+
+            parsed = urlparse(db_url)
+            query_params = parse_qs(parsed.query)
+            query_params.pop('channel_binding', None)
+            if 'connect_timeout' not in query_params:
+                query_params['connect_timeout'] = ['10']
+            clean_query = '&'.join(f'{k}={v[0]}' for k, v in query_params.items())
+            db_url = urlunparse(parsed._replace(query=clean_query))
+
+            self.pg_url = db_url
+            self.pg_pool = None
+
             self._create_tables()
-            logger.info("PostgreSQL connection pool created")
-            
-            self._start_pool_keepalive()
+            logger.info("PostgreSQL initialized (direct connections)")
+
         except Exception as e:
             logger.error(f"PostgreSQL initialization failed: {e}")
-            logger.info("Falling back to JSON file storage")
+            if os.environ.get('DATABASE_URL'):
+                raise RuntimeError(f"PostgreSQL is required in production but failed to initialize: {e}")
+            logger.info("Falling back to JSON file storage (development mode)")
             self.use_postgres = False
             self.pg_pool = None
             self._init_json_files()
-    
-    def _start_pool_keepalive(self):
-        """Background keepalive to prevent stale connections and pool exhaustion"""
-        def keepalive():
-            while True:
-                try:
-                    if not self.use_postgres or not self.pg_pool:
-                        break
-                    self.pg_pool.check()
-                    logger.debug("Pool keepalive OK")
-                except Exception as exc:
-                    logger.warning(f"Pool keepalive failed: {exc}")
-                time.sleep(10)
-
-        t = threading.Thread(target=keepalive, daemon=True)
-        t.start()
     
     def _create_tables(self):
         """Create database tables if they don't exist"""
@@ -1201,22 +1178,31 @@ class DataStore:
     
     @contextmanager
     def _pg_connection(self):
-        """Get PostgreSQL connection from pool with validation."""
-        conn = None
-        try:
-            conn = self.pg_pool.getconn(timeout=30)
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-            yield conn
-        except Exception:
-            if conn:
+        """Get a PostgreSQL connection with per-thread reuse."""
+        conn = getattr(self._pg_local, 'conn', None)
+        if conn is None or getattr(conn, 'closed', True):
+            conn = psycopg.connect(self.pg_url)
+            self._pg_local.conn = conn
+        else:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except Exception:
                 try:
-                    self.pg_pool.putconn(conn, close=True)
+                    conn.close()
                 except Exception:
                     pass
+                conn = psycopg.connect(self.pg_url)
+                self._pg_local.conn = conn
+        try:
+            yield conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._pg_local.conn = None
             raise
-        else:
-            self.pg_pool.putconn(conn)
     
     def _pg_get_all(self, table: str, account_id: Optional[str] = None) -> List[Dict]:
         """PostgreSQL: Get all records"""

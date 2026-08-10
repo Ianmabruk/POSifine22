@@ -18,7 +18,9 @@ import asyncio
 from typing import Dict, Any
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+_runtime_env = (os.environ.get("NODE_ENV") or os.environ.get("FLASK_ENV") or "").strip().lower()
+if _runtime_env not in {"production", "prod"}:
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from flask import Flask, jsonify, request, g
 from flask_sock import Sock
