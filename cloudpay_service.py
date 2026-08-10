@@ -56,7 +56,11 @@ class CloudPayService:
 
         try:
             resp = requests.post(url, headers=headers, timeout=30)
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                data = {}
+                logger.warning("CloudPay OAuth returned non-JSON response: status=%s body=%s", resp.status_code, resp.text[:500])
             if resp.status_code == 200 and data.get("access_token"):
                 self._access_token = data["access_token"]
                 expires_in = int(data.get("expires_in", 3600))
@@ -115,10 +119,11 @@ class CloudPayService:
 
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)
-            data = resp.json()
-            logger.info("CloudPay STK Push response: status=%s body=%s", resp.status_code, data)
-
-            success = resp.status_code in (200, 201) and data.get("status") == "success"
+            try:
+                data = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                data = {}
+                logger.warning("CloudPay STK Push returned non-JSON response: status=%s body=%s", resp.status_code, resp.text[:500])
             return {
                 "success": success,
                 "status_code": resp.status_code,
@@ -151,7 +156,11 @@ class CloudPayService:
 
         try:
             resp = requests.get(url, headers=headers, timeout=30)
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                data = {}
+                logger.warning("CloudPay verify payment returned non-JSON response: status=%s body=%s", resp.status_code, resp.text[:500])
             return {
                 "success": resp.status_code == 200,
                 "status_code": resp.status_code,

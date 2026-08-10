@@ -6,6 +6,7 @@ Handles IntaSend API authentication and STK Push requests.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -75,7 +76,12 @@ class IntaSendService:
                 headers={**self._get_common_headers(), "Authorization": f"Bearer {self.secret_key}"},
                 timeout=30,
             )
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                data = {}
+                logger.warning("IntaSend STK Push returned non-JSON response: status=%s body=%s", resp.status_code, resp.text[:500])
+
             logger.info("IntaSend STK Push response: status=%s body=%s", resp.status_code, data)
             return {
                 "success": resp.status_code in (200, 201),
