@@ -28,6 +28,7 @@ from flask_sock import Sock
 from database import DataStore
 from stock_engine import StockEngine
 from auth import AuthManager, AuthService, require_auth, require_admin, require_main_admin, require_business_admin
+from auth.routes import _build_cookie_path
 from admin_controller import AdminController
 from cashier_controller import CashierController
 from sync_manager import sync_manager
@@ -268,7 +269,7 @@ def create_app() -> Flask:
         return _client_ip()
 
     def _set_auth_cookies(resp, refresh_token: str | None, csrf_token: str | None, scope: str = "auth"):
-        cookie_path = "/api/auth"
+        cookie_path = _build_cookie_path(scope)
         if refresh_token:
             resp.set_cookie(
                 "refresh_token",
@@ -291,7 +292,7 @@ def create_app() -> Flask:
             )
 
     def _clear_auth_cookies(resp, scope: str = "auth"):
-        cookie_path = "/api/auth"
+        cookie_path = _build_cookie_path(scope)
         resp.set_cookie("refresh_token", "", expires=0, secure=True, httponly=True, samesite=auth_cookie_samesite, path=cookie_path)
         resp.set_cookie("csrf_token", "", expires=0, secure=True, httponly=False, samesite=auth_cookie_samesite, path=cookie_path)
 
