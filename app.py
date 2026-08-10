@@ -2380,28 +2380,37 @@ def create_app() -> Flask:
         if visible is not None:
             extra_fields["visible_to_cashier"] = bool(visible)
 
+        try:
+            resolved_cost = data.get("cost")
+            if (resolved_cost is None or resolved_cost == "") and extra_fields.get("cost_per_unit") is not None:
+                resolved_cost = extra_fields.get("cost_per_unit")
 
-        resolved_cost = data.get("cost")
-        if (resolved_cost is None or resolved_cost == "") and extra_fields.get("cost_per_unit") is not None:
-            resolved_cost = extra_fields.get("cost_per_unit")
-
-        success, error, product = admin_controller.create_product(
-            account_id=account_id,
-            created_by=created_by,
-            name=data.get("name"),
-            price=data.get("price", 0),
-            cost=resolved_cost if resolved_cost not in (None, "") else 0,
-            quantity=data.get("quantity", 0),
-            category=data.get("category", "general"),
-            unit=data.get("unit", "pcs"),
-            is_composite=bool(data.get("is_composite") or data.get("isComposite", False) or str(data.get("category", "")).lower() == "composite"),
-            recipe=data.get("recipe"),
-            **extra_fields
-        )
+            success, error, product = admin_controller.create_product(
+                account_id=account_id,
+                created_by=created_by,
+                name=data.get("name"),
+                price=_safe_float(data.get("price")),
+                cost=_safe_float(resolved_cost) if resolved_cost not in (None, "") else 0.0,
+                quantity=_safe_float(data.get("quantity")),
+                category=data.get("category", "general"),
+                unit=data.get("unit", "pcs"),
+                is_composite=bool(data.get("is_composite") or data.get("isComposite", False) or str(data.get("category", "")).lower() == "composite"),
+                recipe=data.get("recipe"),
+                **extra_fields
+            )
+        except (TypeError, ValueError) as exc:
+            logger.error("Product creation validation error: %s", exc, exc_info=True)
+            return jsonify({"error": "Invalid product data. Please check price, cost, and quantity fields."}), 400
+        except Exception as exc:
+            logger.error("Product creation error: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error while creating product. Please try again."}), 500
 
         if not success:
             return jsonify({"error": error or "Failed to create product"}), 400
-        sync_manager.broadcast_product_update(account_id, product, action='created')
+        try:
+            sync_manager.broadcast_product_update(account_id, product, action='created')
+        except Exception as exc:
+            logger.warning("Product broadcast failed: %s", exc, exc_info=True)
         if cache.enabled:
             cache.delete(f"cache:products:{account_id}")
         return jsonify(product), 201

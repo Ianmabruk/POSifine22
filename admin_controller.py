@@ -60,31 +60,40 @@ class AdminController:
         except (TypeError, ValueError):
             base_cost_per_unit = base_cost
 
-        product_data = {
-            "account_id": account_id,
-            "name": name,
-            "price": float(price),
-            "cost": base_cost,
-            "quantity": float(quantity or 0.0),
-            "category": category or "general",
-            "unit": unit or "pcs",
-            "is_composite": bool(is_composite),
-            "recipe": recipe or [],
-            "product_type": product_type or ("composite" if is_composite else "regular"),
-            "created_at": now,
-            "created_by": created_by,
-            "updated_at": None,
-            "reorder_level": float(extra_fields.get("reorder_level") or 0.0),
-            "max_stock_level": float(extra_fields.get("max_stock_level") or 0.0),
-            "cost_per_unit": base_cost_per_unit,
-            "enable_weight_pricing": bool(extra_fields.get("enable_weight_pricing") or False),
-            "barcode": extra_fields.get("barcode"),
-            "sku": extra_fields.get("sku"),
-            "image": extra_fields.get("image"),
-            "visible_to_cashier": bool(extra_fields.get("visible_to_cashier", True))
-        }
+        try:
+            product_data = {
+                "account_id": account_id,
+                "name": name,
+                "price": float(price or 0),
+                "cost": base_cost,
+                "quantity": float(quantity or 0.0),
+                "category": category or "general",
+                "unit": unit or "pcs",
+                "is_composite": bool(is_composite),
+                "recipe": recipe or [],
+                "product_type": product_type or ("composite" if is_composite else "regular"),
+                "created_at": now,
+                "created_by": created_by,
+                "updated_at": None,
+                "reorder_level": float(extra_fields.get("reorder_level") or 0.0),
+                "max_stock_level": float(extra_fields.get("max_stock_level") or 0.0),
+                "cost_per_unit": base_cost_per_unit,
+                "enable_weight_pricing": bool(extra_fields.get("enable_weight_pricing") or False),
+                "barcode": extra_fields.get("barcode"),
+                "sku": extra_fields.get("sku"),
+                "image": extra_fields.get("image"),
+                "visible_to_cashier": bool(extra_fields.get("visible_to_cashier", True))
+            }
+        except (TypeError, ValueError) as exc:
+            logger.error("Product data validation error: %s", exc, exc_info=True)
+            return False, "Invalid product data. Please check numeric fields.", None
 
-        product = self.datastore.create("products", product_data)
+        try:
+            product = self.datastore.create("products", product_data)
+        except Exception as exc:
+            logger.error("Failed to create product in datastore: %s", exc, exc_info=True)
+            return False, "Failed to save product. Please try again.", None
+
         return True, None, self._normalize_product(product)
 
     def get_products(self, account_id: str) -> List[Dict[str, Any]]:
