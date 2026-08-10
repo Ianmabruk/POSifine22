@@ -31,9 +31,9 @@ class CloudPayService:
         self.environment = os.environ.get("CLOUDPAY_ENVIRONMENT", "sandbox").lower()
 
         if self.environment == "production":
-            self.base_url = "https://pay.cloud.or.ke/api"
+            self.base_url = "https://pay.cloud.or.ke"
         else:
-            self.base_url = "https://pay.cloud.or.ke/sandbox/api"
+            self.base_url = "https://pay.cloud.or.ke/sandbox"
 
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
@@ -103,7 +103,7 @@ class CloudPayService:
                 "error": "Failed to authenticate with CloudPay",
             }
 
-        url = f"{self.base_url}/payments/mpesa/stkpush"
+        url = f"{self.base_url}/api/payments/mpesa/stkpush"
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
@@ -151,7 +151,7 @@ class CloudPayService:
         if not access_token:
             return {"success": False, "status_code": 0, "data": {}, "status": None, "error": "Failed to authenticate"}
 
-        url = f"{self.base_url}/payments/status/{reference}"
+        url = f"{self.base_url}/api/payments/status/{reference}"
         headers = {"Authorization": f"Bearer {access_token}"}
 
         try:
