@@ -57,6 +57,7 @@ class DataStore:
         'reminders', 'vendors', 'credit_requests', 'discounts', 'service_fees',
         'sessions', 'activity_logs', 'audit_logs', 'batches', 'stock_movements',
         'business_profiles', 'customers', 'raw_materials', 'recipes',
+        'recipe_ingredients', 'inventory_transactions',
         'petroleum_tanks', 'petroleum_sales', 'petroleum_staff',
         'room_bookings', 'appointments', 'prescriptions', 'table_orders',
         'students', 'exam_results', 'assignments', 'school_notices',
@@ -69,7 +70,9 @@ class DataStore:
         'email', 'role', 'plan', 'status', 'created_at', 'updated_at',
         'refresh_token_hash', 'cashier_id', 'category', 'business_id',
         'name', 'phone', 'is_active', 'is_locked', 'trial_ends_at',
-        'subscription_ends_at', 'payment_status', 'provider_reference', 'package_type'
+        'subscription_ends_at', 'payment_status', 'provider_reference', 'package_type',
+        'inventory_item_id', 'transaction_type', 'reference_type', 'reference_id',
+        'reason', 'created_by', 'recipe_id', 'product_type', 'active'
     }
     
     def __init__(self, data_dir: str = None, use_postgres: bool = False):
@@ -347,7 +350,7 @@ class DataStore:
                      )
                  """)
 
-                # Payments table (M-Pesa STK Push and other payment methods)
+                 # Payments table
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS payments (
                         id SERIAL PRIMARY KEY,
@@ -357,7 +360,7 @@ class DataStore:
                         amount REAL NOT NULL,
                         currency TEXT DEFAULT 'KES',
                         customer_phone TEXT,
-                        provider TEXT DEFAULT 'intasend',
+                        provider TEXT DEFAULT 'manual',
                         provider_reference TEXT,
                         account_ref TEXT,
                         status TEXT DEFAULT 'pending',
@@ -694,6 +697,50 @@ class DataStore:
                     )
                 """)
                 
+                # Recipes table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipes (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        active BOOLEAN DEFAULT TRUE,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT
+                    )
+                """)
+                
+                # Recipe ingredients table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipe_ingredients (
+                        id SERIAL PRIMARY KEY,
+                        recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+                        inventory_item_id INTEGER NOT NULL,
+                        quantity REAL NOT NULL,
+                        unit TEXT DEFAULT 'pcs',
+                        created_at TEXT NOT NULL
+                    )
+                """)
+                
+                # Inventory transactions table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS inventory_transactions (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        inventory_item_id INTEGER NOT NULL,
+                        transaction_type TEXT NOT NULL,
+                        quantity REAL NOT NULL,
+                        unit TEXT DEFAULT 'pcs',
+                        before_quantity REAL NOT NULL,
+                        after_quantity REAL NOT NULL,
+                        reference_type TEXT,
+                        reference_id INTEGER,
+                        reason TEXT,
+                        created_by INTEGER,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+                
                 # Create indexes for performance
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
@@ -734,6 +781,14 @@ class DataStore:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_product ON stock_deductions(product_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_created ON stock_deductions(created_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_cashier ON stock_deductions(cashier_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_recipes_account ON recipes(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_recipes_product ON recipes(product_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_recipe ON recipe_ingredients(recipe_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_item ON recipe_ingredients(inventory_item_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_account ON inventory_transactions(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_item ON inventory_transactions(inventory_item_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_type ON inventory_transactions(transaction_type)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_created ON inventory_transactions(created_at)")
                 
                 # ============================================================
                 # MIGRATIONS: Add new columns to existing tables
@@ -764,7 +819,8 @@ class DataStore:
                         ADD COLUMN IF NOT EXISTS cost_per_unit REAL DEFAULT 0.0,
                         ADD COLUMN IF NOT EXISTS enable_weight_pricing BOOLEAN DEFAULT FALSE,
                         ADD COLUMN IF NOT EXISTS visible_to_cashier BOOLEAN DEFAULT TRUE,
-                        ADD COLUMN IF NOT EXISTS updated_at TEXT
+                        ADD COLUMN IF NOT EXISTS updated_at TEXT,
+                        ADD COLUMN IF NOT EXISTS package_size REAL DEFAULT 1.0
                     """)
                     logger.info("✅ Migration: Ensured extended products columns exist")
                 except Exception as e:
@@ -836,7 +892,7 @@ class DataStore:
                             amount REAL NOT NULL,
                             currency TEXT DEFAULT 'KES',
                             customer_phone TEXT,
-                            provider TEXT DEFAULT 'intasend',
+                        provider TEXT DEFAULT 'manual',
                             provider_reference TEXT,
                             account_ref TEXT,
                             status TEXT DEFAULT 'pending',
@@ -897,7 +953,10 @@ class DataStore:
             'exam_results': os.path.join(self.data_dir, 'exam_results.json'),
             'assignments': os.path.join(self.data_dir, 'assignments.json'),
             'school_notices': os.path.join(self.data_dir, 'school_notices.json'),
-            'payments': os.path.join(self.data_dir, 'payments.json')
+            'payments': os.path.join(self.data_dir, 'payments.json'),
+            'recipes': os.path.join(self.data_dir, 'recipes.json'),
+            'recipe_ingredients': os.path.join(self.data_dir, 'recipe_ingredients.json'),
+            'inventory_transactions': os.path.join(self.data_dir, 'inventory_transactions.json')
         }
         
         # Initialize empty files

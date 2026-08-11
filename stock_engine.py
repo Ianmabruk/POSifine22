@@ -398,7 +398,7 @@ class StockEngine:
                             conn.execute("BEGIN")
                             timestamp = datetime.now().isoformat()
 
-                            # Update product stock (delta) with atomic quantity check
+                            # Deduct product stock (delta) with atomic quantity check
                             for product_id, qty in deduction_plan['deductions'].items():
                                 cur.execute(
                                     """
@@ -412,7 +412,7 @@ class StockEngine:
                                     product = product_map.get(product_id, {})
                                     return False, f"Insufficient stock for {product.get('name', product_id)}", None
 
-                            # Update raw materials stock (delta) with atomic quantity check
+                            # Deduct raw materials stock (delta) with atomic quantity check
                             for material_id, qty in deduction_plan.get('raw_material_deductions', {}).items():
                                 if material_id in raw_material_map:
                                     cur.execute(
@@ -426,16 +426,6 @@ class StockEngine:
                                         conn.rollback()
                                         material = raw_material_map.get(material_id, {})
                                         return False, f"Insufficient raw material stock for {material.get('name', material_id)}", None
-
-                            # Update raw materials stock (delta)
-                            for material_id, qty in deduction_plan.get('raw_material_deductions', {}).items():
-                                cur.execute(
-                                    """
-                                    UPDATE raw_materials SET quantity = quantity - %s, updated_at = %s
-                                    WHERE id = %s AND account_id = %s
-                                    """,
-                                    (round_decimal(qty), timestamp, material_id, account_id)
-                                )
 
                             # Create sale record
                             sale_data = {
@@ -485,6 +475,64 @@ class StockEngine:
                                 )
                             )
                             sale_id = cur.fetchone()[0]
+
+                            # Record inventory transactions for product stock deductions
+                            for product_id, qty in deduction_plan['deductions'].items():
+                                product = product_map.get(product_id, {})
+                                original_qty = product.get('quantity', 0)
+                                cur.execute(
+                                    """
+                                    INSERT INTO inventory_transactions (
+                                        account_id, inventory_item_id, transaction_type, quantity, unit,
+                                        before_quantity, after_quantity, reference_type, reference_id,
+                                        reason, created_by, created_at
+                                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    """,
+                                    (
+                                        account_id,
+                                        product_id,
+                                        'SALE_CONSUMPTION',
+                                        round_decimal(qty),
+                                        product.get('unit', 'pcs'),
+                                        round_decimal(original_qty),
+                                        round_decimal(original_qty - qty),
+                                        'sale',
+                                        sale_id,
+                                        f"Auto-deducted from sale #{sale_id}",
+                                        cashier_id,
+                                        timestamp
+                                    )
+                                )
+
+                            # Record inventory transactions for raw material deductions
+                            for material_id, qty in deduction_plan.get('raw_material_deductions', {}).items():
+                                if material_id in raw_material_map:
+                                    material = raw_material_map[material_id]
+                                    original_qty = material.get('quantity', 0)
+                                    cur.execute(
+                                        """
+                                        INSERT INTO inventory_transactions (
+                                            account_id, inventory_item_id, transaction_type, quantity, unit,
+                                            before_quantity, after_quantity, reference_type, reference_id,
+                                            reason, created_by, created_at
+                                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                        """,
+                                        (
+                                            account_id,
+                                            material_id,
+                                            'SALE_CONSUMPTION',
+                                            round_decimal(qty),
+                                            material.get('unit', 'unit'),
+                                            round_decimal(original_qty),
+                                            round_decimal(original_qty - qty),
+                                            'sale',
+                                            sale_id,
+                                            f"Auto-deducted from sale #{sale_id}",
+                                            cashier_id,
+                                            timestamp
+                                        )
+                                    )
+
                             conn.commit()
                     except Exception:
                         conn.rollback()
@@ -506,6 +554,45 @@ class StockEngine:
                                 'quantity': new_qty,
                                 'updated_at': datetime.now().isoformat()
                             }, account_id)
+
+                # Create inventory transactions for stock movements (JSON mode)
+                timestamp = datetime.now().isoformat()
+                for product_id, qty in deduction_plan['deductions'].items():
+                    product = product_map.get(product_id, {})
+                    original_qty = product.get('quantity', 0)
+                    self.ds.create('inventory_transactions', {
+                        'account_id': account_id,
+                        'inventory_item_id': product_id,
+                        'transaction_type': 'SALE_CONSUMPTION',
+                        'quantity': round_decimal(qty),
+                        'unit': product.get('unit', 'pcs'),
+                        'before_quantity': round_decimal(original_qty),
+                        'after_quantity': round_decimal(original_qty - qty),
+                        'reference_type': 'sale',
+                        'reference_id': None,
+                        'reason': f"Auto-deducted from sale",
+                        'created_by': cashier_id,
+                        'created_at': timestamp
+                    })
+
+                for material_id, qty in deduction_plan.get('raw_material_deductions', {}).items():
+                    material = raw_material_map.get(material_id, {})
+                    if material:
+                        original_qty = material.get('quantity', 0)
+                        self.ds.create('inventory_transactions', {
+                            'account_id': account_id,
+                            'inventory_item_id': material_id,
+                            'transaction_type': 'SALE_CONSUMPTION',
+                            'quantity': round_decimal(qty),
+                            'unit': material.get('unit', 'unit'),
+                            'before_quantity': round_decimal(original_qty),
+                            'after_quantity': round_decimal(original_qty - qty),
+                            'reference_type': 'sale',
+                            'reference_id': None,
+                            'reason': f"Auto-deducted from sale",
+                            'created_by': cashier_id,
+                            'created_at': timestamp
+                        })
 
                 logger.info(f"✅ Stock deduction completed successfully")
                 

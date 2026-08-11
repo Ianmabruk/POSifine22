@@ -24,11 +24,3 @@ services:
         value: postgresql://neondb_owner:npg_YMaFfsJ6v5cq@ep-ancient-credit-axnn05nf-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require
       - key: OPENAI_API_KEY
         sync: false
-      - key: INTASEND_SECRET_KEY
-        sync: false
-      - key: INTASEND_PUBLISHABLE_KEY
-        sync: false
-      - key: INTASEND_ENVIRONMENT
-        value: sandbox
-      - key: INTASEND_WEBHOOK_SECRET
-        sync: false

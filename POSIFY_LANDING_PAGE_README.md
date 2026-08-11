@@ -153,7 +153,7 @@ CORS_ORIGIN=http://localhost:5173
 - **Frontend:** React 18, Tailwind CSS 3, Framer Motion, Recharts
 - **Backend:** Python 3.11, Flask, PostgreSQL
 - **Authentication:** JWT (HS256) with refresh tokens
-- **Payment:** IntaSend integration ready
+- **Payment:** Cash, Card, Bank Transfer
 
 ## Design Principles
 

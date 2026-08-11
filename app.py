@@ -39,12 +39,8 @@ from reminders_controller import RemindersController
 from credit_requests_controller import CreditRequestsController
 from discounts_service_fees_controller import DiscountsController, ServiceFeesController
 from business_routes import create_business_routes
-from ai_controller import create_ai_routes
 from message_routes import message_bp
 from notify_service import get_notification_service
-from intasend_service import IntaSendService
-from cloudpay_service import CloudPayService
-from payment_service import PaymentService
 
 # Optional optimization imports - graceful fallback if not available
 DatabaseOptimizer: Any = None
@@ -187,9 +183,6 @@ def create_app() -> Flask:
     cache = CacheService()
     auth_manager = AuthManager(app.config["SECRET_KEY"], session_store=session_store, datastore=datastore, cache_service=cache)
     auth_service = AuthService(auth_manager, datastore=datastore, email_service=notify_service)
-    intasend_service = IntaSendService()
-    cloudpay_service = CloudPayService()
-    payment_service = PaymentService(intasend=intasend_service, datastore=datastore, cloudpay=cloudpay_service)
     admin_controller = AdminController(datastore, stock_engine)
     cashier_controller = CashierController(datastore, stock_engine)
     
@@ -236,10 +229,6 @@ def create_app() -> Flask:
     business_bp = create_business_routes(datastore, auth_manager)
     app.register_blueprint(business_bp, url_prefix="/api/business")
     app.register_blueprint(message_bp)
-
-    # AI routes
-    ai_bp = create_ai_routes(datastore, auth_manager.require_auth)
-    app.register_blueprint(ai_bp)
 
     # Simple in-memory rate limiting for auth endpoints
     login_attempts = {}
@@ -2545,6 +2534,213 @@ def create_app() -> Flask:
         return jsonify(warnings), 200
 
     # ============================================================
+    # Recipes
+    # ============================================================
+
+    @app.get("/api/recipes")
+    @require_auth(auth_manager, datastore)
+    def get_recipes():
+        account_id = request.user.get("account_id")
+        try:
+            recipes = datastore.get_all("recipes", account_id)
+            products = {p.get("id"): p for p in datastore.get_all("products", account_id)}
+            result = []
+            for recipe in recipes:
+                product = products.get(recipe.get("product_id"))
+                result.append({
+                    "id": recipe.get("id"),
+                    "account_id": recipe.get("account_id"),
+                    "product_id": recipe.get("product_id"),
+                    "name": recipe.get("name"),
+                    "active": recipe.get("active"),
+                    "created_at": recipe.get("created_at"),
+                    "updated_at": recipe.get("updated_at"),
+                    "product": {
+                        "id": product.get("id") if product else None,
+                        "name": product.get("name") if product else None,
+                        "price": product.get("price") if product else None,
+                        "unit": product.get("unit") if product else None,
+                    } if product else None,
+                })
+            return jsonify(result), 200
+        except Exception as exc:
+            logger.error("Failed to load recipes: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
+
+    @app.get("/api/recipes/<int:recipe_id>")
+    @require_auth(auth_manager, datastore)
+    def get_recipe(recipe_id: int):
+        account_id = request.user.get("account_id")
+        try:
+            recipe = datastore.get_by_id("recipes", recipe_id, account_id)
+            if not recipe:
+                return jsonify({"error": "Recipe not found"}), 404
+
+            ingredients = [
+                ing for ing in datastore.get_all("recipe_ingredients", account_id)
+                if ing.get("recipe_id") == recipe_id
+            ]
+            return jsonify({
+                "id": recipe.get("id"),
+                "account_id": recipe.get("account_id"),
+                "product_id": recipe.get("product_id"),
+                "name": recipe.get("name"),
+                "active": recipe.get("active"),
+                "created_at": recipe.get("created_at"),
+                "updated_at": recipe.get("updated_at"),
+                "ingredients": ingredients,
+            }), 200
+        except Exception as exc:
+            logger.error("Failed to load recipe: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
+
+    @app.post("/api/recipes")
+    @require_business_admin(auth_manager, datastore)
+    def create_recipe():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        created_by = request.user.get("id")
+
+        product_id = data.get("product_id")
+        name = (data.get("name") or "").strip()
+        ingredients = data.get("ingredients") or []
+        active = data.get("active", True)
+
+        if not product_id:
+            return jsonify({"error": "product_id is required"}), 400
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        if not isinstance(ingredients, list) or len(ingredients) == 0:
+            return jsonify({"error": "ingredients must be a non-empty array"}), 400
+
+        product = datastore.get_by_id("products", int(product_id), account_id)
+        if not product:
+            return jsonify({"error": "Product not found"}), 404
+
+        for ingredient in ingredients:
+            qty = _safe_float(ingredient.get("quantity"))
+            if qty <= 0:
+                return jsonify({"error": "Ingredient quantities must be positive"}), 400
+
+        recipe = datastore.create("recipes", {
+            "account_id": account_id,
+            "product_id": int(product_id),
+            "name": name,
+            "active": bool(active),
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+
+        for ingredient in ingredients:
+            datastore.create("recipe_ingredients", {
+                "recipe_id": recipe.get("id"),
+                "inventory_item_id": int(ingredient.get("inventory_item_id") or ingredient.get("inventoryItemId") or 0),
+                "quantity": _safe_float(ingredient.get("quantity")),
+                "unit": (ingredient.get("unit") or "pcs").strip() or "pcs",
+                "created_at": datetime.utcnow().isoformat(),
+            })
+
+        datastore.update("products", int(product_id), {
+            "is_composite": True,
+            "product_type": "recipe",
+            "recipe": ingredients,
+            "updated_at": datetime.utcnow().isoformat(),
+        }, account_id)
+
+        return jsonify(recipe), 201
+
+    @app.put("/api/recipes/<int:recipe_id>")
+    @require_business_admin(auth_manager, datastore)
+    def update_recipe(recipe_id: int):
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+
+        recipe = datastore.get_by_id("recipes", recipe_id, account_id)
+        if not recipe:
+            return jsonify({"error": "Recipe not found"}), 404
+
+        updates = {}
+        if "name" in data:
+            updates["name"] = (data.get("name") or "").strip()
+        if "active" in data:
+            updates["active"] = bool(data.get("active"))
+        if updates:
+            updates["updated_at"] = datetime.utcnow().isoformat()
+            datastore.update("recipes", recipe_id, updates, account_id)
+
+        if "ingredients" in data:
+            ingredients = data.get("ingredients") or []
+            if not isinstance(ingredients, list) or len(ingredients) == 0:
+                return jsonify({"error": "ingredients must be a non-empty array"}), 400
+
+            for ingredient in ingredients:
+                qty = _safe_float(ingredient.get("quantity"))
+                if qty <= 0:
+                    return jsonify({"error": "Ingredient quantities must be positive"}), 400
+
+            existing = [
+                ing for ing in datastore.get_all("recipe_ingredients", account_id)
+                if ing.get("recipe_id") == recipe_id
+            ]
+            for ing in existing:
+                datastore.delete("recipe_ingredients", ing.get("id"), account_id)
+
+            for ingredient in ingredients:
+                datastore.create("recipe_ingredients", {
+                    "recipe_id": recipe_id,
+                    "inventory_item_id": int(ingredient.get("inventory_item_id") or ingredient.get("inventoryItemId") or 0),
+                    "quantity": _safe_float(ingredient.get("quantity")),
+                    "unit": (ingredient.get("unit") or "pcs").strip() or "pcs",
+                    "created_at": datetime.utcnow().isoformat(),
+                })
+
+            datastore.update("products", recipe.get("product_id"), {
+                "recipe": ingredients,
+                "updated_at": datetime.utcnow().isoformat(),
+            }, account_id)
+
+        updated = datastore.get_by_id("recipes", recipe_id, account_id)
+        return jsonify(updated), 200
+
+    @app.delete("/api/recipes/<int:recipe_id>")
+    @require_business_admin(auth_manager, datastore)
+    def delete_recipe(recipe_id: int):
+        account_id = request.user.get("account_id")
+
+        recipe = datastore.get_by_id("recipes", recipe_id, account_id)
+        if not recipe:
+            return jsonify({"error": "Recipe not found"}), 404
+
+        product_id = recipe.get("product_id")
+
+        stock_deductions = datastore.get_by_field("stock_deductions", "product_id", product_id)
+        sales_items = []
+        for sale in datastore.get_all("sales", account_id):
+            for item in sale.get("items", []):
+                if item.get("product_id") == product_id:
+                    sales_items.append(sale)
+                    break
+        if stock_deductions or sales_items:
+            return jsonify({"error": "Cannot delete recipe: sales or stock deductions exist for this product"}), 400
+
+        existing_ingredients = [
+            ing for ing in datastore.get_all("recipe_ingredients", account_id)
+            if ing.get("recipe_id") == recipe_id
+        ]
+        for ing in existing_ingredients:
+            datastore.delete("recipe_ingredients", ing.get("id"), account_id)
+
+        datastore.delete("recipes", recipe_id, account_id)
+        datastore.update("products", product_id, {
+            "is_composite": False,
+            "product_type": "regular",
+            "recipe": [],
+            "updated_at": datetime.utcnow().isoformat(),
+        }, account_id)
+
+        return jsonify({"message": "Recipe deleted successfully"}), 200
+
+    # ============================================================
     # Batches (Stock Additions)
     # ============================================================
 
@@ -2553,9 +2749,25 @@ def create_app() -> Flask:
     def get_batches():
         account_id = request.user.get("account_id")
         product_id = request.args.get("productId")
+        page = request.args.get("page")
+        limit = request.args.get("limit")
+        sort = request.args.get("sort") or "-created_at"
+        
         try:
-            page = int(request.args.get("page", 1))
-            limit = min(int(request.args.get("limit", 20)), 100)
+            if not page and not limit:
+                batches = datastore.get_all("batches", account_id)
+                batches = _apply_sort(batches, sort)
+                batches = _apply_limit(batches, request.args.get("limit"))
+                if product_id is not None:
+                    try:
+                        product_id_int = int(product_id)
+                    except ValueError:
+                        return jsonify({"error": "Invalid productId"}), 400
+                    batches = [b for b in batches if int(b.get("productid") or b.get("product_id") or 0) == product_id_int]
+                return jsonify(batches), 200
+            
+            page = int(page or 1)
+            limit = min(int(limit or 20), 100)
             
             if product_id is not None:
                 try:
@@ -2568,10 +2780,9 @@ def create_app() -> Flask:
                     account_id=account_id,
                     page=page,
                     limit=limit,
-                    sort="-created_at",
+                    sort=sort,
                     search_fields=["productid", "batchnumber"]
                 )
-                # Filter by product_id after paginated query (since productid is not in search_fields)
                 items = [b for b in result["items"] if int(b.get("productid") or b.get("product_id") or 0) == product_id_int]
                 result["items"] = items
                 result["total"] = len(items)
@@ -2583,7 +2794,7 @@ def create_app() -> Flask:
                     account_id=account_id,
                     page=page,
                     limit=limit,
-                    sort="-created_at",
+                    sort=sort,
                     search_fields=["batchnumber"]
                 )
                 return jsonify(result), 200
@@ -2943,6 +3154,25 @@ def create_app() -> Flask:
                     material_updates["cost_per_unit"] = round(unit_cost, 6)
                 datastore.update("raw_materials", existing_material.get("id"), material_updates, account_id)
                 expense["linked_raw_material_id"] = existing_material.get("id")
+                
+                # Create inventory transaction for purchase
+                try:
+                    datastore.create("inventory_transactions", {
+                        "account_id": account_id,
+                        "inventory_item_id": existing_material.get("id"),
+                        "transaction_type": "PURCHASE",
+                        "quantity": round(quantity, 4),
+                        "unit": unit,
+                        "before_quantity": round(current_qty, 4),
+                        "after_quantity": round(new_qty, 4),
+                        "reference_type": "expense",
+                        "reference_id": None,
+                        "reason": f"Purchased: {ingredient_name}",
+                        "created_by": cashier_id,
+                        "created_at": datetime.utcnow().isoformat()
+                    })
+                except Exception:
+                    pass
             else:
                 unit_cost = amount / quantity if quantity > 0 else 0.0
                 created_material = datastore.create("raw_materials", {
@@ -2956,8 +3186,43 @@ def create_app() -> Flask:
                     "updated_at": None
                 })
                 expense["linked_raw_material_id"] = created_material.get("id")
+                
+                # Create inventory transaction for initial purchase
+                try:
+                    datastore.create("inventory_transactions", {
+                        "account_id": account_id,
+                        "inventory_item_id": created_material.get("id"),
+                        "transaction_type": "PURCHASE",
+                        "quantity": round(quantity, 4),
+                        "unit": unit,
+                        "before_quantity": 0.0,
+                        "after_quantity": round(quantity, 4),
+                        "reference_type": "expense",
+                        "reference_id": None,
+                        "reason": f"Initial purchase: {ingredient_name}",
+                        "created_by": cashier_id,
+                        "created_at": datetime.utcnow().isoformat()
+                    })
+                except Exception:
+                    pass
 
         created = datastore.create("expenses", expense)
+        
+        # Update inventory transactions with expense reference_id
+        if track_stock and created:
+            try:
+                transactions = datastore.get_all("inventory_transactions", account_id)
+                for txn in transactions:
+                    if (txn.get("reference_type") == "expense" and txn.get("reference_id") is None 
+                        and txn.get("inventory_item_id") == expense.get("linked_raw_material_id")
+                        and txn.get("reason", "").startswith("Purchased:")):
+                        datastore.update("inventory_transactions", txn.get("id"), {
+                            "reference_id": created.get("id")
+                        }, account_id)
+                        break
+            except Exception:
+                pass
+        
         sync_manager.broadcast_expense_created(account_id, created)
         if cache.enabled:
             cache.delete(f"cache:stats:{account_id}:all")
@@ -3007,6 +3272,109 @@ def create_app() -> Flask:
             return jsonify(raw_materials), 200
         except Exception as exc:
             logger.error("Failed to load raw materials: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
+
+    @app.post("/api/raw-materials")
+    @require_business_admin(auth_manager, datastore)
+    def create_raw_material():
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "Name is required"}), 400
+        record = {
+            "account_id": account_id,
+            "name": name,
+            "quantity": _safe_float(data.get("quantity") or 0),
+            "unit": (data.get("unit") or "unit").strip() or "unit",
+            "cost_per_unit": _safe_float(data.get("cost_per_unit") or data.get("costPerUnit") or 0),
+            "reorder_level": _safe_float(data.get("reorder_level") or data.get("reorderLevel") or 0),
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        created = datastore.create("raw_materials", record)
+        return jsonify(created), 201
+
+    @app.get("/api/inventory-transactions")
+    @require_auth(auth_manager, datastore)
+    def get_inventory_transactions():
+        account_id = request.user.get("account_id")
+        try:
+            transactions = datastore.get_all("inventory_transactions", account_id)
+            transactions = _apply_sort(transactions, request.args.get("sort") or "-created_at")
+            transactions = _apply_limit(transactions, request.args.get("limit"))
+            
+            # Filter by inventory_item_id if provided
+            inventory_item_id = request.args.get("inventory_item_id")
+            if inventory_item_id:
+                transactions = [t for t in transactions if t.get("inventory_item_id") == int(inventory_item_id)]
+            
+            # Filter by transaction_type if provided
+            transaction_type = request.args.get("transaction_type")
+            if transaction_type:
+                transactions = [t for t in transactions if t.get("transaction_type") == transaction_type]
+            
+            return jsonify(transactions), 200
+        except Exception as exc:
+            logger.error("Failed to load inventory transactions: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
+
+    @app.get("/api/admin/analytics/top-products")
+    @require_business_admin(auth_manager, datastore)
+    def get_top_products():
+        account_id = request.user.get("account_id")
+        period = (request.args.get("period") or "month").strip().lower()
+        
+        try:
+            sales = datastore.get_all("sales", account_id)
+            products = {p.get("id"): p for p in datastore.get_all("products", account_id)}
+            
+            now = datetime.utcnow()
+            if period == "today":
+                start_date = now.date()
+            elif period == "week":
+                start_date = (now - timedelta(days=now.weekday())).date()
+            elif period == "30days":
+                start_date = (now - timedelta(days=30)).date()
+            else:  # month
+                start_date = now.replace(day=1).date()
+            
+            product_sales = {}
+            for sale in sales:
+                created_at = sale.get("created_at") or ""
+                if not created_at:
+                    continue
+                try:
+                    sale_date = datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).date()
+                except Exception:
+                    continue
+                if sale_date < start_date:
+                    continue
+                
+                for item in sale.get("items", []):
+                    pid = item.get("product_id") or item.get("productId")
+                    qty = _safe_float(item.get("quantity"))
+                    if not pid or qty <= 0:
+                        continue
+                    product_sales[pid] = product_sales.get(pid, 0) + qty
+            
+            result = []
+            for pid, qty in product_sales.items():
+                product = products.get(pid)
+                if not product:
+                    continue
+                result.append({
+                    "productId": pid,
+                    "name": product.get("name"),
+                    "image": product.get("image"),
+                    "quantitySold": qty,
+                    "unit": product.get("unit") or "pcs",
+                })
+            
+            result.sort(key=lambda x: x["quantitySold"], reverse=True)
+            return jsonify(result[:20]), 200
+        except Exception as exc:
+            logger.error("Failed to load top products: %s", exc, exc_info=True)
             return jsonify({"error": "Server error - please try again"}), 500
 
     # ============================================================
@@ -3264,20 +3632,6 @@ def create_app() -> Flask:
         if not success:
             return jsonify({"success": False, "error": error or "Failed to complete sale"}), 400
 
-        if payment_method == "mpesa":
-            datastore.update("sales", sale.get("id"), {"payment_status": "pending"}, account_id)
-            sale["payment_status"] = "pending"
-            return jsonify({
-                "success": True,
-                "saleId": sale.get("id"),
-                "sale": sale,
-                "paymentStatus": "pending",
-                "paymentMethod": "mpesa",
-                "message": "Sale created. Awaiting M-Pesa payment confirmation.",
-                "timestamp": datetime.utcnow().isoformat(),
-                "processingTime": "ok"
-            }), 201
-
         # === PHASE 3: Build response using the pre-validated plan ===
         product_map = deduction_plan.get("product_map", {})
         raw_material_map = deduction_plan.get("raw_material_map", {})
@@ -3423,125 +3777,6 @@ def create_app() -> Flask:
             "timestamp": datetime.utcnow().isoformat(),
             "processingTime": "ok"
         }), 201
-
-    # ============================================================
-    # M-Pesa Payments (IntaSend STK Push)
-    # ============================================================
-
-    @app.post("/api/payments/mpesa/stk-push")
-    @require_auth(auth_manager, datastore)
-    def mpesa_stk_push():
-        account_id = request.user.get("account_id")
-        cashier_id = request.user.get("id")
-        data = request.get_json() or {}
-        sale_id = data.get("saleId") or data.get("sale_id")
-        phone = (data.get("phone") or "").strip()
-        provider = (data.get("provider") or "intasend").strip().lower()
-
-        if provider not in ("intasend", "cloudpay"):
-            return jsonify({"error": "Unsupported payment provider. Use 'intasend' or 'cloudpay'."}), 400
-
-        if not sale_id or not phone:
-            return jsonify({"error": "saleId and phone are required"}), 400
-
-        sale = datastore.get_by_id("sales", sale_id, account_id)
-        if not sale:
-            return jsonify({"error": "Sale not found"}), 404
-
-        if str(sale.get("account_id")) != str(account_id):
-            return jsonify({"error": "Access denied"}), 403
-
-        amount = _safe_float(sale.get("total"))
-        if amount <= 0:
-            return jsonify({"error": "Invalid sale amount"}), 400
-
-        success, error, payment_data = payment_service.initiate_mpesa_payment(
-            account_id=account_id,
-            sale_id=sale_id,
-            cashier_id=cashier_id,
-            amount=amount,
-            phone_number=phone,
-            provider=provider,
-        )
-
-        if not success:
-            status_code = 409 if "already in progress" in (error or "").lower() else 400
-            return jsonify({"error": error}), status_code
-
-        return jsonify({
-            "success": True,
-            "payment": payment_data,
-            "saleId": sale_id,
-            "amount": amount,
-        }), 200
-
-    @app.post("/api/payments/intasend/webhook")
-    def intasend_webhook():
-        raw_body = request.get_data(as_text=True)
-        payload = request.get_json(silent=True) or {}
-        headers = {k.lower(): v for k, v in request.headers.items()}
-
-        if not intasend_service.validate_webhook(payload, headers):
-            logger.warning("IntaSend webhook validation failed")
-            return jsonify({"error": "Invalid webhook"}), 403
-
-        provider_reference = (
-            payload.get("reference")
-            or payload.get("invoice_number")
-            or payload.get("tracking_id")
-            or headers.get("x-intasend-reference")
-            or ""
-        )
-        if not provider_reference:
-            logger.warning("IntaSend webhook missing reference: %s", payload)
-            return jsonify({"error": "Missing reference"}), 400
-
-        success, error, result = payment_service.handle_webhook("intasend", provider_reference, payload)
-        if not success:
-            return jsonify({"error": error or "Webhook handling failed"}), 400
-
-        return jsonify({"success": True, "data": result}), 200
-
-    @app.post("/api/payments/cloudpay/webhook")
-    def cloudpay_webhook():
-        raw_body = request.get_data()
-        headers = {k.lower(): v for k, v in request.headers.items()}
-
-        is_valid, event = cloudpay_service.validate_webhook(raw_body, headers)
-        if not is_valid:
-            logger.warning("CloudPay webhook validation failed")
-            return jsonify({"error": "Invalid webhook signature"}), 403
-
-        reference = event.get("reference") or event.get("TransactionReference") or ""
-        if not reference:
-            logger.warning("CloudPay webhook missing reference: %s", event)
-            return jsonify({"error": "Missing reference"}), 400
-
-        success, error, result = payment_service.handle_webhook("cloudpay", reference, event)
-        if not success:
-            logger.error("CloudPay webhook handling failed: %s", error)
-            return jsonify({"error": error or "Webhook handling failed"}), 400
-
-        return jsonify({"success": True, "data": result}), 200
-
-    @app.get("/api/payments/cloudpay/status/<reference>")
-    def cloudpay_payment_status(reference: str):
-        account_id = request.user.get("account_id") if hasattr(request, "user") else None
-        result = cloudpay_service.verify_payment_status(reference)
-        if not result.get("success"):
-            status_code = result.get("status_code", 400)
-            return jsonify({"error": result.get("error", "Failed to fetch status")}), status_code
-
-        return jsonify(result.get("data", {})), 200
-
-    @app.get("/api/payments/<int:payment_id>/status")
-    @require_auth(auth_manager, datastore)
-    def get_payment_status(payment_id: int):
-        account_id = request.user.get("account_id")
-        payment = payment_service.get_payment_status(payment_id, account_id)
-        if not payment:
-            return jsonify({"error": "Payment not found"}), 404
-        return jsonify(payment), 200
 
     # ============================================================
     # Stock Deductions History (for Stock Dashboard)
