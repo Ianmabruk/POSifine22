@@ -85,14 +85,15 @@ class AuthService:
         if normalized_plan not in valid_plans:
             normalized_plan = "trial"
 
+        is_custom = normalized_plan == "custom"
         account = {
             "id": account_id,
             "owner_email": email,
             "business_name": name,
-            "plan": normalized_plan,
-            "is_active": True,
+            "plan": "custom" if is_custom else normalized_plan,
+            "is_active": True if not is_custom else True,
             "is_locked": False,
-            "trial_ends_at": trial_end,
+            "trial_ends_at": trial_end if not is_custom else None,
             "subscription_ends_at": None,
             "created_at": now,
             "business_logo": None,
@@ -101,7 +102,7 @@ class AuthService:
             "screen_lock_password": secrets.token_hex(8),
             "days_used": 0,
             "last_activity_date": None,
-            "requested_trial": trial_end is not None,
+            "requested_trial": trial_end is not None and not is_custom,
             "business_type": business_type,
         }
 
@@ -113,8 +114,8 @@ class AuthService:
             "email": email,
             "password_hash": self.manager.hash_password(password),
             "name": name,
-            "role": "admin",
-            "permissions": self.manager._default_permissions("admin"),
+            "role": "cashier" if is_custom else "admin",
+            "permissions": self.manager._default_permissions("cashier" if is_custom else "admin"),
             "pin": None,
             "cashier_pin": None,
             "is_active": True,
@@ -125,7 +126,7 @@ class AuthService:
             "last_login": None,
             "hourly_rate": 0.0,
             "business_type": business_type,
-            "business_role": "admin",
+            "business_role": "cashier" if is_custom else "admin",
         }
 
         if self.datastore:
@@ -309,46 +310,40 @@ class AuthService:
             return {}
         owner_user = self.datastore.get_user_by_email(email)
         if owner_user:
-            update_data = {
-                "role": "main_admin",
-                "business_role": "main_admin",
-                "business_type": "main_admin",
-                "is_active": True,
-                "is_locked": False,
-            }
-            if password_hash:
-                update_data["password_hash"] = password_hash
-            self.datastore.update(
-                "users", owner_user.get("id"), update_data, owner_user.get("account_id")
-            )
-            return self.datastore.get_user_by_email(email) or owner_user
+            if owner_user.get("role") in {"main_admin", "owner"}:
+                update_data = {"is_active": True, "is_locked": False}
+                if password_hash:
+                    update_data["password_hash"] = password_hash
+                self.datastore.update(
+                    "users", owner_user.get("id"), update_data, owner_user.get("account_id")
+                )
+                return self.datastore.get_user_by_email(email) or owner_user
+            return {}
 
-        account = self.datastore.get_account_by_email(email)
-        if not account:
-            account_id = f"acc_{uuid.uuid4().hex[:12]}"
-            account = {
-                "id": account_id,
-                "owner_email": email,
-                "business_name": "Main Admin",
-                "plan": "owner",
-                "is_active": True,
-                "is_locked": False,
-                "trial_ends_at": None,
-                "subscription_ends_at": None,
-                "created_at": datetime.utcnow().isoformat(),
-                "business_logo": None,
-                "currency": "KES",
-                "tax_rate": 0.0,
-                "screen_lock_password": "2005",
-                "days_used": 0,
-                "last_activity_date": None,
-                "requested_trial": False,
-                "business_type": "main_admin",
-            }
-            self.datastore.create("accounts", account)
+        account_id = f"acc_{uuid.uuid4().hex[:12]}"
+        account = {
+            "id": account_id,
+            "owner_email": email,
+            "business_name": "Main Admin",
+            "plan": "owner",
+            "is_active": True,
+            "is_locked": False,
+            "trial_ends_at": None,
+            "subscription_ends_at": None,
+            "created_at": datetime.utcnow().isoformat(),
+            "business_logo": None,
+            "currency": "KES",
+            "tax_rate": 0.0,
+            "screen_lock_password": "2005",
+            "days_used": 0,
+            "last_activity_date": None,
+            "requested_trial": False,
+            "business_type": "main_admin",
+        }
+        self.datastore.create("accounts", account)
 
         return self.datastore.create("users", {
-            "account_id": account.get("id"),
+            "account_id": account_id,
             "email": email,
             "password_hash": password_hash,
             "name": display_name,

@@ -62,7 +62,8 @@ class DataStore:
         'room_bookings', 'appointments', 'prescriptions', 'table_orders',
         'students', 'exam_results', 'assignments', 'school_notices',
         'admin_support_messages', 'messages', 'stock_deductions',
-        'role_assignments', 'settings', 'email_templates', 'payments'
+        'role_assignments', 'settings', 'email_templates', 'payments',
+        'custom_plan_requests', 'email_logs'
     }
     
     ALLOWED_FILTER_FIELDS = {
@@ -724,24 +725,63 @@ class DataStore:
                 
                 # Inventory transactions table
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS inventory_transactions (
+                     CREATE TABLE IF NOT EXISTS inventory_transactions (
+                         id SERIAL PRIMARY KEY,
+                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                         inventory_item_id INTEGER NOT NULL,
+                         transaction_type TEXT NOT NULL,
+                         quantity REAL NOT NULL,
+                         unit TEXT DEFAULT 'pcs',
+                         before_quantity REAL NOT NULL,
+                         after_quantity REAL NOT NULL,
+                         reference_type TEXT,
+                         reference_id INTEGER,
+                         reason TEXT,
+                         created_by INTEGER,
+                         created_at TEXT NOT NULL
+                     )
+                """)
+
+                # Custom plan requests table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS custom_plan_requests (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        inventory_item_id INTEGER NOT NULL,
-                        transaction_type TEXT NOT NULL,
-                        quantity REAL NOT NULL,
-                        unit TEXT DEFAULT 'pcs',
-                        before_quantity REAL NOT NULL,
-                        after_quantity REAL NOT NULL,
-                        reference_type TEXT,
-                        reference_id INTEGER,
-                        reason TEXT,
+                        business_name TEXT NOT NULL,
+                        contact_name TEXT NOT NULL,
+                        email TEXT NOT NULL,
+                        phone TEXT,
+                        industry TEXT,
+                        expected_users INTEGER,
+                        expected_branches INTEGER,
+                        features_needed TEXT,
+                        additional_notes TEXT,
+                        status TEXT DEFAULT 'pending',
+                        admin_notes TEXT,
+                        reviewed_by INTEGER,
+                        reviewed_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+
+                # Email logs table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS email_logs (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        recipient TEXT NOT NULL,
+                        subject TEXT NOT NULL,
+                        template_type TEXT,
+                        status TEXT DEFAULT 'pending',
+                        failure_reason TEXT,
+                        sent_at TEXT,
                         created_by INTEGER,
                         created_at TEXT NOT NULL
                     )
                 """)
-                
-                # Create indexes for performance
+
+                 # Create indexes for performance
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)")
@@ -789,6 +829,10 @@ class DataStore:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_item ON inventory_transactions(inventory_item_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_type ON inventory_transactions(transaction_type)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_created ON inventory_transactions(created_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_account ON custom_plan_requests(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_status ON custom_plan_requests(status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_email_logs_account ON email_logs(account_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_email_logs_status ON email_logs(status)")
                 
                 # ============================================================
                 # MIGRATIONS: Add new columns to existing tables

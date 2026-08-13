@@ -24,3 +24,13 @@ services:
         value: postgresql://neondb_owner:npg_YMaFfsJ6v5cq@ep-ancient-credit-axnn05nf-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require
       - key: OPENAI_API_KEY
         sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: FROM_EMAIL
+        value: ianmabruk3@gmail.com
+      - key: FROM_NAME
+        value: POSIFNE LTD
+      - key: REPLY_TO
+        value: ianmabruk3@gmail.com
+      - key: ADMIN_EMAIL
+        value: ianmabruk3@gmail.com

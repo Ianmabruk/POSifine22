@@ -319,6 +319,158 @@ class EmailService:
         
         return self.send_email(to_email, subject, html_content)
 
+    def send_payment_reminder(self, to_email: str, business_name: str, plan: str, amount_due: Optional[float] = None, due_date: Optional[str] = None, support_email: Optional[str] = None) -> Dict[str, Any]:
+        """Payment reminder email from Main Admin."""
+        subject = f"Payment Reminder — {business_name}"
+        support_email = support_email or self.reply_to
+        
+        amount_text = f"KES {amount_due:,.2f}" if amount_due is not None else "Please contact support for your current balance."
+        due_text = f"<strong>Due date:</strong> {due_date}<br/>" if due_date else ""
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family: 'Inter', -apple-system, sans-serif; margin: 0; padding: 0; background-color: #f8fafc;">
+            <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                <div style="background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%); padding: 32px 40px; text-align: center;">
+                    <div style="width: 48px; height: 48px; background: white; border-radius: 12px; margin: 0 auto 16px; display: flex; align-items: center; justify-content: center;">
+                        <span style="font-size: 24px; font-weight: 800; color: #2563EB;">P</span>
+                    </div>
+                    <h1 style="color: white; font-size: 24px; font-weight: 700; margin: 0 0 8px;">Payment Reminder</h1>
+                    <p style="color: rgba(255,255,255,0.85); font-size: 14px; margin: 0;">Regarding your {plan} service</p>
+                </div>
+                
+                <div style="padding: 40px;">
+                    <p style="color: #334155; font-size: 16px; line-height: 1.7; margin: 0 0 20px;">
+                        Hello <strong>{business_name}</strong>,
+                    </p>
+                    <p style="color: #475569; font-size: 15px; line-height: 1.7; margin: 0 0 24px;">
+                        This is a friendly reminder regarding your <strong>{plan}</strong> service.
+                    </p>
+                    
+                    <div style="background: #F8FAFC; border-radius: 12px; padding: 20px; margin: 24px 0; border: 1px solid #E2E8F0;">
+                        <p style="color: #475569; font-size: 14px; margin: 0 0 8px;"><strong>Business:</strong> {business_name}</p>
+                        <p style="color: #475569; font-size: 14px; margin: 0 0 8px;"><strong>Plan:</strong> {plan}</p>
+                        {due_text}
+                        <p style="color: #475569; font-size: 14px; margin: 0;"><strong>Amount:</strong> {amount_text}</p>
+                    </div>
+                    
+                    <p style="color: #475569; font-size: 15px; line-height: 1.7; margin: 0 0 24px;">
+                        If you have already completed your payment, please disregard this message.
+                    </p>
+                    
+                    <p style="color: #475569; font-size: 15px; line-height: 1.7; margin: 0 0 24px;">
+                        If you need assistance, please contact our support team at 
+                        <a href="mailto:{support_email}" style="color: #2563EB; text-decoration: none;">{support_email}</a>.
+                    </p>
+                </div>
+                
+                <div style="background: #F8FAFC; padding: 24px 40px; text-align: center; border-top: 1px solid #E2E8F0;">
+                    <p style="color: #94A3B8; font-size: 12px; margin: 0;">© {datetime.utcnow().year} POSIFY. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return self.send_email(to_email, subject, html_content)
+
+    def send_custom_plan_notification(self, to_email: str, business_name: str, contact_name: str, industry: str, requirements: str) -> Dict[str, Any]:
+        """Notify Main Admin of a new custom plan request."""
+        subject = f"New Custom Plan Request — {business_name}"
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family: 'Inter', -apple-system, sans-serif; margin: 0; padding: 0; background-color: #f8fafc;">
+            <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                <div style="background: linear-gradient(135deg, #7C3AED 0%, #6D28D9 100%); padding: 32px 40px; text-align: center;">
+                    <div style="width: 48px; height: 48px; background: white; border-radius: 12px; margin: 0 auto 16px; display: flex; align-items: center; justify-content: center;">
+                        <span style="font-size: 24px; font-weight: 800; color: #7C3AED;">P</span>
+                    </div>
+                    <h1 style="color: white; font-size: 24px; font-weight: 700; margin: 0 0 8px;">New Custom Plan Request</h1>
+                    <p style="color: rgba(255,255,255,0.85); font-size: 14px; margin: 0;">A new custom plan request requires your review</p>
+                </div>
+                
+                <div style="padding: 40px;">
+                    <p style="color: #334155; font-size: 16px; line-height: 1.7; margin: 0 0 20px;">
+                        A new custom plan request has been submitted and is pending review.
+                    </p>
+                    
+                    <div style="background: #F8FAFC; border-radius: 12px; padding: 20px; margin: 24px 0; border: 1px solid #E2E8F0;">
+                        <p style="color: #475569; font-size: 14px; margin: 0 0 8px;"><strong>Business:</strong> {business_name}</p>
+                        <p style="color: #475569; font-size: 14px; margin: 0 0 8px;"><strong>Contact:</strong> {contact_name}</p>
+                        <p style="color: #475569; font-size: 14px; margin: 0 0 8px;"><strong>Email:</strong> {to_email}</p>
+                        <p style="color: #475569; font-size: 14px; margin: 0 0 8px;"><strong>Industry:</strong> {industry or 'N/A'}</p>
+                        <p style="color: #475569; font-size: 14px; margin: 0;"><strong>Requirements:</strong> {requirements or 'N/A'}</p>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 32px 0;">
+                        <a href="https://posify22.onrender.com/main.admin" style="background: #7C3AED; color: white; padding: 14px 32px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 15px; display: inline-block;">
+                            Review Request
+                        </a>
+                    </div>
+                </div>
+                
+                <div style="background: #F8FAFC; padding: 24px 40px; text-align: center; border-top: 1px solid #E2E8F0;">
+                    <p style="color: #94A3B8; font-size: 12px; margin: 0;">© {datetime.utcnow().year} POSIFY. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return self.send_email(to_email, subject, html_content)
+
+    def send_custom_plan_received(self, to_email: str, name: str, business_name: str) -> Dict[str, Any]:
+        """Confirm to customer that custom plan request was received."""
+        subject = "Custom Plan Request Received — POSIFY"
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family: 'Inter', -apple-system, sans-serif; margin: 0; padding: 0; background-color: #f8fafc;">
+            <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                <div style="background: linear-gradient(135deg, #7C3AED 0%, #6D28D9 100%); padding: 32px 40px; text-align: center;">
+                    <div style="width: 48px; height: 48px; background: white; border-radius: 12px; margin: 0 auto 16px; display: flex; align-items: center; justify-content: center;">
+                        <span style="font-size: 24px; font-weight: 800; color: #7C3AED;">P</span>
+                    </div>
+                    <h1 style="color: white; font-size: 24px; font-weight: 700; margin: 0 0 8px;">Request Received</h1>
+                    <p style="color: rgba(255,255,255,0.85); font-size: 14px; margin: 0;">Thank you for your interest in POSIFY</p>
+                </div>
+                
+                <div style="padding: 40px;">
+                    <p style="color: #334155; font-size: 16px; line-height: 1.7; margin: 0 0 20px;">
+                        Hi <strong>{name}</strong>,
+                    </p>
+                    <p style="color: #475569; font-size: 15px; line-height: 1.7; margin: 0 0 24px;">
+                        Thank you for your interest in a custom plan for <strong>{business_name}</strong>.
+                        Our team will review your requirements and contact you shortly.
+                    </p>
+                    
+                    <div style="background: #F0F9FF; border-radius: 12px; padding: 20px; margin: 24px 0; border: 1px solid #BAE6FD;">
+                        <p style="color: #0369A1; font-size: 14px; margin: 0;">
+                            <strong>What happens next?</strong><br/>
+                            Our team will review your request and reach out within 1-2 business days to discuss your custom requirements.
+                        </p>
+                    </div>
+                    
+                    <p style="color: #475569; font-size: 15px; line-height: 1.7; margin: 0 0 24px;">
+                        If you need immediate assistance, please reply to this email or contact us at 
+                        <a href="mailto:{self.reply_to}" style="color: #2563EB; text-decoration: none;">{self.reply_to}</a>.
+                    </p>
+                </div>
+                
+                <div style="background: #F8FAFC; padding: 24px 40px; text-align: center; border-top: 1px solid #E2E8F0;">
+                    <p style="color: #94A3B8; font-size: 12px; margin: 0;">© {datetime.utcnow().year} POSIFY. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return self.send_email(to_email, subject, html_content)
+
 
 # Singleton instance
 email_service = EmailService()

@@ -103,9 +103,9 @@ def create_business_routes(datastore, auth_manager):
             user = request.user
             account_id = user.get('account_id')
             
-            # Verify user is admin
+            # Verify user is business admin (not main admin or cashier)
             if user.get('role') != 'admin':
-                return jsonify({'error': 'Only admins can select business type'}), 403
+                return jsonify({'error': 'Only business admins can select business type'}), 403
             
             # Verify user is on Pro or Custom plan
             account = datastore.get_by_id('accounts', account_id)
@@ -220,9 +220,9 @@ def create_business_routes(datastore, auth_manager):
             admin_user = request.user
             account_id = admin_user.get('account_id')
             
-            # Verify user is admin
+            # Verify user is business admin
             if admin_user.get('role') != 'admin':
-                return jsonify({'error': 'Only admins can create business users'}), 403
+                return jsonify({'error': 'Only business admins can create business users'}), 403
             
             # Get account and verify Pro/Custom plan
             account = datastore.get_by_id('accounts', account_id)
@@ -352,9 +352,9 @@ def create_business_routes(datastore, auth_manager):
             admin_user = request.user
             account_id = admin_user.get('account_id')
             
-            # Verify user is admin
+            # Verify user is business admin
             if admin_user.get('role') != 'admin':
-                return jsonify({'error': 'Only admins can update business users'}), 403
+                return jsonify({'error': 'Only business admins can update business users'}), 403
             
             # Get the user to update
             user_to_update = datastore.get_by_id('users', user_id, account_id)
@@ -412,9 +412,9 @@ def create_business_routes(datastore, auth_manager):
             admin_user = request.user
             account_id = admin_user.get('account_id')
             
-            # Verify user is admin
+            # Verify user is business admin
             if admin_user.get('role') != 'admin':
-                return jsonify({'error': 'Only admins can delete business users'}), 403
+                return jsonify({'error': 'Only business admins can delete business users'}), 403
             
             # Get the user to delete
             user_to_delete = datastore.get_by_id('users', user_id, account_id)

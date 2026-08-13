@@ -41,6 +41,7 @@ from discounts_service_fees_controller import DiscountsController, ServiceFeesCo
 from business_routes import create_business_routes
 from message_routes import message_bp
 from notify_service import get_notification_service
+from email_service import email_service as email_service_instance
 
 # Optional optimization imports - graceful fallback if not available
 DatabaseOptimizer: Any = None
@@ -937,6 +938,8 @@ def create_app() -> Flask:
         valid_plans = {"starter", "business", "enterprise", "custom", "free", "trial"}
         if plan_id not in valid_plans:
             return jsonify({"error": "Invalid plan"}), 400
+        if plan_id == "custom":
+            return jsonify({"error": "Custom plan requests must be submitted through the custom plan request form. Our team will contact you."}), 400
         method = data.get("payment_method", "mpesa")
         now = datetime.utcnow()
         new_end = (now + timedelta(days=30)).isoformat()
@@ -965,6 +968,64 @@ def create_app() -> Flask:
                 {"id": "enterprise", "name": "Enterprise", "price": 4999, "currency": "KES", "trial_days": 30},
             ]
         }), 200
+
+    @app.post("/api/custom-plan-request")
+    def custom_plan_request():
+        data = request.get_json() or {}
+        business_name = (data.get("businessName") or "").strip()
+        contact_name = (data.get("contactName") or "").strip()
+        email = (data.get("email") or "").strip().lower()
+        phone = (data.get("phone") or "").strip()
+        industry = (data.get("industry") or "").strip()
+        expected_users = data.get("expectedUsers")
+        expected_branches = data.get("expectedBranches")
+        features_needed = (data.get("featuresNeeded") or "").strip()
+        additional_notes = (data.get("additionalNotes") or "").strip()
+
+        if not business_name or not contact_name or not email:
+            return jsonify({"error": "Business name, contact name, and email are required"}), 400
+
+        account_id = None
+        if hasattr(request, "user") and request.user:
+            account_id = request.user.get("account_id")
+
+        now = datetime.utcnow().isoformat()
+        record = {
+            "business_name": business_name,
+            "contact_name": contact_name,
+            "email": email,
+            "phone": phone,
+            "industry": industry,
+            "expected_users": int(expected_users) if expected_users else None,
+            "expected_branches": int(expected_branches) if expected_branches else None,
+            "features_needed": features_needed,
+            "additional_notes": additional_notes,
+            "status": "pending",
+            "admin_notes": None,
+            "reviewed_by": None,
+            "reviewed_at": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if account_id:
+            record["account_id"] = account_id
+
+        created = datastore.create("custom_plan_requests", record)
+
+        # Notify main admin asynchronously
+        try:
+            main_admin_email = os.environ.get("MAIN_ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL") or "support@micrologic.co.ke"
+            email_service_instance.send_custom_plan_notification(
+                to_email=main_admin_email,
+                business_name=business_name,
+                contact_name=contact_name,
+                industry=industry,
+                requirements=features_needed or additional_notes,
+            )
+        except Exception as exc:
+            logger.warning("Custom plan notification email failed: %s", exc)
+
+        return jsonify({"success": True, "message": "Custom plan request received. Our team will contact you shortly.", "request_id": created.get("id")}), 201
 
     @app.post("/api/trials/create")
     def create_trial():
@@ -1263,45 +1324,39 @@ def create_app() -> Flask:
         def _ensure_main_admin_user(email_value: str, password_hash: str, display_name: str = "Main Admin"):
             owner_user = datastore.get_user_by_email(email_value)
             if owner_user:
-                update_data = {
-                    "role": "main_admin",
-                    "business_role": "main_admin",
-                    "business_type": "main_admin",
-                    "is_active": True,
-                    "is_locked": False,
-                }
-                if password_hash:
-                    update_data["password_hash"] = password_hash
-                datastore.update("users", owner_user.get("id"), update_data, owner_user.get("account_id"))
-                owner_user.update(update_data)
-                return owner_user
+                if owner_user.get("role") in {"main_admin", "owner"}:
+                    update_data = {"is_active": True, "is_locked": False}
+                    if password_hash:
+                        update_data["password_hash"] = password_hash
+                    datastore.update("users", owner_user.get("id"), update_data, owner_user.get("account_id"))
+                    owner_user.update(update_data)
+                    return owner_user
+                return None
 
-            account = datastore.get_account_by_email(email_value)
-            if not account:
-                account_id = f"acc_{uuid.uuid4().hex[:12]}"
-                account = {
-                    "id": account_id,
-                    "owner_email": email_value,
-                    "business_name": "Main Admin",
-                    "plan": "owner",
-                    "is_active": True,
-                    "is_locked": False,
-                    "trial_ends_at": None,
-                    "subscription_ends_at": None,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "business_logo": None,
-                    "currency": "KES",
-                    "tax_rate": 0.0,
-                    "screen_lock_password": "",
-                    "days_used": 0,
-                    "last_activity_date": None,
-                    "requested_trial": False,
-                    "business_type": "main_admin"
-                }
-                datastore.create("accounts", account)
+            account_id = f"acc_{uuid.uuid4().hex[:12]}"
+            account = {
+                "id": account_id,
+                "owner_email": email_value,
+                "business_name": "Main Admin",
+                "plan": "owner",
+                "is_active": True,
+                "is_locked": False,
+                "trial_ends_at": None,
+                "subscription_ends_at": None,
+                "created_at": datetime.utcnow().isoformat(),
+                "business_logo": None,
+                "currency": "KES",
+                "tax_rate": 0.0,
+                "screen_lock_password": "",
+                "days_used": 0,
+                "last_activity_date": None,
+                "requested_trial": False,
+                "business_type": "main_admin"
+            }
+            datastore.create("accounts", account)
 
             return datastore.create("users", {
-                "account_id": account.get("id"),
+                "account_id": account_id,
                 "email": email_value,
                 "password_hash": password_hash,
                 "name": display_name,
@@ -2112,6 +2167,130 @@ def create_app() -> Flask:
             "success": True,
             "message": "Payment status cleared. The business can now access the service.",
         }), 200
+
+    # ============================================================
+    # Custom Plan Requests
+    # ============================================================
+
+    @app.get("/api/main-admin/custom-plan-requests")
+    def main_admin_get_custom_plan_requests():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        requests = datastore.get_all("custom_plan_requests")
+        requests = sorted(requests, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify(requests), 200
+
+    @app.post("/api/main-admin/custom-plan-requests/<int:request_id>/review")
+    def main_admin_review_custom_plan_request(request_id: int):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        record = datastore.get_by_id("custom_plan_requests", request_id)
+        if not record:
+            return jsonify({"error": "Request not found"}), 404
+
+        data = request.get_json() or {}
+        status = (data.get("status") or "").strip().lower()
+        valid_statuses = {"pending", "under_review", "contacted", "approved", "rejected"}
+        if status not in valid_statuses:
+            return jsonify({"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"}), 400
+
+        updates = {
+            "status": status,
+            "admin_notes": data.get("admin_notes"),
+            "reviewed_by": user.get("id"),
+            "reviewed_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        if status == "approved":
+            account_id = record.get("account_id")
+            if account_id:
+                datastore.update("accounts", account_id, {
+                    "plan": "custom",
+                    "is_active": True,
+                    "is_locked": False,
+                    "subscription_ends_at": (datetime.utcnow() + timedelta(days=30)).isoformat(),
+                    "trial_ends_at": None,
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
+
+        updated = datastore.update("custom_plan_requests", request_id, updates)
+        if not updated:
+            return jsonify({"error": "Failed to update request"}), 400
+
+        _log_audit("review_custom_plan_request", user, f"custom_plan_request:{request_id}", {
+            "status": status,
+            "business_name": record.get("business_name"),
+        })
+
+        return jsonify({"success": True, "status": status}), 200
+
+    @app.post("/api/main-admin/businesses/<string:business_id>/send-payment-reminder")
+    def main_admin_send_payment_reminder(business_id: str):
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+
+        account = datastore.get_by_id("accounts", business_id)
+        if not account:
+            return jsonify({"error": "Business not found"}), 404
+
+        data = request.get_json() or {}
+        subject = data.get("subject") or f"Payment Reminder — {account.get('business_name')}"
+        message = data.get("message")
+        amount_due = data.get("amountDue")
+        due_date = data.get("dueDate")
+        recipient = account.get("owner_email") or data.get("recipient")
+
+        if not recipient:
+            return jsonify({"error": "Recipient email is required"}), 400
+
+        if not notify_service.email_enabled:
+            return jsonify({"error": "Email service is not configured"}), 503
+
+        try:
+            result = email_service_instance.send_payment_reminder(
+                to_email=recipient,
+                business_name=account.get("business_name", ""),
+                plan=account.get("plan", ""),
+                amount_due=float(amount_due) if amount_due is not None else None,
+                due_date=due_date,
+                support_email=os.environ.get("REPLY_TO", "support@micrologic.co.ke"),
+            )
+        except Exception as exc:
+            logger.error("Payment reminder email failed: %s", exc)
+            return jsonify({"error": "Failed to send email"}), 500
+
+        datastore.create("email_logs", {
+            "account_id": business_id,
+            "recipient": recipient,
+            "subject": subject,
+            "template_type": "payment_reminder",
+            "status": "sent" if result.get("success") else "failed",
+            "failure_reason": result.get("error") if not result.get("success") else None,
+            "sent_at": datetime.utcnow().isoformat() if result.get("success") else None,
+            "created_by": user.get("id"),
+            "created_at": datetime.utcnow().isoformat(),
+        })
+
+        _log_audit("send_payment_reminder", user, f"account:{business_id}", {
+            "recipient": recipient,
+            "subject": subject,
+        })
+
+        return jsonify({"success": result.get("success", False), "message": result.get("error") or "Email sent"}), 200 if result.get("success") else 500
+
+    @app.get("/api/main-admin/email-logs")
+    def main_admin_get_email_logs():
+        user, error_response = _require_main_admin()
+        if error_response:
+            return error_response
+        logs = datastore.get_all("email_logs")
+        logs = sorted(logs, key=lambda x: x.get("created_at") or "", reverse=True)
+        return jsonify(logs), 200
 
     # ============================================================
     # Admin Support Messaging (Admin -> Main Admin)
@@ -4614,52 +4793,39 @@ def create_app() -> Flask:
 
         try:
             existing = datastore.get_user_by_email(bootstrap_email)
-            if existing and existing.get("role") in {"main_admin", "owner"}:
+            if existing:
+                if existing.get("role") in {"main_admin", "owner"}:
+                    if persisted_hash:
+                        datastore.update("users", existing.get("id"), {"password_hash": persisted_hash}, existing.get("account_id"))
+                    return
                 return
 
             persisted_hash = bootstrap_hash if bootstrap_hash and (bootstrap_hash.startswith("$2a$") or bootstrap_hash.startswith("$2b$") or bootstrap_hash.startswith("$2y$")) else auth_manager.hash_password(bootstrap_password)
             
-            owner_user = datastore.get_user_by_email(bootstrap_email)
-            if owner_user:
-                update_data = {
-                    "role": "main_admin",
-                    "business_role": "main_admin",
-                    "business_type": "main_admin",
-                    "is_active": True,
-                    "is_locked": False,
-                }
-                if persisted_hash:
-                    update_data["password_hash"] = persisted_hash
-                datastore.update("users", owner_user.get("id"), update_data, owner_user.get("account_id"))
-                logger.info(f"Updated main admin user: {bootstrap_email}")
-                return
-
-            account = datastore.get_account_by_email(bootstrap_email)
-            if not account:
-                account_id = f"acc_{uuid.uuid4().hex[:12]}"
-                account = {
-                    "id": account_id,
-                    "owner_email": bootstrap_email,
-                    "business_name": "Main Admin",
-                    "plan": "owner",
-                    "is_active": True,
-                    "is_locked": False,
-                    "trial_ends_at": None,
-                    "subscription_ends_at": None,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "business_logo": None,
-                    "currency": "KES",
-                    "tax_rate": 0.0,
-                    "screen_lock_password": "",
-                    "days_used": 0,
-                    "last_activity_date": None,
-                    "requested_trial": False,
-                    "business_type": "main_admin"
-                }
-                datastore.create("accounts", account)
+            account_id = f"acc_{uuid.uuid4().hex[:12]}"
+            account = {
+                "id": account_id,
+                "owner_email": bootstrap_email,
+                "business_name": "Main Admin",
+                "plan": "owner",
+                "is_active": True,
+                "is_locked": False,
+                "trial_ends_at": None,
+                "subscription_ends_at": None,
+                "created_at": datetime.utcnow().isoformat(),
+                "business_logo": None,
+                "currency": "KES",
+                "tax_rate": 0.0,
+                "screen_lock_password": "",
+                "days_used": 0,
+                "last_activity_date": None,
+                "requested_trial": False,
+                "business_type": "main_admin"
+            }
+            datastore.create("accounts", account)
 
             datastore.create("users", {
-                "account_id": account.get("id"),
+                "account_id": account_id,
                 "email": bootstrap_email,
                 "password_hash": persisted_hash,
                 "name": "Main Admin",

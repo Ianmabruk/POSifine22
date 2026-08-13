@@ -153,7 +153,7 @@ class require_main_admin:
 
 
 class require_business_admin:
-    """Decorator to require business admin role."""
+    """Decorator to require business admin role (NOT main_admin)."""
 
     def __init__(self, manager: AuthManager, datastore=None):
         self.manager = manager
@@ -166,7 +166,27 @@ class require_business_admin:
             result = self._auth(f)(*args, **kwargs)
             if isinstance(result, tuple) and len(result) == 2 and result[1] >= 400:
                 return result
-            if request.user.get("role") not in {"admin", "main_admin", "owner"}:
-                return jsonify({"error": "Admin access required"}), 403
+            if request.user.get("role") != "admin":
+                return jsonify({"error": "Business admin access required"}), 403
+            return result
+        return decorated
+
+
+class require_cashier:
+    """Decorator to require cashier role."""
+
+    def __init__(self, manager: AuthManager, datastore=None):
+        self.manager = manager
+        self.datastore = datastore
+        self._auth = require_auth(manager, datastore)
+
+    def __call__(self, f: Callable) -> Callable:
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            result = self._auth(f)(*args, **kwargs)
+            if isinstance(result, tuple) and len(result) == 2 and result[1] >= 400:
+                return result
+            if request.user.get("role") != "cashier":
+                return jsonify({"error": "Cashier access required"}), 403
             return result
         return decorated
