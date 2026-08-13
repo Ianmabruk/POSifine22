@@ -7,6 +7,7 @@ API endpoints for managing business types, roles, and Pro/Custom plan features.
 from flask import Blueprint, request, jsonify
 from functools import wraps
 import logging
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +253,7 @@ def create_business_routes(datastore, auth_manager):
             data = request.get_json()
             email = (data.get('email') or '').strip().lower()
             name = (data.get('name') or '').strip()
-            password = data.get('password', 'changeme123')  # Default password
+            password = data.get('password') or secrets.token_hex(8)
             business_role = data.get('business_role') or data.get('businessRole') or 'cashier'
             profile_picture = data.get('profile_picture') or data.get('profilePicture')
             cashier_pin = data.get('cashier_pin') or data.get('pin')

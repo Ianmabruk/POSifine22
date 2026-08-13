@@ -55,10 +55,6 @@ class require_auth:
                     if not self.datastore:
                         return jsonify({"error": "Database not available"}), 500
                     user = self.datastore.get_by_id("users", user_id, account_id)
-                    if not user and user_id:
-                        user = self.datastore.get_by_id("users", user_id, None)
-                        if user:
-                            account_id = user.get("account_id")
                     if not user:
                         return jsonify({"error": "User not found"}), 401
                     account = self.datastore.get_by_id("accounts", account_id)
