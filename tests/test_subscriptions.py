@@ -23,7 +23,7 @@ class TestTrialDuration:
         assert success is True
         account_id = result['user']['account_id']
         account = datastore.get_by_id('accounts', account_id)
-        assert account['plan'] == 'trial'
+        assert account['plan'] == 'starter'
         trial_end = account.get('trial_ends_at')
         assert trial_end is not None
         end_date = datetime.fromisoformat(trial_end)
@@ -115,8 +115,8 @@ class TestRoleEscalationPrevention:
 class TestMainAdminIsolation:
     """Test main admin cannot access business endpoints"""
 
-    def test_main_admin_can_create_products(self, auth_service, client, datastore):
-        """Test main_admin can create products via business endpoint"""
+    def test_main_admin_cannot_create_products(self, auth_service, client, datastore):
+        """Test main_admin cannot create products via business endpoint"""
         main_admin = auth_service.ensure_main_admin(
             email='mainadmin2@example.com',
             password_hash=auth_service.hash_password('MainPass123!'),
@@ -127,7 +127,7 @@ class TestMainAdminIsolation:
             data=json.dumps({'name': 'Main Admin Product', 'price': 10, 'quantity': 5}),
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
         )
-        assert response.status_code == 201
+        assert response.status_code == 403
 
     def test_main_admin_cannot_renew_subscription(self, auth_service, client, datastore):
         """Test main_admin cannot use business subscription renew"""

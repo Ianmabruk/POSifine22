@@ -1027,6 +1027,32 @@ def create_app() -> Flask:
 
         return jsonify({"success": True, "message": "Custom plan request received. Our team will contact you shortly.", "request_id": created.get("id")}), 201
 
+    @app.get("/api/ai/status")
+    @require_auth(auth_manager, datastore)
+    def ai_status():
+        return jsonify({"status": "ok", "mode": "basic"}), 200
+
+    @app.get("/api/ai/forecast")
+    @require_auth(auth_manager, datastore)
+    def ai_forecast():
+        account_id = request.user.get("account_id")
+        periods = int(request.args.get("periods", 4))
+        sales = datastore.get_all("sales", account_id)
+        sales = [s for s in sales if s.get("total") and s.get("created_at")]
+        sales = sorted(sales, key=lambda s: s.get("created_at", ""))[-30:]
+        if not sales:
+            labels = [f"Period {i+1}" for i in range(periods)]
+            return jsonify({"labels": labels, "revenue": [0] * periods, "profit": [0] * periods}), 200
+
+        totals = [float(s.get("total") or 0) for s in sales]
+        cogs = [float(s.get("total_cost") or 0) for s in sales]
+        avg_revenue = sum(totals) / len(totals) if totals else 0
+        avg_profit = sum(totals[i] - cogs[i] for i in range(len(totals))) / len(totals) if totals else 0
+        labels = [f"Period {i+1}" for i in range(periods)]
+        revenue = [round(avg_revenue, 2)] * periods
+        profit = [round(avg_profit, 2)] * periods
+        return jsonify({"labels": labels, "revenue": revenue, "profit": profit}), 200
+
     @app.post("/api/trials/create")
     def create_trial():
         data = request.get_json() or {}
@@ -1048,11 +1074,11 @@ def create_app() -> Flask:
                 "started_at": datetime.utcnow().isoformat(),
             }
         }), 201
- 
+  
     # ============================================================
     # Account User Management (Admin/Cashier Management)
     # ============================================================
- 
+  
     def _require_account_admin():
         current = request.user
         if current.get("role") not in {"admin"}:
@@ -1283,6 +1309,44 @@ def create_app() -> Flask:
             return jsonify({"error": "User not found"}), 404
         auth_manager.invalidate_user_session_cache(user_id, current.get("account_id"))
         return jsonify({"message": "User active status updated"}), 200
+
+    @app.post("/api/clear-data")
+    @require_auth(auth_manager, datastore)
+    def clear_data():
+        if request.user.get("role") not in {"admin", "main_admin", "owner"}:
+            return jsonify({"error": "Only admins can clear data"}), 403
+
+        data = request.get_json() or {}
+        clear_type = data.get("type", "all")
+        account_id = request.user.get("account_id")
+        cleared = []
+
+        if clear_type in ("all", "sales"):
+            sales = datastore.get_all("sales", account_id)
+            for sale in sales:
+                datastore.delete("sales", sale.get("id"), account_id)
+            cleared.append("sales")
+
+        if clear_type in ("all", "expenses"):
+            expenses = datastore.get_all("expenses", account_id)
+            for expense in expenses:
+                datastore.delete("expenses", expense.get("id"), account_id)
+            cleared.append("expenses")
+
+        if clear_type in ("all", "products"):
+            products = datastore.get_all("products", account_id)
+            for product in products:
+                datastore.delete("products", product.get("id"), account_id)
+            cleared.append("products")
+
+        if clear_type in ("all", "users"):
+            users = datastore.get_all("users", account_id)
+            for user in users:
+                if user.get("role") not in {"main_admin", "owner"}:
+                    datastore.delete("users", user.get("id"), account_id)
+            cleared.append("users")
+
+        return jsonify({"success": True, "cleared": cleared}), 200
 
     # ============================================================
     # Main Admin (Owner)
@@ -4792,6 +4856,7 @@ def create_app() -> Flask:
             return
 
         try:
+            persisted_hash = bootstrap_hash if bootstrap_hash and (bootstrap_hash.startswith("$2a$") or bootstrap_hash.startswith("$2b$") or bootstrap_hash.startswith("$2y$")) else auth_manager.hash_password(bootstrap_password)
             existing = datastore.get_user_by_email(bootstrap_email)
             if existing:
                 if existing.get("role") in {"main_admin", "owner"}:
@@ -4800,8 +4865,6 @@ def create_app() -> Flask:
                     return
                 return
 
-            persisted_hash = bootstrap_hash if bootstrap_hash and (bootstrap_hash.startswith("$2a$") or bootstrap_hash.startswith("$2b$") or bootstrap_hash.startswith("$2y$")) else auth_manager.hash_password(bootstrap_password)
-            
             account_id = f"acc_{uuid.uuid4().hex[:12]}"
             account = {
                 "id": account_id,
