@@ -102,7 +102,7 @@ def test_account(datastore, auth_service):
         email='test@example.com',
         password='TestPassword123!',
         name='Test User',
-        plan='basic'
+        plan='starter'
     )
     if success:
         return {

@@ -25,7 +25,7 @@ router.get("/businesses", authenticateJWT, authorize(["main_admin"]), async (_re
         success: true,
         businesses: [
             { id: 1, business_name: 'Fresh Mart', owner_email: 'admin@freshmart.co.ke', plan: 'business', is_active: true, created_at: '2024-01-15', user_count: 5 },
-            { id: 2, business_name: 'Tech Store', owner_email: 'info@techstore.co.ke', plan: 'enterprise', is_active: true, created_at: '2024-02-20', user_count: 12 },
+            { id: 2, business_name: 'Tech Store', owner_email: 'info@techstore.co.ke', plan: 'custom', is_active: true, created_at: '2024-02-20', user_count: 12 },
             { id: 3, business_name: 'Cafe Corner', owner_email: 'owner@cafecorner.co.ke', plan: 'starter', is_active: false, created_at: '2024-03-10', user_count: 2 },
         ]
     });
@@ -36,7 +36,7 @@ router.get("/users", authenticateJWT, authorize(["main_admin"]), async (_req, re
         success: true,
         users: [
             { id: 1, email: 'admin@freshmart.co.ke', role: 'admin', plan: 'business', created_at: '2024-01-15' },
-            { id: 2, email: 'info@techstore.co.ke', role: 'admin', plan: 'enterprise', created_at: '2024-02-20' },
+            { id: 2, email: 'info@techstore.co.ke', role: 'admin', plan: 'custom', created_at: '2024-02-20' },
         ]
     });
 });

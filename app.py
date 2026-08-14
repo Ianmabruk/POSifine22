@@ -935,7 +935,7 @@ def create_app() -> Flask:
             return error_response
         data = request.get_json() or {}
         plan_id = data.get("plan_id") or "business"
-        valid_plans = {"starter", "business", "enterprise", "custom", "free", "trial"}
+        valid_plans = {"starter", "business", "custom", "free", "trial"}
         if plan_id not in valid_plans:
             return jsonify({"error": "Invalid plan"}), 400
         if plan_id == "custom":
@@ -963,9 +963,9 @@ def create_app() -> Flask:
     def subscription_plans():
         return jsonify({
             "plans": [
-                {"id": "starter", "name": "Starter", "price": 999, "currency": "KES", "trial_days": 30},
-                {"id": "business", "name": "Business", "price": 2499, "currency": "KES", "trial_days": 30},
-                {"id": "enterprise", "name": "Enterprise", "price": 4999, "currency": "KES", "trial_days": 30},
+                {"id": "starter", "name": "Starter", "price": 1000, "currency": "KES", "trial_days": 30, "max_admins": 1, "max_cashiers": 1},
+                {"id": "business", "name": "Business", "price": 1500, "currency": "KES", "trial_days": 30, "max_admins": None, "max_cashiers": None},
+                {"id": "custom", "name": "Custom", "price": None, "currency": "KES", "trial_days": 0, "max_admins": None, "max_cashiers": None},
             ]
         }), 200
 
@@ -1057,7 +1057,7 @@ def create_app() -> Flask:
     def create_trial():
         data = request.get_json() or {}
         package_type = data.get("packageType") or data.get("plan") or "business"
-        valid_plans = {"starter", "business", "enterprise", "custom"}
+        valid_plans = {"starter", "business", "custom"}
         if package_type not in valid_plans:
             return jsonify({"error": "Invalid plan"}), 400
 
@@ -1081,7 +1081,7 @@ def create_app() -> Flask:
   
     def _require_account_admin():
         current = request.user
-        if current.get("role") not in {"admin"}:
+        if current.get("role") not in {"admin", "main_admin", "owner"}:
             return None, (jsonify({"error": "Admin access required"}), 403)
         return current, None
  
@@ -1152,14 +1152,25 @@ def create_app() -> Flask:
         if existing:
             return jsonify({"error": "User with this email already exists"}), 400
 
-        pin_value = (data.get("cashier_pin") or data.get("cashierPIN") or data.get("pin") or "").strip() or None
-        if pin_value and len(pin_value) < 4:
-            return jsonify({"error": "PIN must be at least 4 digits"}), 400
+        account = datastore.get_by_id("accounts", current.get("account_id"))
+        plan = str(account.get("plan") or "free").lower() if account else "free"
         role_value = "cashier"
         if data.get("role"):
             requested_role = (data.get("role") or "").strip().lower()
             if requested_role in {"cashier"}:
                 role_value = requested_role
+        if plan in {"starter"}:
+            all_account_users = datastore.get_all("users", current.get("account_id")) or []
+            admin_count = sum(1 for u in all_account_users if u.get("role") in {"admin", "main_admin", "owner"})
+            cashier_count = sum(1 for u in all_account_users if u.get("role") == "cashier")
+            if role_value == "admin" and admin_count >= 1:
+                return jsonify({"error": "Starter plan allows only 1 admin. Upgrade to Business to add more admins."}), 403
+            if role_value == "cashier" and cashier_count >= 1:
+                return jsonify({"error": "Starter plan allows only 1 cashier. Upgrade to Business to add more cashiers."}), 403
+
+        pin_value = (data.get("cashier_pin") or data.get("cashierPIN") or data.get("pin") or "").strip() or None
+        if pin_value and len(pin_value) < 4:
+            return jsonify({"error": "PIN must be at least 4 digits"}), 400
         permissions_value = data.get("permissions") or AuthManager._default_permissions(role_value)
 
         user_payload = {
@@ -1594,8 +1605,8 @@ def create_app() -> Flask:
         data = request.get_json() or {}
         plan_value = str(data.get("plan") or "free").lower()
         plan_limits = {
-            "basic": 10,
-            "ultra": 10
+            "starter": 10,
+            "business": 10
         }
         plan_limit = plan_limits.get(plan_value)
         if plan_limit is not None:
@@ -2525,7 +2536,7 @@ def create_app() -> Flask:
         profile = {
             "account_id": account_id,
             "business_type": (g.account or {}).get("business_type") or "general",
-            "plan": (g.account or {}).get("plan") or "basic",
+            "plan": (g.account or {}).get("plan") or "starter",
             "created_at": now,
             "settings": data
         }
@@ -3143,6 +3154,38 @@ def create_app() -> Flask:
         except Exception as exc:
             logger.error("Failed to load sales: %s", exc, exc_info=True)
             return jsonify({"error": "Server error - please try again"}), 500
+
+    @app.delete("/api/sales/<int:sale_id>")
+    @require_auth(auth_manager, datastore)
+    def delete_sale(sale_id: int):
+        account_id = request.user.get("account_id")
+        sale = datastore.get_by_id("sales", sale_id, account_id)
+        if not sale:
+            return jsonify({"error": "Sale not found"}), 404
+        success = datastore.delete("sales", sale_id, account_id)
+        if not success:
+            return jsonify({"error": "Failed to delete sale"}), 400
+        return jsonify({"message": "Sale deleted successfully"}), 200
+
+    @app.post("/api/sales/bulk-delete")
+    @require_auth(auth_manager, datastore)
+    def bulk_delete_sales():
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+        sale_ids = data.get("saleIds") or []
+        if not sale_ids:
+            return jsonify({"error": "No sale IDs provided"}), 400
+        deleted = 0
+        for sid in sale_ids:
+            try:
+                sid_int = int(sid)
+            except (TypeError, ValueError):
+                continue
+            sale = datastore.get_by_id("sales", sid_int, account_id)
+            if sale:
+                datastore.delete("sales", sid_int, account_id)
+                deleted += 1
+        return jsonify({"success": True, "deletedCount": deleted}), 200
 
     @app.get("/api/stats")
     @require_auth(auth_manager, datastore)

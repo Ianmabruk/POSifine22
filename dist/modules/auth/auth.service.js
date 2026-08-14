@@ -53,7 +53,7 @@ export const AuthService = {
         }
         // Create a super admin user record or use a special ID
         const superAdminId = "main_admin_" + Date.now();
-        const accessToken = issueAccessToken({ id: superAdminId, role: "main_admin", plan: "ultra" });
+        const accessToken = issueAccessToken({ id: superAdminId, role: "main_admin", plan: "business" });
         const refreshTokenVal = issueRefreshToken({ id: superAdminId, deviceId });
         const refreshTokenHash = await hashPassword(refreshTokenVal);
         const expiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000);
@@ -67,7 +67,7 @@ export const AuthService = {
         catch (e) {
             // Continue even if session storage fails
         }
-        const user = { id: superAdminId, email, role: "main_admin", plan: "ultra" };
+        const user = { id: superAdminId, email, role: "main_admin", plan: "business" };
         return { user, accessToken, refreshToken: refreshTokenVal };
     },
     async refresh(refreshToken, deviceId) {

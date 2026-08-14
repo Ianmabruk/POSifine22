@@ -611,7 +611,7 @@ class DataStore:
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE UNIQUE,
                         business_type TEXT NOT NULL,
-                        plan TEXT DEFAULT 'basic',
+                        plan TEXT DEFAULT 'starter',
                         created_at TEXT NOT NULL,
                         settings JSONB DEFAULT '{}'
                     )

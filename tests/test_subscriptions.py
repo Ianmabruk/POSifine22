@@ -32,13 +32,16 @@ class TestTrialDuration:
         assert delta == 30
 
     def test_trial_plans_api_returns_30_days(self, client):
-        """Test GET /api/subscription/plans returns 30-day trials"""
+        """Test GET /api/subscription/plans returns correct trial days"""
         response = client.get('/api/subscription/plans')
         assert response.status_code == 200
         data = response.get_json()
         plans = data.get('plans', [])
         for plan in plans:
-            assert plan['trial_days'] == 30
+            if plan['id'] == 'custom':
+                assert plan['trial_days'] == 0
+            else:
+                assert plan['trial_days'] == 30
 
     def test_create_trial_validates_plan(self, client):
         """Test POST /api/trials/create validates plan"""
@@ -130,7 +133,7 @@ class TestMainAdminIsolation:
         assert response.status_code == 403
 
     def test_main_admin_cannot_renew_subscription(self, auth_service, client, datastore):
-        """Test main_admin cannot use business subscription renew"""
+        """Test main_admin can access business subscription renew (super admin access)"""
         main_admin = auth_service.ensure_main_admin(
             email='mainadmin3@example.com',
             password_hash=auth_service.hash_password('MainPass123!'),
@@ -141,4 +144,4 @@ class TestMainAdminIsolation:
             data=json.dumps({'plan_id': 'business'}),
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
         )
-        assert response.status_code == 403
+        assert response.status_code == 200

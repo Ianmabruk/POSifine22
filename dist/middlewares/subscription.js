@@ -1,5 +1,5 @@
 export const requireUltra = (req, res, next) => {
-    if (req.user?.plan !== "ultra") {
+    if (req.user?.plan !== "business") {
         return res.status(403).json({
             success: false,
             error: "Ultra subscription required"

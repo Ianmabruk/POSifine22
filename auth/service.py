@@ -80,8 +80,8 @@ class AuthService:
         account_id = f"acc_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow().isoformat()
         trial_end = (datetime.utcnow() + timedelta(days=30)).isoformat()
-        normalized_plan = (plan or "trial").strip().lower()
-        valid_plans = {"starter", "business", "enterprise", "custom", "trial", "free"}
+        normalized_plan = (plan or "starter").strip().lower()
+        valid_plans = {"starter", "business", "custom", "trial", "free"}
         if normalized_plan not in valid_plans:
             normalized_plan = "trial"
 

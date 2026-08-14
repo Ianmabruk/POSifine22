@@ -112,9 +112,9 @@ def create_business_routes(datastore, auth_manager):
             account = datastore.get_by_id('accounts', account_id)
             plan_value = account.get('plan') if account else ''
             plan = str(plan_value).lower()
-            is_pro_plan = plan in ['pro', 'custom', 'pro_petroleum', 'pro-petroleum', 'propetroleum', '3000', '3400']
+            is_pro_plan = plan in ['business', 'custom']
             if not account or not is_pro_plan:
-                return jsonify({'error': 'Business type selection is only available for Pro and Custom plans'}), 403
+                return jsonify({'error': 'Business type selection is only available for Business and Custom plans'}), 403
             
             data = request.get_json()
             business_type = data.get('business_type')
@@ -139,7 +139,7 @@ def create_business_routes(datastore, auth_manager):
             profile_data = {
                 'account_id': account_id,
                 'business_type': business_type,
-                'plan': account.get('plan', 'pro'),
+                'plan': account.get('plan', 'starter'),
                 'owner_id': user['id'],
                 'settings': data.get('settings', {}),
                 'features': get_features_for_business_type(business_type)
@@ -229,15 +229,15 @@ def create_business_routes(datastore, auth_manager):
             account = datastore.get_by_id('accounts', account_id)
             plan_value = account.get('plan') if account else ''
             plan = str(plan_value).lower()
-            is_pro_plan = plan in ['pro', 'custom', 'pro_petroleum', 'pro-petroleum', 'propetroleum', '3000', '3400']
+            is_pro_plan = plan in ['business', 'custom']
             if not account or not is_pro_plan:
-                return jsonify({'error': 'Business users are only available for Pro and Custom plans'}), 403
+                return jsonify({'error': 'Business users are only available for Business and Custom plans'}), 403
 
             # Enforce user limits for plan governance consistency.
-            # Basic/Ultra are capped at 10 users per account.
+            # Starter/Business are capped at 10 users per account.
             plan_limits = {
-                'basic': 10,
-                'ultra': 10
+                'starter': 10,
+                'business': 10
             }
             plan_limit = plan_limits.get(plan)
             if plan_limit is not None:
@@ -388,8 +388,17 @@ def create_business_routes(datastore, auth_manager):
                 if not validate_business_role(business_type, update_data['business_role']):
                     return jsonify({'error': 'Invalid business role'}), 400
             
+            # Hash PIN values if provided
+            if 'pin' in update_data or 'cashier_pin' in update_data:
+                import bcrypt
+                pin_val = update_data.get('pin') or update_data.get('cashier_pin')
+                if pin_val:
+                    hashed = bcrypt.hashpw(str(pin_val).encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                    update_data['pin'] = hashed
+                    update_data['cashier_pin'] = hashed
+            
             # Update user
-            datastore.update('users', user_id, update_data)
+            datastore.update('users', user_id, update_data, account_id)
             
             # Get updated user
             updated_user = datastore.get_by_id('users', user_id, account_id)
@@ -435,7 +444,7 @@ def create_business_routes(datastore, auth_manager):
                 return jsonify({'error': 'Cannot delete other admins'}), 403
             
             # Delete user
-            datastore.delete('users', user_id)
+            datastore.delete('users', user_id, account_id)
             
             logger.info(f"✅ Deleted business user: {user_to_delete.get('email')}")
             

@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 export interface JWTPayload {
   id: string;
   role: "admin" | "cashier" | "main_admin";
-  plan: "basic" | "ultra";
+  plan: "starter" | "business" | "custom";
   accountId: string;
 }
 

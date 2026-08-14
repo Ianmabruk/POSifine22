@@ -213,7 +213,7 @@ class TestRoleArchitecture:
             email='business@example.com',
             password='ValidPassword123!',
             name='Business Owner',
-            plan='basic'
+            plan='starter'
         )
         assert success is True
         assert result['user']['role'] == 'admin'
@@ -246,7 +246,7 @@ class TestRoleArchitecture:
             email='bizadmin@example.com',
             password='ValidPassword123!',
             name='Biz Admin',
-            plan='basic'
+            plan='starter'
         )
         assert success is True
         token = result['token']
@@ -278,13 +278,13 @@ class TestRoleArchitecture:
             email='tenant_a@example.com',
             password='ValidPassword123!',
             name='Tenant A Admin',
-            plan='basic'
+            plan='starter'
         )
         success_b, _, result_b = auth_service.signup(
             email='tenant_b@example.com',
             password='ValidPassword123!',
             name='Tenant B Admin',
-            plan='basic'
+            plan='starter'
         )
         assert success_a and success_b
         token_a = result_a['token']

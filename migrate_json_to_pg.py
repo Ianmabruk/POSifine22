@@ -213,7 +213,7 @@ def migrate():
         for c in companies:
             cid = c.get('id')
             name = c.get('name') or c.get('companyName') or 'Imported Company'
-            plan = c.get('plan') or c.get('pricing') or 'basic'
+            plan = c.get('plan') or c.get('pricing') or 'starter'
             created_at = c.get('createdAt') or c.get('created_at') or None
             cur.execute(
                 """

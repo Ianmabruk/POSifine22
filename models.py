@@ -45,9 +45,9 @@ class PaymentMethod(Enum):
 class SubscriptionPlan(Enum):
     """Subscription plans"""
     FREE = "free"
-    BASIC = "basic"
-    PRO = "pro"
-    ULTRA = "ultra"
+    STARTER = "starter"
+    BUSINESS = "business"
+    CUSTOM = "custom"
 
 
 # ============================================================

@@ -24,7 +24,7 @@ const generateToken = (user) => {
 // ===== Signup =====
 export const signup = async (req, res) => {
   try {
-    const { name, email, password, plan = "basic" } = req.body || {};
+    const { name, email, password, plan = "starter" } = req.body || {};
 
     // Validation
     if (!name || !email || !password) {
@@ -49,7 +49,7 @@ export const signup = async (req, res) => {
     const hashedPin = await bcrypt.hash(pin.toString(), 10);
 
     // Assign role based on plan
-    const role = plan === "ultra" ? "admin" : "cashier";
+    const role = plan === "business" ? "admin" : "cashier";
 
     // Create user
     const user = await User.create({
