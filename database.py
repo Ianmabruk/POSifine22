@@ -1000,7 +1000,12 @@ class DataStore:
             'payments': os.path.join(self.data_dir, 'payments.json'),
             'recipes': os.path.join(self.data_dir, 'recipes.json'),
             'recipe_ingredients': os.path.join(self.data_dir, 'recipe_ingredients.json'),
-            'inventory_transactions': os.path.join(self.data_dir, 'inventory_transactions.json')
+            'inventory_transactions': os.path.join(self.data_dir, 'inventory_transactions.json'),
+            'customers': os.path.join(self.data_dir, 'customers.json'),
+            'custom_plan_requests': os.path.join(self.data_dir, 'custom_plan_requests.json'),
+            'email_logs': os.path.join(self.data_dir, 'email_logs.json'),
+            'messages': os.path.join(self.data_dir, 'messages.json'),
+            'stock_deductions': os.path.join(self.data_dir, 'stock_deductions.json')
         }
         
         # Initialize empty files
