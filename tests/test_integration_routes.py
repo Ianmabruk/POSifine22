@@ -324,6 +324,38 @@ class TestUserManagementRoutes:
                 headers=auth_headers)
             assert response.status_code in [200, 204, 400, 404]
 
+    def test_create_user_hashes_pin_and_hides_from_response(self, client, auth_headers, auth_service, datastore):
+        response = client.post('/api/users',
+            data=json.dumps({
+                'name': 'Cashier PIN Test',
+                'email': 'cashierpin@example.com',
+                'password': 'CashierPass123!',
+                'role': 'cashier',
+                'pin': '1234',
+                'cashier_pin': '1234'
+            }),
+            headers=auth_headers
+        )
+        assert response.status_code == 201
+        data = json.loads(response.data)
+        assert data.get('role') == 'cashier'
+        assert 'pin' not in data, 'PIN should not be exposed in create response'
+        assert 'cashier_pin' not in data, 'cashier_pin should not be exposed in create response'
+        assert 'password_hash' not in data, 'password_hash should not be exposed in create response'
+
+        user = datastore.get_user_by_email('cashierpin@example.com')
+        assert user is not None
+        stored_pin = user.get('pin') or user.get('cashier_pin') or ''
+        assert stored_pin.startswith('$2a$') or stored_pin.startswith('$2b$'), 'PIN should be bcrypt hashed in database'
+
+        pin_response = client.post('/api/auth/pin-login',
+            data=json.dumps({'email': 'cashierpin@example.com', 'pin': '1234'}),
+            content_type='application/json')
+        assert pin_response.status_code == 200
+        pin_data = json.loads(pin_response.data)
+        assert 'token' in pin_data
+        assert 'user' in pin_data
+
 
 class TestTenantIsolation:
     """Test multi-tenant data isolation"""

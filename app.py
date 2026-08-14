@@ -1180,8 +1180,8 @@ def create_app() -> Flask:
             "name": name,
             "role": role_value,
             "permissions": permissions_value,
-            "pin": pin_value,
-            "cashier_pin": pin_value,
+            "pin": auth_manager.hash_pin(pin_value) if pin_value else None,
+            "cashier_pin": auth_manager.hash_pin(pin_value) if pin_value else None,
             "is_active": True,
             "is_locked": False,
             "screen_locked": False,
@@ -1201,6 +1201,8 @@ def create_app() -> Flask:
             return jsonify({"error": "Unable to create cashier right now. Please try again."}), 500
 
         created.pop("password_hash", None)
+        created.pop("pin", None)
+        created.pop("cashier_pin", None)
         return jsonify(created), 201
 
     @app.put("/api/users/<int:user_id>")
@@ -1231,8 +1233,8 @@ def create_app() -> Flask:
             pin_text = str(pin_value).strip()
             if len(pin_text) < 4:
                 return jsonify({"error": "PIN must be at least 4 digits"}), 400
-            updates["pin"] = pin_text
-            updates["cashier_pin"] = pin_text
+            updates["pin"] = auth_manager.hash_pin(pin_text)
+            updates["cashier_pin"] = auth_manager.hash_pin(pin_text)
 
         if "active" in data:
             updates["is_active"] = bool(data.get("active"))
