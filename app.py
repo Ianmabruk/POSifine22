@@ -666,34 +666,6 @@ def create_app() -> Flask:
         _log_activity("login_failed", None, None, {"email": data.get("email"), "reason": error})
         return jsonify({"error": error or "Invalid credentials"}), 401
 
-    @app.post("/api/auth/pin-login")
-    def pin_login():
-        is_limited, retry_after = _is_rate_limited()
-        if is_limited:
-            return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
-
-        data = request.get_json() or {}
-        success, error, result = auth_service.pin_login(
-            email=data.get("email"),
-            pin=data.get("pin")
-        )
-        if success:
-            _reset_login_attempts()
-            refresh_token = auth_manager.create_refresh_session(
-                user=result.get("user") or {},
-                user_agent=request.headers.get("User-Agent", ""),
-                ip_address=_rate_limit_key()
-            )
-            csrf_token = uuid.uuid4().hex
-            result["refreshToken"] = refresh_token
-            result["csrfToken"] = csrf_token
-            _log_activity("pin_login", result.get("user", {}).get("account_id"), result.get("user", {}).get("id"))
-            resp = jsonify(result)
-            _set_auth_cookies(resp, refresh_token, csrf_token, "auth")
-            return resp, 200
-        _record_failed_login()
-        return jsonify({"error": error or "Invalid credentials"}), 401
-
     @app.post("/api/auth/refresh")
     def refresh_token():
         is_limited, retry_after = _is_refresh_rate_limited()
@@ -765,32 +737,8 @@ def create_app() -> Flask:
             return jsonify({"message": "Too many failed attempts. Try again later."}), 429
 
         data = request.get_json() or {}
-        pin = (data.get("pin") or "").strip()
-        if not pin:
-            return jsonify({"message": "PIN is required"}), 400
-
         user = g.user
-        account = g.account
 
-        # Accept either the user's personal PIN (hashed) or the account screen-lock password (plaintext)
-        user_pin = (user.get("pin") or user.get("cashier_pin") or "").strip()
-        account_pin = (account.get("screen_lock_password") or "") if account else ""
-
-        if not user_pin and not account_pin:
-            return jsonify({"message": "No PIN configured. Please set a screen lock password in settings."}), 401
-
-        pin_valid = False
-        if user_pin:
-            pin_valid = auth_manager.verify_pin(pin, user_pin)
-        if not pin_valid and account_pin:
-            pin_valid = pin == account_pin
-
-        if not pin_valid:
-            cache.set_int(_failed_key, fails + 1, ttl_seconds=300)
-            return jsonify({"message": "Incorrect PIN"}), 401
-
-        # Clear fail counter on success
-        cache.delete(_failed_key)
         datastore.update("users", user.get("id"), {"screen_locked": False}, user.get("account_id"))
         auth_manager.invalidate_user_session_cache(user.get("id"), user.get("account_id"))
         updated_user = dict(user)
@@ -826,9 +774,9 @@ def create_app() -> Flask:
 
         if not current_password:
             return jsonify({"error": "Current password is required"}), 400
-        if not new_password and new_pin is None:
-            return jsonify({"error": "New password or new PIN is required"}), 400
-        if new_password and len(new_password) < 4:
+        if not new_password:
+            return jsonify({"error": "New password is required"}), 400
+        if len(new_password) < 4:
             return jsonify({"error": "New password must be at least 4 characters"}), 400
 
         # Re-fetch full user from DB to get password_hash
@@ -844,13 +792,6 @@ def create_app() -> Flask:
         if new_password:
             updates["password_hash"] = auth_manager.hash_password(new_password)
             changed_items.append("password")
-        if new_pin is not None:
-            pin_text = str(new_pin).strip()
-            if len(pin_text) < 4:
-                return jsonify({"error": "PIN must be at least 4 digits"}), 400
-            updates["pin"] = auth_manager.hash_pin(pin_text)
-            updates["cashier_pin"] = auth_manager.hash_pin(pin_text)
-            changed_items.append("PIN")
 
         updates["updated_at"] = datetime.utcnow().isoformat()
         success = datastore.update("users", user.get("id"), updates, user.get("account_id"))
@@ -1102,8 +1043,6 @@ def create_app() -> Flask:
                 for u in users:
                     sanitized = dict(u)
                     sanitized.pop("password_hash", None)
-                    sanitized.pop("pin", None)
-                    sanitized.pop("cashier_pin", None)
                     response.append(sanitized)
                 return jsonify(response), 200
             
@@ -1124,8 +1063,6 @@ def create_app() -> Flask:
             # Sanitize sensitive fields
             for user in result.get("items", []):
                 user.pop("password_hash", None)
-                user.pop("pin", None)
-                user.pop("cashier_pin", None)
             
             return jsonify(result), 200
         except Exception as exc:
@@ -1168,9 +1105,6 @@ def create_app() -> Flask:
             if role_value == "cashier" and cashier_count >= 1:
                 return jsonify({"error": "Starter plan allows only 1 cashier. Upgrade to Business to add more cashiers."}), 403
 
-        pin_value = (data.get("cashier_pin") or data.get("cashierPIN") or data.get("pin") or "").strip() or None
-        if pin_value and len(pin_value) < 4:
-            return jsonify({"error": "PIN must be at least 4 digits"}), 400
         permissions_value = data.get("permissions") or AuthManager._default_permissions(role_value)
 
         user_payload = {
@@ -1180,8 +1114,6 @@ def create_app() -> Flask:
             "name": name,
             "role": role_value,
             "permissions": permissions_value,
-            "pin": auth_manager.hash_pin(pin_value) if pin_value else None,
-            "cashier_pin": auth_manager.hash_pin(pin_value) if pin_value else None,
             "is_active": True,
             "is_locked": False,
             "screen_locked": False,
@@ -1201,8 +1133,6 @@ def create_app() -> Flask:
             return jsonify({"error": "Unable to create cashier right now. Please try again."}), 500
 
         created.pop("password_hash", None)
-        created.pop("pin", None)
-        created.pop("cashier_pin", None)
         return jsonify(created), 201
 
     @app.put("/api/users/<int:user_id>")
@@ -1227,14 +1157,6 @@ def create_app() -> Flask:
             updates["permissions"] = data.get("permissions") or {}
         if "password" in data and data.get("password"):
             updates["password_hash"] = auth_manager.hash_password(str(data.get("password")))
-
-        pin_value = data.get("cashierPIN") or data.get("cashier_pin") or data.get("pin")
-        if pin_value is not None:
-            pin_text = str(pin_value).strip()
-            if len(pin_text) < 4:
-                return jsonify({"error": "PIN must be at least 4 digits"}), 400
-            updates["pin"] = auth_manager.hash_pin(pin_text)
-            updates["cashier_pin"] = auth_manager.hash_pin(pin_text)
 
         if "active" in data:
             updates["is_active"] = bool(data.get("active"))
@@ -1438,8 +1360,6 @@ def create_app() -> Flask:
                 "password_hash": password_hash,
                 "name": display_name,
                 "role": "main_admin",
-                "pin": None,
-                "cashier_pin": None,
                 "is_active": True,
                 "is_locked": False,
                 "screen_locked": False,
@@ -4225,8 +4145,6 @@ def create_app() -> Flask:
             "password_hash": password_hash,
             "name": name,
             "role": "cashier",
-            "pin": None,
-            "cashier_pin": None,
             "is_active": True,
             "is_locked": False,
             "screen_locked": False,
@@ -4938,8 +4856,6 @@ def create_app() -> Flask:
                 "password_hash": persisted_hash,
                 "name": "Main Admin",
                 "role": "main_admin",
-                "pin": None,
-                "cashier_pin": None,
                 "is_active": True,
                 "is_locked": False,
                 "screen_locked": False,

@@ -219,46 +219,6 @@ def create_auth_blueprint(
         return jsonify({"error": error or "Invalid credentials"}), 401
 
     # ============================================================
-    # PIN Login
-    # ============================================================
-
-    @bp.route("/pin-login", methods=["POST"])
-    def pin_login():
-        is_limited, retry_after = _is_rate_limited(login_attempts, login_blocked_until, 900, 5)
-        if is_limited:
-            return jsonify({"error": "Too many attempts. Try again later.", "retry_after": retry_after}), 429
-        data = request.get_json() or {}
-        success, error, result = service.pin_login(
-            email=data.get("email"),
-            pin=data.get("pin"),
-        )
-        if success:
-            _reset_attempts(login_attempts, login_blocked_until)
-            refresh_token = manager.create_refresh_session(
-                user=result.get("user") or {},
-                user_agent=request.headers.get("User-Agent", ""),
-                ip_address=_client_ip(),
-            )
-            csrf_token = uuid.uuid4().hex
-            result["refreshToken"] = refresh_token
-            result["csrfToken"] = csrf_token
-            try:
-                pin_user = result.get("user") or {}
-                if time_tracking:
-                    time_tracking.clock_in(
-                        pin_user.get("id"),
-                        pin_user.get("name") or pin_user.get("email"),
-                        pin_user.get("account_id"),
-                    )
-            except Exception:
-                pass
-            resp = jsonify(result)
-            _set_auth_cookies(resp, refresh_token, csrf_token, samesite, "auth")
-            return resp, 200
-        _record_attempt(login_attempts, login_blocked_until, 900, 5)
-        return jsonify({"error": error or "Invalid credentials"}), 401
-
-    # ============================================================
     # Refresh
     # ============================================================
 
@@ -325,14 +285,13 @@ def create_auth_blueprint(
         data = request.get_json() or {}
         current_password = (data.get("currentPassword") or "").strip()
         new_password = (data.get("newPassword") or "").strip()
-        new_pin = data.get("newPin")
         if not current_password:
             return jsonify({"error": "Current password is required"}), 400
-        if not new_password and new_pin is None:
-            return jsonify({"error": "New password or new PIN is required"}), 400
-        if new_password and len(new_password) < 4:
+        if not new_password:
+            return jsonify({"error": "New password is required"}), 400
+        if len(new_password) < 4:
             return jsonify({"error": "New password must be at least 4 characters"}), 400
-        ok, msg = service.change_password(user, current_password, new_password, new_pin)
+        ok, msg = service.change_password(user, current_password, new_password)
         if not ok:
             return jsonify({"error": msg}), 400
         return jsonify({"message": msg}), 200
@@ -358,26 +317,9 @@ def create_auth_blueprint(
     @bp.route("/unlock-screen", methods=["POST"])
     @require_auth(manager, datastore)
     def unlock_screen():
-        _failed_key = f"screen_unlock_fails:{_client_ip()}"
-        fails = cache.get_int(_failed_key) if cache else 0
-        if fails and fails >= 5:
-            return jsonify({"message": "Too many failed attempts. Try again later."}), 429
-        data = request.get_json() or {}
-        pin = (data.get("pin") or "").strip()
-        if not pin:
-            return jsonify({"message": "PIN is required"}), 400
-        user = request.user
-        account = datastore.get_by_id("accounts", user.get("account_id")) if datastore else None
-        user_pin = (user.get("pin") or user.get("cashier_pin") or "").strip()
-        account_pin = (account.get("screen_lock_password") or "2005") if account else "2005"
-        if pin != user_pin and pin != account_pin:
-            if cache and getattr(cache, "enabled", False):
-                cache.set_int(_failed_key, (fails or 0) + 1, ttl_seconds=300)
-            return jsonify({"message": "Incorrect PIN"}), 401
-        if cache and getattr(cache, "enabled", False):
-            cache.delete(_failed_key)
         if not datastore:
             return jsonify({"error": "Database not available"}), 500
+        user = request.user
         datastore.update(
             "users", user.get("id"), {"screen_locked": False}, user.get("account_id")
         )

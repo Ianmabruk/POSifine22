@@ -121,10 +121,6 @@ class User:
     name: str
     role: str = UserRole.CASHIER.value
     
-    # Authentication
-    pin: Optional[str] = None
-    cashier_pin: Optional[str] = None
-    
     # Status
     is_active: bool = True
     is_locked: bool = False

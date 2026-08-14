@@ -179,8 +179,6 @@ class DataStore:
                         password_hash TEXT NOT NULL,
                         name TEXT NOT NULL,
                         role TEXT DEFAULT 'cashier',
-                        pin TEXT,
-                        cashier_pin TEXT,
                         is_active BOOLEAN DEFAULT TRUE,
                         is_locked BOOLEAN DEFAULT FALSE,
                         screen_locked BOOLEAN DEFAULT FALSE,

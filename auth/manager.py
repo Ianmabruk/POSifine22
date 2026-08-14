@@ -77,19 +77,6 @@ class AuthManager:
         except Exception:
             return False
 
-    def hash_pin(self, pin: str) -> str:
-        salt = bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)
-        hashed = bcrypt.hashpw(pin.encode("utf-8"), salt)
-        return hashed.decode("utf-8")
-
-    def verify_pin(self, pin: str, pin_hash: str) -> bool:
-        try:
-            if not pin_hash or not pin_hash.startswith(("$2a$", "$2b$", "$2y$")):
-                return False
-            return bcrypt.checkpw(pin.encode("utf-8"), pin_hash.encode("utf-8"))
-        except Exception:
-            return False
-
     # ============================================================
     # Token handling
     # ============================================================
@@ -399,8 +386,6 @@ class AuthManager:
             if isinstance(user, dict):
                 user = dict(user)
                 user.pop("password_hash", None)
-                user.pop("pin", None)
-                user.pop("cashier_pin", None)
             if isinstance(account, dict):
                 account = dict(account)
                 account.pop("screen_lock_password", None)

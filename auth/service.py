@@ -116,8 +116,6 @@ class AuthService:
             "name": name,
             "role": "cashier" if is_custom else "admin",
             "permissions": self.manager._default_permissions("cashier" if is_custom else "admin"),
-            "pin": None,
-            "cashier_pin": None,
             "is_active": True,
             "is_locked": False,
             "screen_locked": False,
@@ -186,46 +184,6 @@ class AuthService:
         }
 
     # ============================================================
-    # PIN Login
-    # ============================================================
-
-    def pin_login(self, email: str, pin: str) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
-        email = (email or "").strip().lower()
-        pin = str(pin or "").strip()
-        if not email or not pin:
-            return False, "Email and PIN are required", None
-
-        if not self.datastore:
-            return False, "Database not available", None
-
-        user = self.datastore.get_user_by_email(email)
-        if not user:
-            return False, "Invalid credentials", None
-
-        account = self.datastore.get_by_id("accounts", user.get("account_id")) if user.get("account_id") else None
-        if not account:
-            return False, "Account not found", None
-        if account.get("is_locked"):
-            return False, "Account locked", None
-        if account.get("is_active") is False:
-            return False, "Account inactive. Please choose a subscription.", None
-
-        if user.get("is_locked"):
-            return False, "Account locked", None
-
-        stored_pin = str(user.get("pin") or user.get("cashier_pin") or "").strip()
-        if not stored_pin:
-            return False, "PIN not set for this user", None
-        if not self.manager.verify_pin(pin, stored_pin):
-            return False, "Invalid PIN", None
-
-        token = self.manager.generate_token(user)
-        return True, None, {
-            "user": self.manager._build_user_payload(user, account),
-            "token": token,
-        }
-
-    # ============================================================
     # Screen lock
     # ============================================================
 
@@ -237,16 +195,13 @@ class AuthService:
         )
 
     def unlock_screen(
-        self, user_id: int, pin: str, account_id: str
+        self, user_id: int, account_id: str
     ) -> Tuple[bool, Optional[str]]:
         if not self.datastore:
             return False, "Database not available"
         user = self.datastore.get_by_id("users", user_id, account_id)
         if not user:
             return False, "User not found"
-        valid_pin = user.get("pin") or user.get("cashier_pin")
-        if not valid_pin or not self.manager.verify_pin(pin, valid_pin):
-            return False, "Invalid PIN"
         self.datastore.update(
             "users", user_id, {"screen_locked": False}, account_id
         )
@@ -281,14 +236,6 @@ class AuthService:
                 return False, "New password must be at least 4 characters"
             updates["password_hash"] = self.manager.hash_password(new_password)
             changed.append("password")
-        if new_pin is not None:
-            pin_text = str(new_pin).strip()
-            if len(pin_text) < 4:
-                return False, "PIN must be at least 4 digits"
-            hashed_pin = self.manager.hash_pin(pin_text)
-            updates["pin"] = hashed_pin
-            updates["cashier_pin"] = hashed_pin
-            changed.append("PIN")
         if not updates:
             return False, "No changes provided"
         updates["updated_at"] = datetime.utcnow().isoformat()
@@ -348,8 +295,6 @@ class AuthService:
             "password_hash": password_hash,
             "name": display_name,
             "role": "main_admin",
-            "pin": None,
-            "cashier_pin": None,
             "is_active": True,
             "is_locked": False,
             "screen_locked": False,

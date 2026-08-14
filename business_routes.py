@@ -256,7 +256,6 @@ def create_business_routes(datastore, auth_manager):
             password = data.get('password') or secrets.token_hex(8)
             business_role = data.get('business_role') or data.get('businessRole') or 'cashier'
             profile_picture = data.get('profile_picture') or data.get('profilePicture')
-            cashier_pin = data.get('cashier_pin') or data.get('pin')
             
             if not email or not name:
                 return jsonify({'error': 'email and name are required'}), 400
@@ -292,8 +291,6 @@ def create_business_routes(datastore, auth_manager):
                 'is_active': True,
                 'is_locked': False,
                 'screen_locked': False,
-                'pin': cashier_pin,
-                'cashier_pin': cashier_pin,
                 'profile_picture': profile_picture,
                 'profilePicture': profile_picture,
                 'created_at': datetime.now().isoformat(),
@@ -371,12 +368,10 @@ def create_business_routes(datastore, auth_manager):
 
             if 'profilePicture' in data and 'profile_picture' not in data:
                 data['profile_picture'] = data.get('profilePicture')
-            if 'pin' in data and 'cashier_pin' not in data:
-                data['cashier_pin'] = data.get('pin')
             
             # Build update object (only allow certain fields)
             update_data = {}
-            allowed_fields = ['name', 'business_role', 'is_active', 'hourly_rate', 'profile_picture', 'profilePicture', 'pin', 'cashier_pin']
+            allowed_fields = ['name', 'business_role', 'is_active', 'hourly_rate', 'profile_picture', 'profilePicture']
             
             for field in allowed_fields:
                 if field in data:
@@ -387,15 +382,6 @@ def create_business_routes(datastore, auth_manager):
                 business_type = admin_user.get('business_type')
                 if not validate_business_role(business_type, update_data['business_role']):
                     return jsonify({'error': 'Invalid business role'}), 400
-            
-            # Hash PIN values if provided
-            if 'pin' in update_data or 'cashier_pin' in update_data:
-                import bcrypt
-                pin_val = update_data.get('pin') or update_data.get('cashier_pin')
-                if pin_val:
-                    hashed = bcrypt.hashpw(str(pin_val).encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                    update_data['pin'] = hashed
-                    update_data['cashier_pin'] = hashed
             
             # Update user
             datastore.update('users', user_id, update_data, account_id)

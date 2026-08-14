@@ -242,46 +242,6 @@ class TestLogoutE2E:
         assert 'refresh_token=' in cookie_str
 
 
-class TestPinLoginE2E:
-    """PIN-based login"""
-
-    def test_pin_login_success(self, client, auth_service, datastore):
-        success, _, result = auth_service.signup(
-            email='pinuser@example.com',
-            password='ValidPass123!',
-            name='PIN User'
-        )
-        assert success
-        user = result['user']
-
-        hashed_pin = auth_service.manager.hash_pin('5678')
-        datastore.update('users', user['id'], {'pin': hashed_pin, 'cashier_pin': hashed_pin}, user['account_id'])
-
-        response = client.post('/api/auth/pin-login',
-            data=json.dumps({'email': 'pinuser@example.com', 'pin': '5678'}),
-            content_type='application/json')
-        assert response.status_code == 200
-        data = response.get_json()
-        assert 'token' in data
-        assert 'user' in data
-
-    def test_pin_login_wrong_pin_401(self, client, auth_service, datastore):
-        success, _, result = auth_service.signup(
-            email='pinfail@example.com',
-            password='ValidPass123!',
-            name='PIN Fail User'
-        )
-        assert success
-        user = result['user']
-        hashed_pin = auth_service.manager.hash_pin('5678')
-        datastore.update('users', user['id'], {'pin': hashed_pin, 'cashier_pin': hashed_pin}, user['account_id'])
-
-        response = client.post('/api/auth/pin-login',
-            data=json.dumps({'email': 'pinfail@example.com', 'pin': '9999'}),
-            content_type='application/json')
-        assert response.status_code == 401
-
-
 class TestScreenLockE2E:
     """Screen lock / unlock via API"""
 
@@ -294,8 +254,6 @@ class TestScreenLockE2E:
         assert success
         token = result['token']
         user = result['user']
-        hashed_pin = auth_service.manager.hash_pin('1234')
-        datastore.update('users', user['id'], {'pin': hashed_pin, 'cashier_pin': hashed_pin}, user['account_id'])
 
         response = client.post('/api/auth/lock-screen',
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
@@ -307,7 +265,7 @@ class TestScreenLockE2E:
         db_user = datastore.get_by_id('users', user['id'], user['account_id'])
         assert db_user['screen_locked'] is True
 
-    def test_unlock_screen_with_correct_pin(self, client, auth_service, datastore):
+    def test_unlock_screen_without_credentials(self, client, auth_service, datastore):
         success, _, result = auth_service.signup(
             email='unlockuser@example.com',
             password='ValidPass123!',
@@ -316,13 +274,19 @@ class TestScreenLockE2E:
         assert success
         token = result['token']
         user = result['user']
-        hashed_pin = auth_service.manager.hash_pin('1234')
-        datastore.update('users', user['id'], {'pin': hashed_pin, 'cashier_pin': hashed_pin, 'screen_locked': True}, user['account_id'])
+
+        response = client.post('/api/auth/lock-screen',
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['success'] is True
+
+        db_user = datastore.get_by_id('users', user['id'], user['account_id'])
+        assert db_user['screen_locked'] is True
 
         response = client.post('/api/auth/unlock-screen',
-            data=json.dumps({'pin': '1234'}),
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
-            content_type='application/json')
+            data=json.dumps({}))
         assert response.status_code == 200
         data = response.get_json()
         assert data['success'] is True
@@ -330,23 +294,34 @@ class TestScreenLockE2E:
         db_user = datastore.get_by_id('users', user['id'], user['account_id'])
         assert db_user['screen_locked'] is False
 
-    def test_unlock_screen_with_wrong_pin_401(self, client, auth_service, datastore):
+    def test_unlock_screen_without_credentials(self, client, auth_service, datastore):
         success, _, result = auth_service.signup(
-            email='unlockfail@example.com',
+            email='unlockuser@example.com',
             password='ValidPass123!',
-            name='Unlock Fail User'
+            name='Unlock User'
         )
         assert success
         token = result['token']
         user = result['user']
-        hashed_pin = auth_service.manager.hash_pin('1234')
-        datastore.update('users', user['id'], {'pin': hashed_pin, 'cashier_pin': hashed_pin, 'screen_locked': True}, user['account_id'])
+
+        response = client.post('/api/auth/lock-screen',
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['success'] is True
+
+        db_user = datastore.get_by_id('users', user['id'], user['account_id'])
+        assert db_user['screen_locked'] is True
 
         response = client.post('/api/auth/unlock-screen',
-            data=json.dumps({'pin': '9999'}),
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
-            content_type='application/json')
-        assert response.status_code == 401
+            data=json.dumps({}))
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['success'] is True
+
+        db_user = datastore.get_by_id('users', user['id'], user['account_id'])
+        assert db_user['screen_locked'] is False
 
 
 class TestPasswordChangeE2E:
