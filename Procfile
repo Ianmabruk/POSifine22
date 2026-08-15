@@ -1,1 +1,1 @@
-web: node server.js
+web: gunicorn -w 2 -b 0.0.0.0:$PORT app:app --timeout 30 --worker-class sync --max-requests 1000 --access-logfile - --error-logfile - --log-level info

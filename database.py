@@ -144,11 +144,35 @@ class DataStore:
             self._init_json_files()
     
     def _create_tables(self):
-        """Create database tables if they don't exist"""
+        """Create database tables if they don't exist.
+
+        Uses AUTOCOMMIT mode so every DDL statement is its own transaction.
+        This prevents a deadlock or error on one statement from aborting the
+        entire migration batch (the previous bug where a deadlock on
+        ``ALTER TABLE products`` cascaded into "current transaction is
+        aborted" for every subsequent migration).
+        """
         with self._pg_connection() as conn:
+            conn.autocommit = True
             with conn.cursor() as cur:
+                # Helper: run a DDL statement, log on failure, never raise.
+                def _safe(sql, desc):
+                    try:
+                        cur.execute(sql)
+                        logger.info(f"✅ Migration: {desc}")
+                    except Exception as e:
+                        logger.warning(f"Migration warning for {desc}: {e}")
+
+                # Serialize concurrent migration runs across workers with an
+                # advisory lock so two processes don't deadlock on ALTER TABLE.
+                cur.execute("SELECT pg_try_advisory_lock(20240814)")
+                got_lock = cur.fetchone()[0]
+                if not got_lock:
+                    logger.info("Migrations skipped — another worker holds the advisory lock")
+                    return
+
                 # Accounts table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS accounts (
                         id TEXT PRIMARY KEY,
                         owner_email TEXT UNIQUE NOT NULL,
@@ -168,10 +192,10 @@ class DataStore:
                         requested_trial BOOLEAN DEFAULT FALSE,
                         business_type TEXT
                     )
-                """)
+                               """, "Created table: accounts")
                 
                 # Users table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS users (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -192,20 +216,20 @@ class DataStore:
                         permissions JSONB DEFAULT '{}'::jsonb,
                         UNIQUE(account_id, email)
                     )
-                """)
+                               """, "Created table: users")
 
                 # Roles table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS roles (
                         id SERIAL PRIMARY KEY,
                         name TEXT UNIQUE NOT NULL,
                         description TEXT,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: roles")
 
                 # Sessions table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS sessions (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -217,10 +241,10 @@ class DataStore:
                         expires_at TEXT NOT NULL,
                         revoked_at TEXT
                     )
-                """)
+                               """, "Created table: sessions")
 
                 # Activity logs
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS activity_logs (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT,
@@ -231,10 +255,10 @@ class DataStore:
                         ip_address TEXT,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: activity_logs")
 
                 # Audit logs
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS audit_logs (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT,
@@ -246,10 +270,10 @@ class DataStore:
                         ip_address TEXT,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: audit_logs")
 
                 # Admin support messages
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS admin_support_messages (
                         id TEXT PRIMARY KEY,
                         account_id TEXT,
@@ -266,10 +290,10 @@ class DataStore:
                         created_at TEXT,
                         updated_at TEXT
                     )
-                """)
+                               """, "Created table: admin_support_messages")
 
                 # Email templates (main admin)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS email_templates (
                         id TEXT PRIMARY KEY,
                         name TEXT NOT NULL,
@@ -280,10 +304,10 @@ class DataStore:
                         created_at TEXT,
                         updated_at TEXT
                     )
-                """)
+                               """, "Created table: email_templates")
                 
                 # Products table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS products (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -308,10 +332,10 @@ class DataStore:
                         created_by INTEGER,
                         updated_at TEXT
                     )
-                """)
+                               """, "Created table: products")
 
                 # Raw materials table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS raw_materials (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -323,10 +347,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT
                     )
-                """)
+                               """, "Created table: raw_materials")
                 
                 # Sales table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS sales (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -347,10 +371,10 @@ class DataStore:
                          notes TEXT,
                          payment_status TEXT DEFAULT 'paid'
                      )
-                 """)
+                                 """, "Created table: sales")
 
                  # Payments table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS payments (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -367,14 +391,14 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     )
-                """)
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
+                               """, "Created table: payments")
+                _safe("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)", "Created index: idx_payments_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)", "Created index: idx_payments_sale")
+                _safe("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)", "Created index: idx_payments_provider_ref")
+                _safe("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)", "Created index: idx_payments_status")
 
                  # Stock deductions table (audit trail for inventory reductions)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS stock_deductions (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -391,10 +415,10 @@ class DataStore:
                         sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: stock_deductions")
 
                 # Petroleum tanks
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS petroleum_tanks (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -405,10 +429,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT
                     )
-                """)
+                               """, "Created table: petroleum_tanks")
 
                 # Petroleum staff
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS petroleum_staff (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -420,10 +444,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         UNIQUE(account_id, email)
                     )
-                """)
+                               """, "Created table: petroleum_staff")
 
                 # Petroleum sales
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS petroleum_sales (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -435,10 +459,10 @@ class DataStore:
                         pump_number TEXT,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: petroleum_sales")
                 
                 # Time entries table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS time_entries (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -450,10 +474,10 @@ class DataStore:
                         date TEXT NOT NULL,
                         notes TEXT
                     )
-                """)
+                               """, "Created table: time_entries")
                 
                 # Reminders table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS reminders (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -473,10 +497,10 @@ class DataStore:
                         cashier_signed_at TEXT,
                         seen_by JSONB DEFAULT '[]'
                     )
-                """)
+                               """, "Created table: reminders")
                 
                 # Vendors table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS vendors (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -489,10 +513,10 @@ class DataStore:
                         country TEXT,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: vendors")
                 
                 # Credit requests table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS credit_requests (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -508,10 +532,10 @@ class DataStore:
                         admin_notes TEXT,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: credit_requests")
                 
                 # Expenses table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS expenses (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -526,10 +550,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         created_by INTEGER
                     )
-                """)
+                               """, "Created table: expenses")
                 
                 # Discounts table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS discounts (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -539,10 +563,10 @@ class DataStore:
                         is_active BOOLEAN DEFAULT TRUE,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: discounts")
                 
                 # Service fees table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS service_fees (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -552,10 +576,10 @@ class DataStore:
                         is_active BOOLEAN DEFAULT TRUE,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: service_fees")
                 
                 # Stock movements table (audit trail)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS stock_movements (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -567,10 +591,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         created_by INTEGER
                     )
-                """)
+                               """, "Created table: stock_movements")
                 
                 # Batches table (for stock batch management)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS batches (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -581,11 +605,11 @@ class DataStore:
                         cost REAL DEFAULT 0.0,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: batches")
                 
                 # Safe migration: rename legacy product_id to productId in batches if needed
                 try:
-                    cur.execute("""
+                    _safe("""
                         DO $$
                         BEGIN
                             IF EXISTS (
@@ -598,13 +622,13 @@ class DataStore:
                                 ALTER TABLE batches RENAME COLUMN product_id TO productId;
                             END IF;
                         END $$;
-                    """)
+                                       """, "Ensured batches table uses productId column")
                     logger.info("✅ Migration: Ensured batches table uses productId column")
                 except Exception as e:
                     logger.warning(f"Migration warning for batches.productId: {e}")
                 
                 # Business profiles table (Pro Plan)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS business_profiles (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE UNIQUE,
@@ -613,10 +637,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         settings JSONB DEFAULT '{}'
                     )
-                """)
+                               """, "Created table: business_profiles")
                 
                 # Role assignments table (Pro Plan - business-specific roles)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS role_assignments (
                         id SERIAL PRIMARY KEY,
                         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -625,10 +649,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         UNIQUE(user_id, business_type)
                     )
-                """)
+                               """, "Created table: role_assignments")
                 
                 # Appointments table (Clinic/Hospital)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS appointments (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -643,10 +667,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         created_by INTEGER
                     )
-                """)
+                               """, "Created table: appointments")
                 
                 # Prescriptions table (Clinic/Hospital)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS prescriptions (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -660,10 +684,10 @@ class DataStore:
                         dispensed_at TEXT,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: prescriptions")
                 
                 # Tables/Orders table (Bar/Restaurant)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS table_orders (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -675,10 +699,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         closed_at TEXT
                     )
-                """)
+                               """, "Created table: table_orders")
                 
                 # Room bookings table (Hotel)
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS room_bookings (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -694,10 +718,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         created_by INTEGER
                     )
-                """)
+                               """, "Created table: room_bookings")
                 
                 # Recipes table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS recipes (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -707,10 +731,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT
                     )
-                """)
+                               """, "Created table: recipes")
                 
                 # Recipe ingredients table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS recipe_ingredients (
                         id SERIAL PRIMARY KEY,
                         recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
@@ -719,10 +743,10 @@ class DataStore:
                         unit TEXT DEFAULT 'pcs',
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: recipe_ingredients")
                 
                 # Inventory transactions table
-                cur.execute("""
+                _safe("""
                      CREATE TABLE IF NOT EXISTS inventory_transactions (
                          id SERIAL PRIMARY KEY,
                          account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -738,10 +762,10 @@ class DataStore:
                          created_by INTEGER,
                          created_at TEXT NOT NULL
                      )
-                """)
+                               """, "Created table: inventory_transactions")
 
                 # Custom plan requests table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS custom_plan_requests (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -761,10 +785,10 @@ class DataStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: custom_plan_requests")
 
                 # Email logs table
-                cur.execute("""
+                _safe("""
                     CREATE TABLE IF NOT EXISTS email_logs (
                         id SERIAL PRIMARY KEY,
                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -777,181 +801,150 @@ class DataStore:
                         created_by INTEGER,
                         created_at TEXT NOT NULL
                     )
-                """)
+                               """, "Created table: email_logs")
 
                  # Create indexes for performance
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token_hash ON sessions(refresh_token_hash)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_logs(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_logs(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_products_account ON products(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_raw_materials_account ON raw_materials(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_account ON sales(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashier_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_account ON petroleum_tanks(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_fuel ON petroleum_tanks(fuel_type)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_account ON petroleum_sales(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_fuel ON petroleum_sales(fuel_type)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_created ON petroleum_sales(created_at)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_petroleum_staff_account ON petroleum_staff(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_account ON time_entries(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_user ON time_entries(user_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_date ON time_entries(date)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_batches_account ON batches(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_batches_product ON batches(productId)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_business_profiles_account ON business_profiles(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_appointments_account ON appointments(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_prescriptions_account ON prescriptions(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_table_orders_account ON table_orders(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_room_bookings_account ON room_bookings(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_account ON expenses(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_movements_account ON stock_movements(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_account ON stock_deductions(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_product ON stock_deductions(product_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_created ON stock_deductions(created_at)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_deductions_cashier ON stock_deductions(cashier_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_recipes_account ON recipes(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_recipes_product ON recipes(product_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_recipe ON recipe_ingredients(recipe_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_item ON recipe_ingredients(inventory_item_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_account ON inventory_transactions(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_item ON inventory_transactions(inventory_item_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_type ON inventory_transactions(transaction_type)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_created ON inventory_transactions(created_at)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_account ON custom_plan_requests(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_status ON custom_plan_requests(status)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_email_logs_account ON email_logs(account_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_email_logs_status ON email_logs(status)")
+                _safe("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)", "Created index: idx_users_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)", "Created index: idx_users_email")
+                _safe("CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)", "Created index: idx_sessions_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)", "Created index: idx_sessions_user")
+                _safe("CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token_hash ON sessions(refresh_token_hash)", "Created index: idx_sessions_refresh_token_hash")
+                _safe("CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_logs(account_id)", "Created index: idx_activity_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_logs(account_id)", "Created index: idx_audit_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_products_account ON products(account_id)", "Created index: idx_products_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)", "Created index: idx_products_category")
+                _safe("CREATE INDEX IF NOT EXISTS idx_raw_materials_account ON raw_materials(account_id)", "Created index: idx_raw_materials_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_sales_account ON sales(account_id)", "Created index: idx_sales_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)", "Created index: idx_sales_created")
+                _safe("CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashier_id)", "Created index: idx_sales_cashier")
+                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_account ON petroleum_tanks(account_id)", "Created index: idx_petroleum_tanks_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_fuel ON petroleum_tanks(fuel_type)", "Created index: idx_petroleum_tanks_fuel")
+                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_account ON petroleum_sales(account_id)", "Created index: idx_petroleum_sales_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_fuel ON petroleum_sales(fuel_type)", "Created index: idx_petroleum_sales_fuel")
+                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_created ON petroleum_sales(created_at)", "Created index: idx_petroleum_sales_created")
+                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_staff_account ON petroleum_staff(account_id)", "Created index: idx_petroleum_staff_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_account ON time_entries(account_id)", "Created index: idx_time_entries_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_user ON time_entries(user_id)", "Created index: idx_time_entries_user")
+                _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_date ON time_entries(date)", "Created index: idx_time_entries_date")
+                _safe("CREATE INDEX IF NOT EXISTS idx_batches_account ON batches(account_id)", "Created index: idx_batches_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_batches_product ON batches(productId)", "Created index: idx_batches_product")
+                _safe("CREATE INDEX IF NOT EXISTS idx_business_profiles_account ON business_profiles(account_id)", "Created index: idx_business_profiles_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id)", "Created index: idx_role_assignments_user")
+                _safe("CREATE INDEX IF NOT EXISTS idx_appointments_account ON appointments(account_id)", "Created index: idx_appointments_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id)", "Created index: idx_appointments_doctor")
+                _safe("CREATE INDEX IF NOT EXISTS idx_prescriptions_account ON prescriptions(account_id)", "Created index: idx_prescriptions_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_table_orders_account ON table_orders(account_id)", "Created index: idx_table_orders_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_room_bookings_account ON room_bookings(account_id)", "Created index: idx_room_bookings_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_expenses_account ON expenses(account_id)", "Created index: idx_expenses_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)", "Created index: idx_expenses_created")
+                _safe("CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id)", "Created index: idx_stock_movements_product")
+                _safe("CREATE INDEX IF NOT EXISTS idx_stock_movements_account ON stock_movements(account_id)", "Created index: idx_stock_movements_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_account ON stock_deductions(account_id)", "Created index: idx_stock_deductions_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_product ON stock_deductions(product_id)", "Created index: idx_stock_deductions_product")
+                _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_created ON stock_deductions(created_at)", "Created index: idx_stock_deductions_created")
+                _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_cashier ON stock_deductions(cashier_id)", "Created index: idx_stock_deductions_cashier")
+                _safe("CREATE INDEX IF NOT EXISTS idx_recipes_account ON recipes(account_id)", "Created index: idx_recipes_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_recipes_product ON recipes(product_id)", "Created index: idx_recipes_product")
+                _safe("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_recipe ON recipe_ingredients(recipe_id)", "Created index: idx_recipe_ingredients_recipe")
+                _safe("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_item ON recipe_ingredients(inventory_item_id)", "Created index: idx_recipe_ingredients_item")
+                _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_account ON inventory_transactions(account_id)", "Created index: idx_inventory_transactions_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_item ON inventory_transactions(inventory_item_id)", "Created index: idx_inventory_transactions_item")
+                _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_type ON inventory_transactions(transaction_type)", "Created index: idx_inventory_transactions_type")
+                _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_created ON inventory_transactions(created_at)", "Created index: idx_inventory_transactions_created")
+                _safe("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_account ON custom_plan_requests(account_id)", "Created index: idx_custom_plan_requests_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_status ON custom_plan_requests(status)", "Created index: idx_custom_plan_requests_status")
+                _safe("CREATE INDEX IF NOT EXISTS idx_email_logs_account ON email_logs(account_id)", "Created index: idx_email_logs_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_email_logs_status ON email_logs(status)", "Created index: idx_email_logs_status")
                 
                 # ============================================================
                 # MIGRATIONS: Add new columns to existing tables
                 # ============================================================
                 
                 # Add business_type and business_role columns to users table if they don't exist
-                try:
-                    cur.execute("""
-                        ALTER TABLE users 
-                        ADD COLUMN IF NOT EXISTS business_type TEXT,
-                        ADD COLUMN IF NOT EXISTS business_role TEXT,
-                        ADD COLUMN IF NOT EXISTS profile_picture TEXT,
-                        ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb
-                    """)
-                    logger.info("✅ Migration: Added business_type and business_role columns to users table")
-                except Exception as e:
-                    logger.warning(f"Migration warning (may be normal if columns exist): {e}")
+                _safe("""
+                    ALTER TABLE users 
+                    ADD COLUMN IF NOT EXISTS business_type TEXT,
+                    ADD COLUMN IF NOT EXISTS business_role TEXT,
+                    ADD COLUMN IF NOT EXISTS profile_picture TEXT,
+                    ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb
+                """, "Added business_type and business_role columns to users table")
 
                 # Ensure products table has newer fields used by API/controllers.
-                try:
-                    cur.execute("""
-                        ALTER TABLE products
-                        ADD COLUMN IF NOT EXISTS image TEXT,
-                        ADD COLUMN IF NOT EXISTS barcode TEXT,
-                        ADD COLUMN IF NOT EXISTS sku TEXT,
-                        ADD COLUMN IF NOT EXISTS reorder_level REAL DEFAULT 0.0,
-                        ADD COLUMN IF NOT EXISTS max_stock_level REAL DEFAULT 0.0,
-                        ADD COLUMN IF NOT EXISTS cost_per_unit REAL DEFAULT 0.0,
-                        ADD COLUMN IF NOT EXISTS enable_weight_pricing BOOLEAN DEFAULT FALSE,
-                        ADD COLUMN IF NOT EXISTS visible_to_cashier BOOLEAN DEFAULT TRUE,
-                        ADD COLUMN IF NOT EXISTS updated_at TEXT,
-                        ADD COLUMN IF NOT EXISTS package_size REAL DEFAULT 1.0
-                    """)
-                    logger.info("✅ Migration: Ensured extended products columns exist")
-                except Exception as e:
-                    logger.warning(f"Migration warning for products columns: {e}")
+                _safe("""
+                    ALTER TABLE products
+                    ADD COLUMN IF NOT EXISTS image TEXT,
+                    ADD COLUMN IF NOT EXISTS barcode TEXT,
+                    ADD COLUMN IF NOT EXISTS sku TEXT,
+                    ADD COLUMN IF NOT EXISTS reorder_level REAL DEFAULT 0.0,
+                    ADD COLUMN IF NOT EXISTS max_stock_level REAL DEFAULT 0.0,
+                    ADD COLUMN IF NOT EXISTS cost_per_unit REAL DEFAULT 0.0,
+                    ADD COLUMN IF NOT EXISTS enable_weight_pricing BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS visible_to_cashier BOOLEAN DEFAULT TRUE,
+                    ADD COLUMN IF NOT EXISTS updated_at TEXT,
+                    ADD COLUMN IF NOT EXISTS package_size REAL DEFAULT 1.0
+                """, "Ensured extended products columns exist")
 
                 # Ensure expenses table has linking/source fields used by auto-COGS code.
-                try:
-                    cur.execute("""
-                        ALTER TABLE expenses
-                        ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual',
-                        ADD COLUMN IF NOT EXISTS linked_product_id INTEGER,
-                        ADD COLUMN IF NOT EXISTS linked_raw_material_id INTEGER,
-                        ADD COLUMN IF NOT EXISTS linked_sale_id INTEGER,
-                        ADD COLUMN IF NOT EXISTS description TEXT,
-                        ADD COLUMN IF NOT EXISTS created_by INTEGER
-                    """)
-                    logger.info("✅ Migration: Ensured extended expenses columns exist")
-                except Exception as e:
-                    logger.warning(f"Migration warning for expenses columns: {e}")
+                _safe("""
+                    ALTER TABLE expenses
+                    ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual',
+                    ADD COLUMN IF NOT EXISTS linked_product_id INTEGER,
+                    ADD COLUMN IF NOT EXISTS linked_raw_material_id INTEGER,
+                    ADD COLUMN IF NOT EXISTS linked_sale_id INTEGER,
+                    ADD COLUMN IF NOT EXISTS description TEXT,
+                    ADD COLUMN IF NOT EXISTS created_by INTEGER
+                """, "Ensured extended expenses columns exist")
                 
                 # Migration: Add missing columns to credit_requests
-                try:
-                    cur.execute("""
-                    ALTER TABLE credit_requests
-                        ADD COLUMN IF NOT EXISTS customer_name TEXT,
-                        ADD COLUMN IF NOT EXISTS notes TEXT
-                    """)
-                    logger.info("✅ Migration: Ensured credit_requests has customer_name and notes columns")
-                except Exception as e:
-                     logger.warning(f"Migration warning for credit_requests columns: {e}")
+                _safe("""
+                ALTER TABLE credit_requests
+                    ADD COLUMN IF NOT EXISTS customer_name TEXT,
+                    ADD COLUMN IF NOT EXISTS notes TEXT
+                """, "Added customer_name and notes columns to credit_requests")
+
                 # Migration: Add missing business_type column to accounts
-                try:
-                    cur.execute("""
-                        ALTER TABLE accounts
-                            ADD COLUMN IF NOT EXISTS business_type TEXT
-                    """)
-                    logger.info("✅ Migration: Ensured accounts table has business_type column")
-                except Exception as e:
-                    logger.warning(f"Migration warning for accounts.business_type: {e}")
-                 
+                _safe("""
+                    ALTER TABLE accounts
+                        ADD COLUMN IF NOT EXISTS business_type TEXT
+                """, "Ensured accounts table has business_type column")
+                
                 # Migration: Add payment_required flag to accounts
-                try:
-                    cur.execute("""
-                        ALTER TABLE accounts
-                            ADD COLUMN IF NOT EXISTS payment_required BOOLEAN DEFAULT FALSE
-                    """)
-                    logger.info("✅ Migration: Ensured accounts table has payment_required column")
-                except Exception as e:
-                    logger.warning(f"Migration warning for accounts.payment_required: {e}")
+                _safe("""
+                    ALTER TABLE accounts
+                        ADD COLUMN IF NOT EXISTS payment_required BOOLEAN DEFAULT FALSE
+                """, "Ensured accounts table has payment_required column")
                 
                 # Migration: Add payment_status to sales
-                try:
-                    cur.execute("""
-                        ALTER TABLE sales
-                            ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'paid'
-                    """)
-                    logger.info("✅ Migration: Ensured sales table has payment_status column")
-                except Exception as e:
-                    logger.warning(f"Migration warning for sales.payment_status: {e}")
+                _safe("""
+                    ALTER TABLE sales
+                        ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'paid'
+                """, "Ensured sales table has payment_status column")
 
                 # Migration: Create payments table if it does not exist
-                try:
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS payments (
-                            id SERIAL PRIMARY KEY,
-                            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                            sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
-                            cashier_id INTEGER NOT NULL,
-                            amount REAL NOT NULL,
-                            currency TEXT DEFAULT 'KES',
-                            customer_phone TEXT,
+                _safe("""
+                    CREATE TABLE IF NOT EXISTS payments (
+                        id SERIAL PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                        sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+                        cashier_id INTEGER NOT NULL,
+                        amount REAL NOT NULL,
+                        currency TEXT DEFAULT 'KES',
+                        customer_phone TEXT,
                         provider TEXT DEFAULT 'manual',
-                            provider_reference TEXT,
-                            account_ref TEXT,
-                            status TEXT DEFAULT 'pending',
-                            failure_reason TEXT,
-                            created_at TEXT NOT NULL,
-                            updated_at TEXT NOT NULL
-                        )
-                    """)
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)")
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)")
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)")
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
-                    logger.info("✅ Migration: Ensured payments table exists")
-                except Exception as e:
-                    logger.warning(f"Migration warning for payments table: {e}")
-                
-                conn.commit()
+                        provider_reference TEXT,
+                        account_ref TEXT,
+                        status TEXT DEFAULT 'pending',
+                        failure_reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """, "Created table: payments")
+                _safe("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)", "Created index: idx_payments_account")
+                _safe("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)", "Created index: idx_payments_sale")
+                _safe("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)", "Created index: idx_payments_provider_ref")
+                _safe("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)", "Created index: idx_payments_status")
+
+                logger.info("✅ All migrations completed successfully")
     
     # ============================================================
     # JSON FILE OPERATIONS
