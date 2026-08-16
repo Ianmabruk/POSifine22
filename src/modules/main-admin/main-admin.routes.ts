@@ -1,7 +1,5 @@
 import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
-import adminRoutes from "./admin/admin.routes";
-import realtimeService from "./realtime/RealtimeService";
 import { authenticateJWT, authorize, AuthRequest } from '../../middlewares/auth';
 import { validate } from '../../middlewares/validate';
 import { z } from 'zod';

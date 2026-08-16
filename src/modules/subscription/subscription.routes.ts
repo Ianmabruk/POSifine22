@@ -117,7 +117,7 @@ router.get('/admin/businesses', authenticateJWT, authorize(['MAIN_ADMIN']), asyn
         skip,
         take,
         orderBy: { createdAt: 'desc' },
-        include: { subscription: { include: { plan: true } } },
+        include: { subscriptions: { include: { plan: true } } },
       }),
       prisma.account.count({ where }),
     ]);

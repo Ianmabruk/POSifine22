@@ -324,13 +324,16 @@ export class SubscriptionService {
         });
         if (!payment)
             throw new AppError(404, 'PAYMENT_NOT_FOUND', 'Payment not found');
+        const subscriptionId = payment.subscriptionId;
+        if (!subscriptionId)
+            throw new AppError(400, 'NO_SUBSCRIPTION', 'Payment has no subscription');
         await prisma.$transaction(async (tx) => {
             await tx.payment.update({
                 where: { id: paymentId },
                 data: { paymentStatus: 'COMPLETED', approvedBy, approvedAt: new Date() },
             });
             await tx.subscription.update({
-                where: { id: payment.subscriptionId },
+                where: { id: subscriptionId },
                 data: {
                     status: 'ACTIVE_SUBSCRIPTION',
                     startedAt: new Date(),
@@ -367,13 +370,16 @@ export class SubscriptionService {
         });
         if (!payment)
             throw new AppError(404, 'PAYMENT_NOT_FOUND', 'Payment not found');
+        const subscriptionId = payment.subscriptionId;
+        if (!subscriptionId)
+            throw new AppError(400, 'NO_SUBSCRIPTION', 'Payment has no subscription');
         await prisma.$transaction(async (tx) => {
             await tx.payment.update({
                 where: { id: paymentId },
                 data: { paymentStatus: 'FAILED', rejectedBy, rejectedAt: new Date(), rejectionReason: reason },
             });
             await tx.subscription.update({
-                where: { id: payment.subscriptionId },
+                where: { id: subscriptionId },
                 data: { status: 'TRIAL_EXPIRED' },
             });
             await tx.account.update({

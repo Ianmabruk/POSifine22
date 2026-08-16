@@ -6,12 +6,12 @@ import jwt from "jsonwebtoken";
 const connectedUsers = new Map<string, any>();
 
 const realtimeService = {
-  io: null,
+  io: null as any,
   connectedUsers,
   init(server: any) {
     this.io = initRealtime(server);
     
-    this.io.on("connection", (socket) => {
+    this.io.on("connection", (socket: any) => {
       const token = (socket.handshake.auth?.token || socket.handshake.query?.token) as string | undefined;
       if (!token) {
         socket.disconnect(true);
