@@ -8,6 +8,9 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 DATA_DIR="${SCRIPT_DIR}/data"
 
+# Change to script directory to ensure app.py is found
+cd "$SCRIPT_DIR"
+
 # Detect Python command - use venv if available
 VENV_PYTHON="${PARENT_DIR}/.venv/bin/python"
 if [ -f "$VENV_PYTHON" ]; then
@@ -18,10 +21,11 @@ else
     echo "⚠️ Using system Python (venv not found)"
 fi
 
-# Kill any existing process on port 5000
-if lsof -Pi :5000 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "⚠️  Port 5000 in use. Killing old process..."
-    lsof -ti:5000 | xargs kill -9 2>/dev/null || true
+# Kill any existing process on the assigned PORT
+PORT=${PORT:-5000}
+if lsof -Pi :$PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
+    echo "⚠️  Port $PORT in use. Killing old process..."
+    lsof -ti:$PORT | xargs kill -9 2>/dev/null || true
     sleep 1
 fi
 
