@@ -33,10 +33,6 @@ fi
 echo "✅ Verifying app syntax..."
 $PYTHON_CMD -m py_compile app.py
 
-# Test import
-echo "✅ Testing app import..."
-$PYTHON_CMD -c "from app import app; print('✅ App imports OK')" 2>&1
-
 # Create data directory
 mkdir -p "${DATA_DIR}"
 

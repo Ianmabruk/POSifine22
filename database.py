@@ -945,6 +945,12 @@ class DataStore:
                 _safe("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)", "Created index: idx_payments_status")
 
                 logger.info("✅ All migrations completed successfully")
+
+                # Release advisory lock after migrations complete
+                try:
+                    cur.execute("SELECT pg_advisory_unlock(20240814)")
+                except Exception as unlock_err:
+                    logger.warning(f"Failed to release advisory lock: {unlock_err}")
     
     # ============================================================
     # JSON FILE OPERATIONS
