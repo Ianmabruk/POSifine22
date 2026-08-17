@@ -4902,8 +4902,7 @@ def create_app() -> Flask:
             "address": data.get("address", ""),
             "city": data.get("city", ""),
             "country": data.get("country", ""),
-            "products": data.get("products", ""),
-            "created_by": created_by,
+            "product_or_service": data.get("products", ""),
             "created_at": datetime.utcnow().isoformat()
         }
         
@@ -4930,7 +4929,7 @@ def create_app() -> Flask:
             "address": data.get("address", vendor.get("address")),
             "city": data.get("city", vendor.get("city")),
             "country": data.get("country", vendor.get("country")),
-            "products": data.get("products", vendor.get("products"))
+            "product_or_service": data.get("products", vendor.get("product_or_service"))
         }
         
         datastore.update("vendors", vendor_id, update_data, account_id)
