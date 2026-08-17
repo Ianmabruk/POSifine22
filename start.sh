@@ -21,18 +21,6 @@ else
     echo "⚠️ Using system Python (venv not found)"
 fi
 
-# Kill any existing process on the assigned PORT
-PORT=${PORT:-5000}
-if lsof -Pi :$PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "⚠️  Port $PORT in use. Killing old process..."
-    lsof -ti:$PORT | xargs kill -9 2>/dev/null || true
-    sleep 1
-fi
-
-# Verify syntax
-echo "✅ Verifying app syntax..."
-$PYTHON_CMD -m py_compile app.py
-
 # Create data directory
 mkdir -p "${DATA_DIR}"
 
