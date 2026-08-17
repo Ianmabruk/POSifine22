@@ -21,6 +21,10 @@ else
     echo "⚠️ Using system Python (venv not found)"
 fi
 
+# Verify syntax
+echo "✅ Verifying app syntax..."
+$PYTHON_CMD -m py_compile app.py
+
 # Create data directory
 mkdir -p "${DATA_DIR}"
 
