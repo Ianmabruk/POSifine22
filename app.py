@@ -4873,6 +4873,85 @@ def create_app() -> Flask:
 
     _bootstrap_main_admin()
 
+    # ============================================================
+    # VENDORS SYSTEM
+    # ============================================================
+    
+    @app.get("/api/vendors")
+    @require_auth(auth_manager, datastore)
+    def get_vendors():
+        account_id = request.user.get("account_id")
+        vendor_list = datastore.get_all("vendors", account_id)
+        return jsonify(vendor_list), 200
+    
+    @app.post("/api/vendors")
+    @require_auth(auth_manager, datastore)
+    def create_vendor():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        created_by = request.user.get("id")
+        
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
+            return jsonify({"error": "Only admins can create vendors"}), 403
+        
+        vendor_data = {
+            "account_id": account_id,
+            "name": data.get("name", ""),
+            "email": data.get("email", ""),
+            "phone": data.get("phone", ""),
+            "address": data.get("address", ""),
+            "city": data.get("city", ""),
+            "country": data.get("country", ""),
+            "products": data.get("products", ""),
+            "created_by": created_by,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        vendor = datastore.create("vendors", vendor_data)
+        return jsonify(vendor), 201
+    
+    @app.put("/api/vendors/<int:vendor_id>")
+    @require_auth(auth_manager, datastore)
+    def update_vendor(vendor_id):
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
+            return jsonify({"error": "Only admins can update vendors"}), 403
+        
+        vendor = datastore.get_by_id("vendors", vendor_id, account_id)
+        if not vendor:
+            return jsonify({"error": "Vendor not found"}), 404
+        
+        update_data = {
+            "name": data.get("name", vendor.get("name")),
+            "email": data.get("email", vendor.get("email")),
+            "phone": data.get("phone", vendor.get("phone")),
+            "address": data.get("address", vendor.get("address")),
+            "city": data.get("city", vendor.get("city")),
+            "country": data.get("country", vendor.get("country")),
+            "products": data.get("products", vendor.get("products"))
+        }
+        
+        datastore.update("vendors", vendor_id, update_data, account_id)
+        updated_vendor = datastore.get_by_id("vendors", vendor_id, account_id)
+        return jsonify(updated_vendor), 200
+    
+    @app.delete("/api/vendors/<int:vendor_id>")
+    @require_auth(auth_manager, datastore)
+    def delete_vendor(vendor_id):
+        account_id = request.user.get("account_id")
+        
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
+            return jsonify({"error": "Only admins can delete vendors"}), 403
+        
+        vendor = datastore.get_by_id("vendors", vendor_id, account_id)
+        if not vendor:
+            return jsonify({"error": "Vendor not found"}), 404
+        
+        datastore.delete("vendors", vendor_id, account_id)
+        return jsonify({"success": True}), 200
+
     return app
 
 
