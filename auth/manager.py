@@ -88,6 +88,7 @@ class AuthManager:
             "email": user["email"],
             "account_id": user["account_id"],
             "role": user.get("role", "cashier"),
+            "device_mode": user.get("device_mode"),
             "exp": datetime.utcnow() + _TOKEN_EXPIRY,
             "iat": datetime.utcnow(),
         }

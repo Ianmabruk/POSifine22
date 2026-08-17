@@ -141,6 +141,7 @@ model User {
   hourlyRate        Float        @default(0)
   businessType      String?
   businessRole      String?
+  deviceMode        String?
   permissions       Json?
   lastLoginAt       DateTime?
   createdAt         DateTime     @default(now())

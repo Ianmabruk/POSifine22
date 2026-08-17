@@ -12,6 +12,10 @@ For multi-statement batches, split into individual execute calls so
 each statement is isolated.
 """
 
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 import psycopg
 from datetime import datetime
 import logging
@@ -282,13 +286,17 @@ def run_migrations():
                         created_by INTEGER,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     )
-                """)
+                 """)
                 _safe_execute(cursor, "CREATE INDEX IF NOT EXISTS idx_school_notices_account ON school_notices(account_id)", "Created index: idx_school_notices_account")
 
                 # Add missing columns to credit_requests
                 print("📍 Adding missing columns to credit_requests...")
                 _safe_execute(cursor, "ALTER TABLE credit_requests ADD COLUMN IF NOT EXISTS customer_name TEXT", "Added customer_name to credit_requests")
                 _safe_execute(cursor, "ALTER TABLE credit_requests ADD COLUMN IF NOT EXISTS notes TEXT", "Added notes to credit_requests")
+
+                # Add deviceMode to users
+                print("📍 Adding deviceMode to users...")
+                _safe_execute(cursor, "ALTER TABLE users ADD COLUMN IF NOT EXISTS device_mode TEXT", "Added device_mode to users")
 
                 logger.info("✅ All migrations completed successfully")
                 print("\n✅ Database migrations completed successfully!")

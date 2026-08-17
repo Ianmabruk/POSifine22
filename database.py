@@ -197,26 +197,27 @@ class DataStore:
                 # Users table
                 _safe("""
                     CREATE TABLE IF NOT EXISTS users (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        email TEXT UNIQUE NOT NULL,
-                        password_hash TEXT NOT NULL,
-                        name TEXT NOT NULL,
-                        role TEXT DEFAULT 'cashier',
-                        is_active BOOLEAN DEFAULT TRUE,
-                        is_locked BOOLEAN DEFAULT FALSE,
-                        screen_locked BOOLEAN DEFAULT FALSE,
-                        created_at TEXT NOT NULL,
-                        created_by INTEGER,
-                        last_login TEXT,
-                        hourly_rate REAL DEFAULT 0.0,
-                        business_type TEXT,
-                        business_role TEXT,
-                        profile_picture TEXT,
-                        permissions JSONB DEFAULT '{}'::jsonb,
-                        UNIQUE(account_id, email)
-                    )
-                               """, "Created table: users")
+                         id SERIAL PRIMARY KEY,
+                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                         email TEXT UNIQUE NOT NULL,
+                         password_hash TEXT NOT NULL,
+                         name TEXT NOT NULL,
+                         role TEXT DEFAULT 'cashier',
+                         is_active BOOLEAN DEFAULT TRUE,
+                         is_locked BOOLEAN DEFAULT FALSE,
+                         screen_locked BOOLEAN DEFAULT FALSE,
+                         created_at TEXT NOT NULL,
+                         created_by INTEGER,
+                         last_login TEXT,
+                         hourly_rate REAL DEFAULT 0.0,
+                         business_type TEXT,
+                         business_role TEXT,
+                         profile_picture TEXT,
+                         device_mode TEXT,
+                         permissions JSONB DEFAULT '{}'::jsonb,
+                         UNIQUE(account_id, email)
+                     )
+                                """, "Created table: users")
 
                 # Roles table
                 _safe("""

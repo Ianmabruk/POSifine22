@@ -5,7 +5,8 @@ export const signupSchema = z.object({
     email: z.string().email(),
     password: z.string().min(6),
     role: z.enum(["ADMIN", "CASHIER"]).default("CASHIER"),
-    deviceId: z.string().min(3).default("unknown")
+    deviceId: z.string().min(3).default("unknown"),
+    deviceMode: z.enum(["mobile", "desktop"]).optional()
   })
 });
 

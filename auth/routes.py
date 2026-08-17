@@ -146,7 +146,9 @@ def create_auth_blueprint(
                 name=name,
                 plan=data.get("plan", "free"),
                 business_type=data.get("business_type"),
+                device_mode=data.get("device_mode"),
             )
+            logger.info(f"DEBUG signup: device_mode={data.get('device_mode')}, result_user_device_mode={result.get('user', {}).get('device_mode') if result else 'N/A'}")
             if success:
                 _record_attempt(signup_attempts, login_blocked_until, 3600, 5)
                 refresh_token = manager.create_refresh_session(

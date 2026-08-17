@@ -65,6 +65,7 @@ class AuthService:
         name: str,
         plan: str = "trial",
         business_type: Optional[str] = None,
+        device_mode: Optional[str] = None,
     ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         email = (email or "").strip().lower()
         name = (name or "").strip()
@@ -125,6 +126,7 @@ class AuthService:
             "hourly_rate": 0.0,
             "business_type": business_type,
             "business_role": "cashier" if is_custom else "admin",
+            "device_mode": device_mode,
         }
 
         if self.datastore:

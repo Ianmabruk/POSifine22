@@ -609,7 +609,8 @@ def create_app() -> Flask:
                 password=password,
                 name=name,
                 plan=data.get("plan", "free"),
-                business_type=data.get("business_type")
+                business_type=data.get("business_type"),
+                device_mode=data.get("device_mode"),
             )
             
             if success:
