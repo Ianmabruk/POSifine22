@@ -867,10 +867,11 @@ class DataStore:
                     ADD COLUMN IF NOT EXISTS business_type TEXT,
                     ADD COLUMN IF NOT EXISTS business_role TEXT,
                     ADD COLUMN IF NOT EXISTS profile_picture TEXT,
-                    ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb
+                    ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb,
+                    ADD COLUMN IF NOT EXISTS updated_at TEXT
                 """, "Added business_type and business_role columns to users table")
 
-                # Ensure products table has newer fields used by API/controllers.
+                 # Ensure products table has newer fields used by API/controllers.
                 _safe("""
                     ALTER TABLE products
                     ADD COLUMN IF NOT EXISTS image TEXT,
@@ -884,6 +885,16 @@ class DataStore:
                     ADD COLUMN IF NOT EXISTS updated_at TEXT,
                     ADD COLUMN IF NOT EXISTS package_size REAL DEFAULT 1.0
                 """, "Ensured extended products columns exist")
+
+                # Fix products sequence if it is out of sync.
+                try:
+                    with self._pg_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT setval(pg_get_serial_sequence('products', 'id'), COALESCE((SELECT MAX(id) FROM products) + 1, 1), false)")
+                            conn.commit()
+                            logger.info("✅ Products sequence fixed")
+                except Exception as exc:
+                    logger.warning(f"Failed to fix products sequence: {exc}")
 
                 # Ensure expenses table has linking/source fields used by auto-COGS code.
                 _safe("""

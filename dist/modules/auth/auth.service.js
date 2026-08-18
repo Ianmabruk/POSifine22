@@ -3,16 +3,16 @@ import { SessionsRepo } from "./sessions.repository";
 import { hashPassword, comparePassword } from "./password";
 import { issueAccessToken, issueRefreshToken, verifyRefreshToken } from "./tokens";
 import { AppError } from "../../utils/errors";
+import { PrismaClient } from "@prisma/client";
+const prisma = new PrismaClient();
 export const AuthService = {
-    async signup(email, password, role, deviceId) {
+    async signup(email, password, role, deviceId, deviceMode) {
         const existing = await UsersRepo.findByEmail(email);
         if (existing)
             throw new AppError(409, "EMAIL_TAKEN", "Email already registered");
         const passwordHash = await hashPassword(password);
-        const user = await UsersRepo.create({ email, passwordHash, role });
-        // Create BASIC active subscription on first signup (single-tenant assumption)
-        // Could be extended for multi-tenant later
-        const accessToken = issueAccessToken({ id: user.id, role: user.role, plan: "BASIC" });
+        const user = await UsersRepo.create({ email, passwordHash, role, deviceMode });
+        const accessToken = issueAccessToken({ id: user.id, role: user.role, plan: "BASIC", deviceMode: user.deviceMode });
         const refreshToken = issueRefreshToken({ id: user.id, deviceId });
         const refreshTokenHash = await hashPassword(refreshToken);
         const expiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000);
@@ -27,7 +27,7 @@ export const AuthService = {
         if (!ok)
             throw new AppError(401, "INVALID_CREDENTIALS", "Invalid credentials");
         await UsersRepo.updateLogin(user.id);
-        const accessToken = issueAccessToken({ id: user.id, role: user.role, plan: "BASIC" });
+        const accessToken = issueAccessToken({ id: user.id, role: user.role, plan: "BASIC", deviceMode: user.deviceMode });
         const refreshToken = issueRefreshToken({ id: user.id, deviceId });
         const refreshTokenHash = await hashPassword(refreshToken);
         const existing = await SessionsRepo.findByUserAndDevice(user.id, deviceId);
@@ -38,7 +38,6 @@ export const AuthService = {
         return { user, accessToken, refreshToken };
     },
     async superAdminLogin(email, password, deviceId) {
-        // Check if this is a super admin (main admin) login
         const mainAdminEmail = process.env.MAIN_ADMIN_EMAIL;
         const mainAdminPassword = process.env.MAIN_ADMIN_PASSWORD;
         if (!mainAdminEmail || !mainAdminPassword) {
@@ -51,13 +50,11 @@ export const AuthService = {
         if (!passwordOk) {
             throw new AppError(401, "INVALID_CREDENTIALS", "Invalid credentials");
         }
-        // Create a super admin user record or use a special ID
         const superAdminId = "main_admin_" + Date.now();
         const accessToken = issueAccessToken({ id: superAdminId, role: "main_admin", plan: "business" });
         const refreshTokenVal = issueRefreshToken({ id: superAdminId, deviceId });
         const refreshTokenHash = await hashPassword(refreshTokenVal);
         const expiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000);
-        // Store session
         try {
             const existing = await SessionsRepo.findByUserAndDevice(superAdminId, deviceId);
             if (existing)
@@ -80,8 +77,10 @@ export const AuthService = {
         }
         if (payload.deviceId !== deviceId)
             throw new AppError(401, "INVALID_REFRESH", "Invalid device");
-        // Rotation: revoke existing, issue new
-        const accessToken = issueAccessToken({ id: payload.id, role: payload.role || "CASHIER", plan: payload.plan || "BASIC" });
+        const dbUser = await prisma.user.findUnique({ where: { id: payload.id } });
+        if (!dbUser)
+            throw new AppError(401, "INVALID_REFRESH", "User not found");
+        const accessToken = issueAccessToken({ id: payload.id, role: payload.role || "CASHIER", plan: payload.plan || "BASIC", deviceMode: dbUser.deviceMode });
         const newRefresh = issueRefreshToken({ id: payload.id, deviceId });
         const refreshTokenHash = await hashPassword(newRefresh);
         const existing = await SessionsRepo.findByUserAndDevice(payload.id, deviceId);
@@ -90,5 +89,25 @@ export const AuthService = {
         const expiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000);
         await SessionsRepo.create({ userId: payload.id, deviceId, refreshTokenHash, expiresAt });
         return { accessToken, refreshToken: newRefresh };
+    },
+    async me(userId) {
+        const user = await prisma.user.findUnique({
+            where: { id: userId },
+            select: {
+                id: true,
+                email: true,
+                name: true,
+                role: true,
+                deviceMode: true,
+                accountId: true,
+                businessType: true,
+                businessRole: true,
+                isActive: true,
+                permissions: true,
+            }
+        });
+        if (!user)
+            throw new AppError(404, "USER_NOT_FOUND", "User not found");
+        return user;
     }
 };
