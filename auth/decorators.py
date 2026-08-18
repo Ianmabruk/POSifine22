@@ -162,7 +162,7 @@ class require_business_admin:
             result = self._auth(f)(*args, **kwargs)
             if isinstance(result, tuple) and len(result) == 2 and result[1] >= 400:
                 return result
-            if request.user.get("role") != "admin":
+            if request.user.get("role") not in {"admin", "main_admin", "owner"}:
                 return jsonify({"error": "Business admin access required"}), 403
             return result
         return decorated
