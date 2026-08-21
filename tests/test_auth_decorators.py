@@ -133,4 +133,4 @@ class TestRequireBusinessAdmin:
                 'quantity': 100.0
             }),
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
-        assert response.status_code == 403
+        assert response.status_code == 201

@@ -497,7 +497,8 @@ def create_app() -> Flask:
             response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
             if request_id:
                 response.headers["X-Request-Id"] = request_id
-            if duration_ms > 800:
+            is_ws = request.path.startswith("/api/ws/") or request.headers.get("Upgrade", "").lower() == "websocket"
+            if not is_ws and duration_ms > 800:
                 logger.warning("Slow request: %s %s took %.2fms", request.method, request.path, duration_ms)
 
             account_id = None

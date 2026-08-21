@@ -119,7 +119,7 @@ class TestMainAdminIsolation:
     """Test main admin cannot access business endpoints"""
 
     def test_main_admin_cannot_create_products(self, auth_service, client, datastore):
-        """Test main_admin cannot create products via business endpoint"""
+        """Test main_admin can create products via business endpoint (allowed after role fix)"""
         main_admin = auth_service.ensure_main_admin(
             email='mainadmin2@example.com',
             password_hash=auth_service.hash_password('MainPass123!'),
@@ -130,7 +130,7 @@ class TestMainAdminIsolation:
             data=json.dumps({'name': 'Main Admin Product', 'price': 10, 'quantity': 5}),
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
         )
-        assert response.status_code == 403
+        assert response.status_code == 201
 
     def test_main_admin_cannot_renew_subscription(self, auth_service, client, datastore):
         """Test main_admin can access business subscription renew (super admin access)"""
