@@ -76,6 +76,18 @@ class DataStore:
         'reason', 'created_by', 'recipe_id', 'product_type', 'active'
     }
     
+    ALLOWED_SORT_FIELDS = {
+        'id', 'account_id', 'user_id', 'product_id', 'sale_id', 'expense_id',
+        'email', 'role', 'plan', 'status', 'created_at', 'updated_at',
+        'name', 'phone', 'is_active', 'is_locked', 'trial_ends_at',
+        'subscription_ends_at', 'payment_status', 'provider_reference', 'package_type',
+        'category', 'business_id', 'cashier_id', 'created_by', 'recipe_id',
+        'product_type', 'active', 'price', 'cost', 'quantity', 'total', 'amount',
+        'inventory_item_id', 'transaction_type', 'reference_type', 'reference_id',
+        'reason', 'hourly_rate', 'last_login', 'reorder_level', 'max_stock_level',
+        'cost_per_unit', 'visible_to_cashier', 'enable_weight_pricing', 'barcode', 'sku'
+    }
+    
     def __init__(self, data_dir: str = None, use_postgres: bool = False):
         """
         Initialize data store
@@ -154,22 +166,29 @@ class DataStore:
         """
         with self._pg_connection() as conn:
             conn.autocommit = True
-            with conn.cursor() as cur:
-                # Helper: run a DDL statement, log on failure, never raise.
-                def _safe(sql, desc):
-                    try:
+            
+            # Helper: run a DDL statement, log on failure, never raise.
+            # Uses a fresh cursor per statement to avoid "cursor is closed" errors.
+            def _safe(sql, desc):
+                try:
+                    with conn.cursor() as cur:
                         cur.execute(sql)
-                        logger.info(f"✅ Migration: {desc}")
-                    except Exception as e:
-                        logger.warning(f"Migration warning for {desc}: {e}")
+                    logger.info(f"✅ Migration: {desc}")
+                except Exception as e:
+                    logger.warning(f"Migration warning for {desc}: {e}")
 
-                # Serialize concurrent migration runs across workers with an
-                # advisory lock so two processes don't deadlock on ALTER TABLE.
-                cur.execute("SELECT pg_try_advisory_lock(20240814)")
-                got_lock = cur.fetchone()[0]
+            # Serialize concurrent migration runs across workers with an
+            # advisory lock so two processes don't deadlock on ALTER TABLE.
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_try_advisory_lock(20240814)")
+                    got_lock = cur.fetchone()[0]
                 if not got_lock:
                     logger.info("Migrations skipped — another worker holds the advisory lock")
                     return
+            except Exception as e:
+                logger.warning(f"Migration warning for advisory lock: {e}")
+                return
 
                 # Accounts table
                 _safe("""
@@ -960,7 +979,8 @@ class DataStore:
 
                 # Release advisory lock after migrations complete
                 try:
-                    cur.execute("SELECT pg_advisory_unlock(20240814)")
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT pg_advisory_unlock(20240814)")
                 except Exception as unlock_err:
                     logger.warning(f"Failed to release advisory lock: {unlock_err}")
     
@@ -1145,6 +1165,8 @@ class DataStore:
                 if sort:
                     reverse = sort.startswith("-")
                     sort_field = sort[1:] if reverse else sort
+                    if sort_field not in self.ALLOWED_SORT_FIELDS:
+                        sort_field = "id"
                     order_sql = f"ORDER BY {sort_field} {'DESC' if reverse else 'ASC'}"
                 else:
                     order_sql = "ORDER BY id DESC"
