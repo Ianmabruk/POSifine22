@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 def _build_cookie_path(scope: str = "auth") -> str:
-    return "/api/main-admin" if scope == "main_admin" else "/api/auth"
+    return "/api/auth"
 
 
 def _set_auth_cookies(response, refresh_token: Optional[str], csrf_token: Optional[str], samesite: str, scope: str = "auth"):

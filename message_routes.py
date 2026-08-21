@@ -32,7 +32,7 @@ def require_auth(f):
             if not secret:
                 return jsonify({'error': 'Server misconfigured: JWT_SECRET missing'}), 500
             payload = jwt.decode(token, secret, algorithms=['HS256'])
-            request.user = payload
+            request.user = dict(payload, id=payload.get('user_id'))
             return f(*args, **kwargs)
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token expired'}), 401
