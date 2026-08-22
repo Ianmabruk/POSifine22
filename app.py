@@ -3539,6 +3539,32 @@ def create_app() -> Flask:
         created = datastore.create("raw_materials", record)
         return jsonify(created), 201
 
+    @app.put("/api/raw-materials/<int:material_id>")
+    @require_business_admin(auth_manager, datastore)
+    def update_raw_material(material_id: int):
+        account_id = request.user.get("account_id")
+        data = request.get_json() or {}
+        updates = {}
+        if "name" in data:
+            updates["name"] = (data.get("name") or "").strip() or None
+        if "quantity" in data:
+            updates["quantity"] = _safe_float(data.get("quantity"))
+        if "unit" in data:
+            updates["unit"] = (data.get("unit") or "").strip() or None
+        if "cost_per_unit" in data or "costPerUnit" in data:
+            updates["cost_per_unit"] = _safe_float(data.get("cost_per_unit") or data.get("costPerUnit") or 0)
+        if "reorder_level" in data or "reorderLevel" in data:
+            updates["reorder_level"] = _safe_float(data.get("reorder_level") or data.get("reorderLevel") or 0)
+        updates["updated_at"] = datetime.utcnow().isoformat()
+
+        success = datastore.update("raw_materials", material_id, updates, account_id)
+        if not success:
+            return jsonify({"error": "Raw material not found"}), 404
+        updated = datastore.get_by_id("raw_materials", material_id, account_id)
+        if cache.enabled:
+            cache.delete(f"cache:raw_materials:{account_id}")
+        return jsonify(updated), 200
+
     @app.get("/api/inventory-transactions")
     @require_auth(auth_manager, datastore)
     def get_inventory_transactions():
