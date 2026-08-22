@@ -443,7 +443,7 @@ class StockEngine:
                                 'cashier_id': cashier_id,
                                 'cashier_name': cashier_name,
                                 'created_at': timestamp,
-                                'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                                'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{cashier_id}-{hash(str(sale_items)) % 10000:04d}"
                             }
 
                             cur.execute(
@@ -612,7 +612,7 @@ class StockEngine:
                     'cashier_id': cashier_id,
                     'cashier_name': cashier_name,
                     'created_at': datetime.now().isoformat(),
-                    'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{cashier_id}-{hash(str(sale_items)) % 10000:04d}"
                 }
                 sale = self.ds.create('sales', sale_data)
             
