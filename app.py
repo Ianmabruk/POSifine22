@@ -12,6 +12,8 @@ import uuid
 import json
 import secrets
 import threading
+import base64
+import re
 from datetime import datetime, timedelta
 import time
 import asyncio
@@ -101,6 +103,7 @@ def create_app() -> Flask:
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
     app.config["PREFERRED_URL_SCHEME"] = "https"
+    app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024
 
     # CORS
     cors_origins = os.environ.get("CORS_ORIGINS", os.environ.get("CORS_ORIGIN", ""))
@@ -432,6 +435,28 @@ def create_app() -> Flask:
             return float(value or 0)
         except (TypeError, ValueError):
             return 0.0
+
+    _MAX_IMAGE_SIZE = 10 * 1024 * 1024
+    _ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+    def _validate_product_image(image: Any) -> tuple[bool, str | None]:
+        if not image or not isinstance(image, str):
+            return True, None
+        if not image.startswith("data:image/"):
+            return False, "Invalid image format"
+        mime_match = re.match(r"data:([^;]+);base64,", image)
+        if not mime_match:
+            return False, "Invalid image encoding"
+        mime_type = mime_match.group(1)
+        if mime_type not in _ALLOWED_IMAGE_MIMES:
+            return False, "Unsupported image type"
+        try:
+            decoded = base64.b64decode(image.split(",", 1)[1])
+        except Exception:
+            return False, "Invalid image data"
+        if len(decoded) > _MAX_IMAGE_SIZE:
+            return False, "Image exceeds the maximum allowed size of 10 MB."
+        return True, None
 
     def _apply_fields(items, fields_param: str | None):
         if not fields_param:
@@ -2547,6 +2572,10 @@ def create_app() -> Flask:
             if visible is not None:
                 extra_fields["visible_to_cashier"] = bool(visible)
 
+            image_valid, image_error = _validate_product_image(extra_fields.get("image"))
+            if not image_valid:
+                return jsonify({"error": image_error}), 400
+
             try:
                 resolved_cost = data.get("cost")
                 if (resolved_cost is None or resolved_cost == "") and extra_fields.get("cost_per_unit") is not None:
@@ -2635,6 +2664,11 @@ def create_app() -> Flask:
         for float_field in ("price", "cost", "quantity", "reorder_level", "max_stock_level", "cost_per_unit"):
             if float_field in updates:
                 updates[float_field] = _safe_float(updates.get(float_field))
+
+        if "image" in updates:
+            image_valid, image_error = _validate_product_image(updates.get("image"))
+            if not image_valid:
+                return jsonify({"error": image_error}), 400
 
         success, error, product = admin_controller.update_product(
             product_id=product_id,
