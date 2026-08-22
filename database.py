@@ -63,7 +63,7 @@ class DataStore:
         'students', 'exam_results', 'assignments', 'school_notices',
         'admin_support_messages', 'messages', 'stock_deductions',
         'role_assignments', 'settings', 'email_templates', 'payments',
-        'custom_plan_requests', 'email_logs'
+        'custom_plan_requests', 'email_logs', 'notification_devices', 'notifications'
     }
     
     ALLOWED_FILTER_FIELDS = {
@@ -73,7 +73,9 @@ class DataStore:
         'name', 'phone', 'is_active', 'is_locked', 'trial_ends_at',
         'subscription_ends_at', 'payment_status', 'provider_reference', 'package_type',
         'inventory_item_id', 'transaction_type', 'reference_type', 'reference_id',
-        'reason', 'created_by', 'recipe_id', 'product_type', 'active'
+        'reason', 'created_by', 'recipe_id', 'product_type', 'active',
+        'device_name', 'platform', 'browser', 'enabled', 'permission_status',
+        'type', 'read', 'read_at'
     }
     
     ALLOWED_SORT_FIELDS = {
@@ -821,7 +823,41 @@ class DataStore:
                         created_by INTEGER,
                         created_at TEXT NOT NULL
                     )
-                               """, "Created table: email_logs")
+                                """, "Created table: email_logs")
+
+                 # Push notification devices table
+                _safe("""
+                    CREATE TABLE IF NOT EXISTS notification_devices (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        account_id TEXT NOT NULL,
+                        device_name TEXT DEFAULT 'Unknown Device',
+                        platform TEXT DEFAULT 'unknown',
+                        browser TEXT DEFAULT 'unknown',
+                        push_subscription JSONB NOT NULL,
+                        permission_status TEXT DEFAULT 'granted',
+                        enabled BOOLEAN DEFAULT TRUE,
+                        last_seen_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                               """, "Created table: notification_devices")
+
+                # Notifications history table
+                _safe("""
+                    CREATE TABLE IF NOT EXISTS notifications (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        account_id TEXT NOT NULL,
+                        type TEXT DEFAULT 'info',
+                        title TEXT NOT NULL,
+                        body TEXT NOT NULL,
+                        data JSONB DEFAULT '{}',
+                        read BOOLEAN DEFAULT FALSE,
+                        read_at TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                               """, "Created table: notifications")
 
                  # Create indexes for performance
                 _safe("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)", "Created index: idx_users_account")
@@ -1032,9 +1068,11 @@ class DataStore:
             'inventory_transactions': os.path.join(self.data_dir, 'inventory_transactions.json'),
             'customers': os.path.join(self.data_dir, 'customers.json'),
             'custom_plan_requests': os.path.join(self.data_dir, 'custom_plan_requests.json'),
-            'email_logs': os.path.join(self.data_dir, 'email_logs.json'),
-            'messages': os.path.join(self.data_dir, 'messages.json'),
-            'stock_deductions': os.path.join(self.data_dir, 'stock_deductions.json')
+             'email_logs': os.path.join(self.data_dir, 'email_logs.json'),
+             'notification_devices': os.path.join(self.data_dir, 'notification_devices.json'),
+             'notifications': os.path.join(self.data_dir, 'notifications.json'),
+             'messages': os.path.join(self.data_dir, 'messages.json'),
+             'stock_deductions': os.path.join(self.data_dir, 'stock_deductions.json')
         }
         
         # Initialize empty files
