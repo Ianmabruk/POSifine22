@@ -15,6 +15,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 import logging
 import json
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -443,7 +444,7 @@ class StockEngine:
                                 'cashier_id': cashier_id,
                                 'cashier_name': cashier_name,
                                 'created_at': timestamp,
-                                'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{cashier_id}-{hash(str(sale_items)) % 10000:04d}"
+                                'receipt_number': f"RCP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{cashier_id}-{uuid.uuid4().hex[:8]}"
                             }
 
                             cur.execute(
