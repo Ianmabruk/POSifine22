@@ -546,14 +546,17 @@ def create_app() -> Flask:
     @app.before_request
     def start_timer():
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-            # Enforce CSRF when the request carries browser cookies.
-            # Pure Bearer-token clients typically send no cookies, so we skip
-            # CSRF for them to preserve cross-origin API compatibility.
-            csrf_cookie = request.cookies.get("csrf_token")
-            if csrf_cookie:
-                csrf_header = request.headers.get("X-CSRF-Token")
-                if not csrf_header or csrf_header != csrf_cookie:
-                    return jsonify({"error": "Invalid CSRF token"}), 403
+            csrf_exempt_paths = {
+                "/api/auth/login",
+                "/api/auth/signup",
+                "/api/main-admin/auth/login",
+            }
+            if request.path not in csrf_exempt_paths:
+                csrf_cookie = request.cookies.get("csrf_token")
+                if csrf_cookie:
+                    csrf_header = request.headers.get("X-CSRF-Token")
+                    if not csrf_header or csrf_header != csrf_cookie:
+                        return jsonify({"error": "Invalid CSRF token"}), 403
 
         if os.environ.get("ENFORCE_HTTPS") == "1":
             proto = request.headers.get("X-Forwarded-Proto", request.scheme)
