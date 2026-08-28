@@ -238,3 +238,31 @@ class require_cashier:
                 return jsonify({"error": "Cashier access required"}), 403
             return result
         return decorated
+
+
+class require_permission:
+    """Decorator to require a specific permission flag on the user's permissions dict.
+
+    Usage:
+        @require_permission('manageProducts')
+        def create_product():
+            ...
+    """
+
+    def __init__(self, permission: str, manager: AuthManager, datastore=None):
+        self.permission = permission
+        self.manager = manager
+        self.datastore = datastore
+        self._auth = require_auth(manager, datastore)
+
+    def __call__(self, f: Callable) -> Callable:
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            result = self._auth(f)(*args, **kwargs)
+            if isinstance(result, tuple) and len(result) == 2 and result[1] >= 400:
+                return result
+            permissions = request.user.get("permissions") or {}
+            if not permissions.get("all") and not permissions.get(self.permission):
+                return jsonify({"error": f"Permission '{self.permission}' required", "code": "PERMISSION_DENIED"}), 403
+            return result
+        return decorated

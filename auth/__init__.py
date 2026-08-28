@@ -7,7 +7,7 @@ Clean, modular authentication system for the POS backend.
 from .manager import AuthManager
 from .service import AuthService
 from .routes import create_auth_blueprint, create_main_admin_auth_blueprint
-from .decorators import require_auth, require_admin, require_main_admin, require_business_admin
+from .decorators import require_auth, require_admin, require_main_admin, require_business_admin, require_cashier, require_permission
 
 __all__ = [
     "AuthManager",
@@ -18,4 +18,6 @@ __all__ = [
     "require_admin",
     "require_main_admin",
     "require_business_admin",
+    "require_cashier",
+    "require_permission",
 ]
