@@ -44,7 +44,6 @@ from discounts_service_fees_controller import DiscountsController, ServiceFeesCo
 from business_routes import create_business_routes
 from message_routes import message_bp
 from notify_service import get_notification_service
-from push_notification_service import get_notification_service as get_push_notification_service
 from email_service import email_service as email_service_instance
 
 # Optional optimization imports - graceful fallback if not available
@@ -208,24 +207,11 @@ def create_app() -> Flask:
     stock_engine = StockEngine(datastore)
     session_store = SessionStore()
     notify_service = get_notification_service()
-    push_notification_service = get_push_notification_service(datastore=datastore)
     cache = CacheService()
     auth_manager = AuthManager(app.config["SECRET_KEY"], session_store=session_store, datastore=datastore, cache_service=cache)
     auth_service = AuthService(auth_manager, datastore=datastore, email_service=notify_service)
     admin_controller = AdminController(datastore, stock_engine)
     cashier_controller = CashierController(datastore, stock_engine)
-    
-    def _check_and_send_stock_notifications(product, account_id):
-        if not product:
-            return
-        quantity = _safe_float(product.get("quantity"))
-        reorder_level = _safe_float(product.get("reorder_level"))
-        if reorder_level <= 0:
-            return
-        if quantity <= 0:
-            push_notification_service.send_out_of_stock_notification(account_id, product)
-        elif quantity <= reorder_level:
-            push_notification_service.send_low_stock_notification(account_id, product, reorder_level)
     
     # 🔥 NEW COMPREHENSIVE CONTROLLERS
     time_tracking = TimeTrackingController(datastore)
@@ -2781,11 +2767,6 @@ def create_app() -> Flask:
             if "cost" in updates or "cost_per_unit" in updates:
                 cache.delete(f"cache:stats:{account_id}:all")
 
-        try:
-            _check_and_send_stock_notifications(product, account_id)
-        except Exception as e:
-            logger.warning(f"Stock notification check failed: {e}")
-
         return jsonify(product), 200
 
     @app.put("/api/products/<int:product_id>/stock")
@@ -2802,11 +2783,6 @@ def create_app() -> Flask:
         sync_manager.broadcast_stock_update(account_id, product_id, product.get("quantity") if product else 0)
         if cache.enabled:
             cache.delete(f"cache:products:{account_id}")
-
-        try:
-            _check_and_send_stock_notifications(product, account_id)
-        except Exception as e:
-            logger.warning(f"Stock notification check failed: {e}")
 
         return jsonify(product), 200
 
@@ -3950,11 +3926,6 @@ def create_app() -> Flask:
             if product:
                 sync_manager.broadcast_stock_update(account_id, product_id, product.get("quantity"))
 
-        try:
-            push_notification_service.send_sale_notification(account_id, sale)
-        except Exception as e:
-            logger.warning(f"Push sale notification failed (sale #{sale.get('id')} succeeded): {e}")
-
         return jsonify({"sale": sale}), 201
 
     # ============================================================
@@ -4147,13 +4118,6 @@ def create_app() -> Flask:
             cache.delete(f"cache:products:{account_id}")
             cache.delete(f"cache:stats:{account_id}:all")
             cache.delete(f"cache:stats:{account_id}:{cashier_id}")
-
-        try:
-            push_notification_service.send_sale_notification(account_id, sale)
-            for low_item in low_stock:
-                push_notification_service.send_low_stock_notification(account_id, low_item, _safe_float(low_item.get("reorder_level", 0)))
-        except Exception as e:
-            logger.warning(f"Push notification failed (sale #{sale.get('id')} succeeded): {e}")
 
         return jsonify({
             "success": True,
@@ -5132,201 +5096,6 @@ def create_app() -> Flask:
         
         datastore.delete("vendors", vendor_id, account_id)
         return jsonify({"success": True}), 200
-
-    # ============================================================
-    # Push Notifications
-    # ============================================================
-
-    @app.get("/api/push/public-key")
-    @require_auth(auth_manager, datastore)
-    def get_push_public_key():
-        public_key = os.environ.get("VAPID_PUBLIC_KEY", "")
-        if not public_key:
-            try:
-                public_key, _ = push_notification_service.get_or_create_vapid_keys()
-            except Exception:
-                public_key = ""
-        return jsonify({"publicKey": public_key or ""}), 200
-
-    @app.post("/api/notifications/devices/register")
-    @require_auth(auth_manager, datastore)
-    def register_push_device():
-        account_id = request.user.get("account_id")
-        user_id = request.user.get("id")
-        data = request.get_json() or {}
-
-        subscription = data.get("subscription")
-        if not subscription or not subscription.get("endpoint"):
-            return jsonify({"error": "Invalid push subscription"}), 400
-
-        success, error, device = push_notification_service.register_device(
-            user_id=user_id,
-            account_id=account_id,
-            push_subscription=subscription,
-            device_name=data.get("device_name"),
-            platform=data.get("platform"),
-            browser=data.get("browser"),
-            permission_status=data.get("permission_status", "granted")
-        )
-
-        if not success:
-            return jsonify({"error": error or "Failed to register device"}), 400
-
-        return jsonify(device), 201
-
-    @app.delete("/api/notifications/devices/<int:device_id>")
-    @require_auth(auth_manager, datastore)
-    def unregister_push_device(device_id: int):
-        account_id = request.user.get("account_id")
-        user_id = request.user.get("id")
-
-        device = datastore.get_by_id("notification_devices", device_id, account_id)
-        if not device:
-            return jsonify({"error": "Device not found"}), 404
-
-        if device.get("user_id") != user_id:
-            return jsonify({"error": "Not authorized"}), 403
-
-        success = push_notification_service.unregister_device(device_id, account_id)
-        if not success:
-            return jsonify({"error": "Failed to unregister device"}), 400
-
-        return jsonify({"success": True}), 200
-
-    @app.get("/api/notifications/devices")
-    @require_auth(auth_manager, datastore)
-    def get_notification_devices():
-        account_id = request.user.get("account_id")
-        user_id = request.user.get("id")
-        devices = push_notification_service.get_user_devices(user_id, account_id)
-        return jsonify(devices), 200
-
-    @app.get("/api/notifications/history")
-    @require_auth(auth_manager, datastore)
-    def get_notification_history():
-        account_id = request.user.get("account_id")
-        user_id = request.user.get("id")
-        limit = min(int(request.args.get("limit", 50)), 100)
-
-        try:
-            notifications = datastore.get_all("notifications", account_id)
-            user_notifications = [n for n in notifications if n.get("user_id") == user_id]
-            user_notifications.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-            return jsonify(user_notifications[:limit]), 200
-        except Exception as e:
-            logger.error("Failed to load notification history: %s", e, exc_info=True)
-            return jsonify({"error": "Server error - please try again"}), 500
-
-    @app.post("/api/notifications/mark-read")
-    @require_auth(auth_manager, datastore)
-    def mark_notification_read():
-        account_id = request.user.get("account_id")
-        user_id = request.user.get("id")
-        data = request.get_json() or {}
-        notification_id = data.get("notification_id")
-
-        if notification_id is None:
-            return jsonify({"error": "notification_id is required"}), 400
-
-        try:
-            notification = datastore.get_by_id("notifications", notification_id, account_id)
-            if not notification:
-                return jsonify({"error": "Notification not found"}), 404
-
-            if notification.get("user_id") != user_id:
-                return jsonify({"error": "Not authorized"}), 403
-
-            datastore.update("notifications", notification_id, {
-                "read": True,
-                "read_at": datetime.utcnow().isoformat()
-            }, account_id)
-            return jsonify({"success": True}), 200
-        except Exception as e:
-            logger.error("Failed to mark notification read: %s", e, exc_info=True)
-            return jsonify({"error": "Server error - please try again"}), 500
-
-    @app.post("/api/notifications/mark-all-read")
-    @require_auth(auth_manager, datastore)
-    def mark_all_notifications_read():
-        account_id = request.user.get("account_id")
-        user_id = request.user.get("id")
-
-        try:
-            notifications = datastore.get_all("notifications", account_id)
-            for notification in notifications:
-                if notification.get("user_id") == user_id and not notification.get("read"):
-                    datastore.update("notifications", notification.get("id"), {
-                        "read": True,
-                        "read_at": datetime.utcnow().isoformat()
-                    }, account_id)
-            return jsonify({"success": True}), 200
-        except Exception as e:
-            logger.error("Failed to mark all notifications read: %s", e, exc_info=True)
-            return jsonify({"error": "Server error - please try again"}), 500
-
-    @app.get("/api/notifications/preferences")
-    @require_auth(auth_manager, datastore)
-    def get_notification_preferences():
-        account_id = request.user.get("account_id")
-        user_id = request.user.get("id")
-
-        try:
-            settings = datastore.get_by_id("settings", account_id, account_id)
-            prefs = {
-                "push_enabled": True,
-                "new_sales": True,
-                "low_stock": True,
-                "out_of_stock": True,
-                "stock_restocked": False,
-                "cashier_activity": True,
-                "inventory_updates": False,
-                "sound": True,
-                "desktop": True
-            }
-
-            if settings:
-                saved = settings.get("notification_preferences") or settings.get("notifications") or {}
-                if isinstance(saved, dict):
-                    prefs.update(saved)
-
-            return jsonify(prefs), 200
-        except Exception as e:
-            logger.error("Failed to load notification preferences: %s", e, exc_info=True)
-            return jsonify({"error": "Server error - please try again"}), 500
-
-    @app.put("/api/notifications/preferences")
-    @require_auth(auth_manager, datastore)
-    def update_notification_preferences():
-        account_id = request.user.get("account_id")
-        data = request.get_json() or {}
-
-        try:
-            settings = datastore.get_by_id("settings", account_id, account_id)
-            prefs = {}
-            if settings and isinstance(settings.get("notification_preferences"), dict):
-                prefs = settings["notification_preferences"]
-            elif settings and isinstance(settings.get("notifications"), dict):
-                prefs = settings["notifications"]
-
-            allowed_keys = {
-                "push_enabled", "new_sales", "low_stock", "out_of_stock",
-                "stock_restocked", "cashier_activity", "inventory_updates",
-                "sound", "desktop"
-            }
-            for key, value in data.items():
-                if key in allowed_keys:
-                    prefs[key] = bool(value)
-
-            update_data = {"notification_preferences": prefs}
-            if settings:
-                datastore.update("settings", settings.get("id"), update_data, account_id)
-            else:
-                datastore.create("settings", {"account_id": account_id, **update_data})
-
-            return jsonify(prefs), 200
-        except Exception as e:
-            logger.error("Failed to update notification preferences: %s", e, exc_info=True)
-            return jsonify({"error": "Server error - please try again"}), 500
 
     return app
 
