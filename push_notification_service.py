@@ -425,6 +425,8 @@ class PushNotificationService:
         )
 
         return result
+
+    def create_notification_history(
         self,
         user_id: int,
         account_id: str,
