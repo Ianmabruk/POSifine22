@@ -7,6 +7,24 @@ Test user signup, login, PIN authentication, and screen lock.
 import pytest
 from datetime import datetime
 
+import app as app_module
+
+
+class TestSecretHandling:
+    """Test secure secret validation and dev fallback."""
+
+    def test_create_app_rejects_short_secret_in_production(self, monkeypatch):
+        monkeypatch.setenv('NODE_ENV', 'production')
+        monkeypatch.setenv('JWT_SECRET', 'short-secret')
+        with pytest.raises(RuntimeError, match='at least 32 bytes'):
+            app_module.create_app()
+
+    def test_create_app_generates_secure_dev_secret(self, monkeypatch):
+        monkeypatch.setenv('NODE_ENV', 'development')
+        monkeypatch.delenv('JWT_SECRET', raising=False)
+        app = app_module.create_app()
+        assert len(app.config['SECRET_KEY'].encode('utf-8')) >= 32
+
 
 class TestSignup:
     """Test user signup functionality"""
@@ -49,15 +67,28 @@ class TestSignup:
         assert 'already registered' in error.lower()
     
     def test_signup_with_weak_password(self, auth_service):
-        """Test that weak passwords are accepted (no policy yet)"""
+        """Test that weak passwords are rejected."""
         success, error, result = auth_service.signup(
             email='weak@example.com',
             password='123',
             name='Weak Pass User'
         )
-        
-        # Currently accepts any password - should add validation
-        assert success is True
+
+        assert success is False
+        assert error is not None
+        assert 'password' in error.lower()
+
+    def test_change_password_with_weak_new_password_rejected(self, auth_service, test_account):
+        """Password changes must match the same strong policy as signup."""
+        success, error = auth_service.change_password(
+            user={'id': test_account['user_id'], 'account_id': test_account['account_id']},
+            current_password='TestPassword123!',
+            new_password='abc123'
+        )
+
+        assert success is False
+        assert error is not None
+        assert 'password' in error.lower()
 
 
 class TestLogin:

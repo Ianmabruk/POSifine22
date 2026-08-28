@@ -97,7 +97,7 @@ class TestAuthRoutes:
         assert response.status_code in [200, 404]
 
     def test_logout_endpoint(self, client, auth_headers):
-        response = client.post('/api/auth/logout', headers=auth_headers)
+        response = client.post('/api/auth/logout', headers=auth_headers, data='{}')
         assert response.status_code in [200, 403]
 
 
@@ -127,7 +127,11 @@ class TestAuthorizationRoutes:
             'exp': int(time.time()) - 100
         }
         import jwt as pyjwt
-        expired_token = pyjwt.encode(expired_payload, 'test-secret-key', algorithm='HS256')
+        expired_token = pyjwt.encode(
+            expired_payload,
+            'test-secret-key-32-bytes-long-1234567890',
+            algorithm='HS256'
+        )
         response = client.get('/api/products',
             headers={'Authorization': f'Bearer {expired_token}'})
         assert response.status_code == 401
@@ -351,6 +355,68 @@ class TestUserManagementRoutes:
 
 class TestTenantIsolation:
     """Test multi-tenant data isolation"""
+
+    def test_find_enforces_account_id_override(self, datastore):
+        account_a = {'id': 'acc_a', 'owner_email': 'a@example.com', 'business_name': 'A', 'plan': 'starter', 'created_at': '2024-01-01T00:00:00'}
+        account_b = {'id': 'acc_b', 'owner_email': 'b@example.com', 'business_name': 'B', 'plan': 'starter', 'created_at': '2024-01-01T00:00:00'}
+        datastore.create('accounts', account_a)
+        datastore.create('accounts', account_b)
+
+        datastore.create('users', {
+            'id': 1,
+            'account_id': 'acc_a',
+            'email': 'cashier-a@example.com',
+            'password_hash': 'hash',
+            'name': 'Cashier A',
+            'role': 'cashier',
+            'created_at': '2024-01-01T00:00:00'
+        })
+        datastore.create('users', {
+            'id': 2,
+            'account_id': 'acc_b',
+            'email': 'cashier-b@example.com',
+            'password_hash': 'hash',
+            'name': 'Cashier B',
+            'role': 'cashier',
+            'created_at': '2024-01-01T00:00:00'
+        })
+
+        matches = datastore.find('users', {'role': 'cashier'}, account_id='acc_a')
+
+        assert len(matches) == 1
+        assert matches[0]['account_id'] == 'acc_a'
+        assert all(item['account_id'] == 'acc_a' for item in matches)
+
+    def test_get_by_field_enforces_account_scope(self, datastore):
+        account_a = {'id': 'acc_a', 'owner_email': 'a@example.com', 'business_name': 'A', 'plan': 'starter', 'created_at': '2024-01-01T00:00:00'}
+        account_b = {'id': 'acc_b', 'owner_email': 'b@example.com', 'business_name': 'B', 'plan': 'starter', 'created_at': '2024-01-01T00:00:00'}
+        datastore.create('accounts', account_a)
+        datastore.create('accounts', account_b)
+
+        datastore.create('users', {
+            'id': 1,
+            'account_id': 'acc_a',
+            'email': 'cashier-a@example.com',
+            'password_hash': 'hash',
+            'name': 'Cashier A',
+            'role': 'cashier',
+            'created_at': '2024-01-01T00:00:00'
+        })
+        datastore.create('users', {
+            'id': 2,
+            'account_id': 'acc_b',
+            'email': 'cashier-b@example.com',
+            'password_hash': 'hash',
+            'name': 'Cashier B',
+            'role': 'cashier',
+            'created_at': '2024-01-01T00:00:00'
+        })
+
+        matches = datastore.get_by_field('users', 'role', 'cashier', account_id='acc_a')
+
+        assert len(matches) == 1
+        assert matches[0]['account_id'] == 'acc_a'
+        assert all(item['account_id'] == 'acc_a' for item in matches)
 
     def test_business_a_cannot_access_business_b_product(self, client, auth_service, datastore):
         account_a = auth_service.signup(
@@ -634,8 +700,12 @@ class TestComprehensiveAuthRoutes:
 
     def test_refresh_token_endpoint(self, client, test_account):
         response = client.post('/api/auth/refresh',
-            headers={'Authorization': f'Bearer {test_account["token"]}'})
-        assert response.status_code in [200, 401, 403, 404]
+            headers={
+                'Authorization': f'Bearer {test_account["token"]}',
+                'Content-Type': 'application/json'
+            },
+            data='{}')
+        assert response.status_code in [200, 400, 401, 403, 404]
 
     def test_change_password(self, client, auth_headers):
         response = client.post('/api/auth/change-password',

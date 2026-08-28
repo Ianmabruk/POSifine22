@@ -18,6 +18,40 @@ from auth.manager import AuthManager
 logger = logging.getLogger(__name__)
 
 
+_user_action_attempts: Dict[str, list] = {}
+_user_action_blocked_until: Dict[str, float] = {}
+
+
+def _user_rate_limit_key(user: Dict[str, Any]) -> Optional[str]:
+    if user and user.get("id") and user.get("account_id"):
+        return f"user:{user.get('account_id')}:{user.get('id')}"
+    return None
+
+
+def _is_user_rate_limited(user: Dict[str, Any], window_seconds: int = 60, max_attempts: int = 120) -> (bool, int):
+    key = _user_rate_limit_key(user)
+    if not key:
+        return False, 0
+    now = _time.time()
+    blocked_until = _user_action_blocked_until.get(key)
+    if blocked_until and blocked_until > now:
+        return True, int(blocked_until - now)
+    return False, 0
+
+
+def _record_user_action(user: Dict[str, Any]) -> None:
+    key = _user_rate_limit_key(user)
+    if not key:
+        return
+    now = _time.time()
+    attempts = _user_action_attempts.get(key, [])
+    attempts = [t for t in attempts if now - t < 60]
+    attempts.append(now)
+    _user_action_attempts[key] = attempts
+    if len(attempts) > 120:
+        _user_action_blocked_until[key] = now + 60
+
+
 class require_auth:
     """Decorator class to require valid JWT auth."""
 
@@ -81,12 +115,30 @@ class require_auth:
                             }), 403
                     except Exception:
                         pass
+                elif plan not in ("free",):
+                    sub_end = g.account.get("subscription_ends_at")
+                    if sub_end:
+                        try:
+                            from datetime import datetime as _dt
+                            if _dt.utcnow() > _dt.fromisoformat(sub_end):
+                                return jsonify({
+                                    "error": "Subscription expired. Please renew to continue.",
+                                    "code": "SUBSCRIPTION_EXPIRED"
+                                }), 403
+                        except Exception:
+                            pass
 
                 if g.account.get("payment_required"):
                     return jsonify({
                         "error": "Kindly make payment to continue using the service.",
                         "code": "PAYMENT_REQUIRED"
                     }), 403
+
+                # Per-user/account abuse rate limiting (token-cycling protection)
+                is_limited, retry_after = _is_user_rate_limited(user)
+                if is_limited:
+                    return jsonify({"error": "Too many requests. Try again later.", "retry_after": retry_after}), 429
+                _record_user_action(user)
 
                 request.user = {
                     "id": user["id"],

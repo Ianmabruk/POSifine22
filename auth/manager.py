@@ -291,6 +291,31 @@ class AuthManager:
             {"revoked_at": datetime.utcnow().isoformat()},
         )
 
+    def revoke_all_user_sessions(self, user_id: int, account_id: str) -> int:
+        """Revoke all active refresh sessions for a user.
+
+        Returns the number of sessions revoked.
+        """
+        if not self.datastore:
+            return 0
+        sessions = self.datastore.find(
+            "sessions",
+            {"user_id": user_id, "account_id": account_id},
+            account_id=account_id,
+        )
+        revoked = 0
+        now = datetime.utcnow().isoformat()
+        for session in sessions:
+            if not session.get("revoked_at"):
+                self.datastore.update(
+                    "sessions",
+                    session.get("id"),
+                    {"revoked_at": now},
+                    account_id,
+                )
+                revoked += 1
+        return revoked
+
     # ============================================================
     # User payload helpers
     # ============================================================

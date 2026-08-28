@@ -31,7 +31,11 @@ class TestRequireAuth:
             'exp': int(time.time()) - 100
         }
         import jwt as pyjwt
-        expired_token = pyjwt.encode(expired_payload, 'test-secret-key', algorithm='HS256')
+        expired_token = pyjwt.encode(
+            expired_payload,
+            'test-secret-key-32-bytes-long-1234567890',
+            algorithm='HS256'
+        )
         response = client.get('/api/products',
             headers={'Authorization': f'Bearer {expired_token}'})
         assert response.status_code == 401
@@ -45,7 +49,11 @@ class TestRequireAuth:
             'exp': int(time.time()) + 3600
         }
         import jwt as pyjwt
-        wrong_token = pyjwt.encode(wrong_payload, 'wrong-secret-key', algorithm='HS256')
+        wrong_token = pyjwt.encode(
+            wrong_payload,
+            'wrong-secret-key-32-bytes-long-9876543210',
+            algorithm='HS256'
+        )
         response = client.get('/api/products',
             headers={'Authorization': f'Bearer {wrong_token}'})
         assert response.status_code == 401

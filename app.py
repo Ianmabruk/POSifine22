@@ -31,6 +31,7 @@ from database import DataStore
 from stock_engine import StockEngine
 from auth import AuthManager, AuthService, require_auth, require_admin, require_main_admin, require_business_admin
 from auth.routes import _build_cookie_path
+from auth.service import _is_strong_password
 from admin_controller import AdminController
 from cashier_controller import CashierController
 from sync_manager import sync_manager
@@ -72,12 +73,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def create_app() -> Flask:
-    app = Flask(__name__)
-    sock = Sock(app)
-
+def _resolve_app_secret() -> str:
     runtime_env = (os.environ.get("NODE_ENV") or os.environ.get("FLASK_ENV") or "").strip().lower()
     is_production = runtime_env in {"production", "prod"}
+
     configured_secret = (
         os.environ.get("JWT_SECRET")
         or os.environ.get("JWT_SECRET_KEY")
@@ -87,13 +86,37 @@ def create_app() -> Flask:
         or os.environ.get("APP_SECRET_KEY")
         or os.environ.get("SESSION_SECRET")
     )
+
     if not configured_secret:
         if is_production:
             raise RuntimeError(
                 "A production app secret is required. Set one of: "
                 "JWT_SECRET, JWT_SECRET_KEY, JWT_KEY, SECRET_KEY, FLASK_SECRET_KEY, APP_SECRET_KEY, SESSION_SECRET"
             )
-        configured_secret = "dev-secret-change-me"
+        logger.warning("No app secret configured; generating a secure development secret.")
+        return secrets.token_urlsafe(48)
+
+    if len(configured_secret.encode("utf-8")) < 32:
+        if is_production:
+            raise RuntimeError(
+                "JWT secret must be at least 32 bytes long for HS256. "
+                "Set JWT_SECRET or SECRET_KEY to a value with at least 32 characters."
+            )
+        logger.warning(
+            "Configured app secret is shorter than 32 bytes; generating a secure development fallback."
+        )
+        return secrets.token_urlsafe(48)
+
+    return configured_secret
+
+
+def create_app() -> Flask:
+    app = Flask(__name__)
+    sock = Sock(app)
+
+    runtime_env = (os.environ.get("NODE_ENV") or os.environ.get("FLASK_ENV") or "").strip().lower()
+    is_production = runtime_env in {"production", "prod"}
+    configured_secret = _resolve_app_secret()
     auth_cookie_samesite = os.environ.get("AUTH_COOKIE_SAMESITE", "None" if is_production else "Lax").strip().title()
     if auth_cookie_samesite not in {"Lax", "Strict", "None"}:
         auth_cookie_samesite = "None" if is_production else "Lax"
@@ -254,6 +277,10 @@ def create_app() -> Flask:
     refresh_attempts = {}
     signup_attempts = {}
 
+    # Per-user/account abuse rate limiting (token-cycling protection)
+    user_action_attempts = {}
+    user_action_blocked_until = {}
+
     trusted_proxy_ips = {
         ip.strip()
         for ip in os.environ.get("TRUSTED_PROXY_IPS", "").split(",")
@@ -274,6 +301,34 @@ def create_app() -> Flask:
 
     def _rate_limit_key():
         return _client_ip()
+
+    def _user_rate_limit_key():
+        user = getattr(request, "user", None)
+        if user and user.get("id") and user.get("account_id"):
+            return f"user:{user.get('account_id')}:{user.get('id')}"
+        return None
+
+    def _is_user_rate_limited(window_seconds: int = 60, max_attempts: int = 120):
+        key = _user_rate_limit_key()
+        if not key:
+            return False, 0
+        now = time.time()
+        blocked_until = user_action_blocked_until.get(key)
+        if blocked_until and blocked_until > now:
+            return True, int(blocked_until - now)
+        return False, 0
+
+    def _record_user_action():
+        key = _user_rate_limit_key()
+        if not key:
+            return
+        now = time.time()
+        attempts = user_action_attempts.get(key, [])
+        attempts = [t for t in attempts if now - t < 60]
+        attempts.append(now)
+        user_action_attempts[key] = attempts
+        if len(attempts) > 120:
+            user_action_blocked_until[key] = now + 60
 
     def _set_auth_cookies(resp, refresh_token: str | None, csrf_token: str | None, scope: str = "auth"):
         cookie_path = _build_cookie_path(scope)
@@ -505,20 +560,15 @@ def create_app() -> Flask:
     @app.before_request
     def start_timer():
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            # Enforce CSRF when the request carries browser cookies.
+            # Pure Bearer-token clients typically send no cookies, so we skip
+            # CSRF for them to preserve cross-origin API compatibility.
             csrf_cookie = request.cookies.get("csrf_token")
-            csrf_header = request.headers.get("X-CSRF-Token")
-            csrf_strict_paths = {
-                "/api/auth/refresh",
-                "/api/auth/logout",
-                "/api/main-admin/auth/refresh",
-                "/api/main-admin/auth/logout",
-            }
-            if request.path in csrf_strict_paths:
-                if not csrf_cookie or not csrf_header or csrf_header != csrf_cookie:
+            if csrf_cookie:
+                csrf_header = request.headers.get("X-CSRF-Token")
+                if not csrf_header or csrf_header != csrf_cookie:
                     return jsonify({"error": "Invalid CSRF token"}), 403
-            # Removed non-strict CSRF check that was blocking product/user/stock
-            # operations due to cookie/header mismatches in cross-origin setups.
-            # Bearer token auth is sufficient for API mutation endpoints.
+
         if os.environ.get("ENFORCE_HTTPS") == "1":
             proto = request.headers.get("X-Forwarded-Proto", request.scheme)
             if proto != "https":
@@ -637,12 +687,8 @@ def create_app() -> Flask:
             
             if not email or not password or not name:
                 return jsonify({"error": "Email, password, and name are required"}), 400
-            if len(password) < 8:
-                return jsonify({"error": "Password must be at least 8 characters"}), 400
-            if not any(c.isdigit() for c in password):
-                return jsonify({"error": "Password must contain at least one number"}), 400
-            if not any(c.isupper() for c in password):
-                return jsonify({"error": "Password must contain at least one uppercase letter"}), 400
+            if not _is_strong_password(password):
+                return jsonify({"error": "Password must be at least 8 characters, include upper/lowercase letters and a number"}), 400
             
             success, error, result = auth_service.signup(
                 email=email,
@@ -817,8 +863,8 @@ def create_app() -> Flask:
             return jsonify({"error": "Current password is required"}), 400
         if not new_password:
             return jsonify({"error": "New password is required"}), 400
-        if len(new_password) < 4:
-            return jsonify({"error": "New password must be at least 4 characters"}), 400
+        if not _is_strong_password(new_password):
+            return jsonify({"error": "New password must be at least 8 characters, include upper/lowercase letters and a number"}), 400
 
         # Re-fetch full user from DB to get password_hash
         db_user = datastore.get_by_id("users", user.get("id"), user.get("account_id"))
@@ -839,6 +885,7 @@ def create_app() -> Flask:
         if not success:
             return jsonify({"error": "Failed to update credentials"}), 400
         auth_manager.invalidate_user_session_cache(user.get("id"), user.get("account_id"))
+        auth_manager.revoke_all_user_sessions(user.get("id"), user.get("account_id"))
 
         changed_str = " and ".join(changed_items)
         _log_audit("change_password", user, f"user:{user.get('id')}", {"changed": changed_items})
@@ -1135,7 +1182,7 @@ def create_app() -> Flask:
         role_value = "cashier"
         if data.get("role"):
             requested_role = (data.get("role") or "").strip().lower()
-            if requested_role in {"cashier"}:
+            if requested_role in {"cashier", "admin"}:
                 role_value = requested_role
         if plan in {"starter"}:
             all_account_users = datastore.get_all("users", current.get("account_id")) or []
@@ -1205,9 +1252,7 @@ def create_app() -> Flask:
             updates["is_locked"] = bool(data.get("locked"))
         if "role" in data:
             requested_role = str(data.get("role") or target.get("role") or "cashier").strip().lower()
-            if requested_role not in {"cashier"}:
-                updates.pop("role", None)
-            else:
+            if requested_role in {"cashier", "admin"}:
                 updates["role"] = requested_role
         if "businessType" in data or "business_type" in data:
             updates["business_type"] = data.get("businessType") or data.get("business_type")
@@ -1266,6 +1311,7 @@ def create_app() -> Flask:
         if not success:
             return jsonify({"error": "User not found"}), 404
         auth_manager.invalidate_user_session_cache(user_id, current.get("account_id"))
+        auth_manager.revoke_all_user_sessions(user_id, current.get("account_id"))
         return jsonify({"message": "User lock status updated"}), 200
 
     @app.post("/api/users/<int:user_id>/activate")
@@ -1284,6 +1330,8 @@ def create_app() -> Flask:
         if not success:
             return jsonify({"error": "User not found"}), 404
         auth_manager.invalidate_user_session_cache(user_id, current.get("account_id"))
+        if not is_active:
+            auth_manager.revoke_all_user_sessions(user_id, current.get("account_id"))
         return jsonify({"message": "User active status updated"}), 200
 
     @app.post("/api/clear-data")
@@ -1343,6 +1391,38 @@ def create_app() -> Flask:
 
         if user.get("role") not in {"main_admin", "owner"}:
             return None, (jsonify({"error": "Access denied"}), 403)
+
+        account = datastore.get_by_id("accounts", payload.get("account_id"))
+        if not account:
+            return None, (jsonify({"error": "Account not found"}), 401)
+        if account.get("is_locked"):
+            return None, (jsonify({"error": "Account locked"}), 403)
+        if account.get("is_active") is False:
+            return None, (jsonify({"error": "Account inactive"}), 403)
+        if account.get("payment_required"):
+            return None, (jsonify({"error": "Payment required"}), 403)
+
+        trial_end = account.get("trial_ends_at")
+        plan = account.get("plan", "free")
+        if plan == "trial" and trial_end:
+            try:
+                if datetime.utcnow() > datetime.fromisoformat(trial_end):
+                    return None, (jsonify({"error": "Trial expired", "code": "TRIAL_EXPIRED"}), 403)
+            except Exception:
+                pass
+        elif plan not in ("free",):
+            sub_end = account.get("subscription_ends_at")
+            if sub_end:
+                try:
+                    if datetime.utcnow() > datetime.fromisoformat(sub_end):
+                        return None, (jsonify({"error": "Subscription expired", "code": "SUBSCRIPTION_EXPIRED"}), 403)
+                except Exception:
+                    pass
+
+        if user.get("is_locked"):
+            return None, (jsonify({"error": "User locked"}), 403)
+        if user.get("is_active") is False:
+            return None, (jsonify({"error": "User inactive"}), 403)
 
         return user, None
 
@@ -1681,6 +1761,9 @@ def create_app() -> Flask:
         updated = datastore.update("users", user_id, {"password_hash": hashed}, account_id)
         if not updated:
             return jsonify({"error": "Failed to reset password"}), 400
+
+        auth_manager.invalidate_user_session_cache(user_id, account_id)
+        auth_manager.revoke_all_user_sessions(user_id, account_id)
 
         _log_audit("reset_password", user, f"user:{user_id}", {})
 
@@ -2950,7 +3033,7 @@ def create_app() -> Flask:
 
         product_id = recipe.get("product_id")
 
-        stock_deductions = datastore.get_by_field("stock_deductions", "product_id", product_id)
+        stock_deductions = datastore.get_by_field("stock_deductions", "product_id", product_id, account_id)
         sales_items = []
         for sale in datastore.get_all("sales", account_id):
             for item in sale.get("items", []):

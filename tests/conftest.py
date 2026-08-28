@@ -12,7 +12,7 @@ from datetime import datetime
 
 # Set test environment variables BEFORE any imports
 TEST_DATA_DIR = '/tmp/pos_test_data'
-TEST_SECRET_KEY = 'test-secret-key'
+TEST_SECRET_KEY = 'test-secret-key-32-bytes-long-1234567890'
 
 os.environ['DATA_DIR'] = TEST_DATA_DIR
 os.environ['SECRET_KEY'] = TEST_SECRET_KEY

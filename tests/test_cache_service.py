@@ -183,8 +183,8 @@ class TestRedisBacked:
         shared = FakeRedis()
         csA = _make_redis_cache(shared)
         csB = _make_redis_cache(shared)
-        amA = AuthManager("secret", cache_service=csA)
-        amB = AuthManager("secret", cache_service=csB)
+        amA = AuthManager("secret-key-32-bytes-long-1234567890", cache_service=csA)
+        amB = AuthManager("secret-key-32-bytes-long-1234567890", cache_service=csB)
 
         token = amA.generate_token(
             {"id": 1, "email": "u@x.com", "account_id": "acc", "role": "admin"}
@@ -200,8 +200,8 @@ class TestRedisBacked:
         shared = FakeRedis()
         csA = _make_redis_cache(shared)
         csB = _make_redis_cache(shared)
-        amA = AuthManager("secret", cache_service=csA)
-        amB = AuthManager("secret", cache_service=csB)
+        amA = AuthManager("secret-key-32-bytes-long-1234567890", cache_service=csA)
+        amB = AuthManager("secret-key-32-bytes-long-1234567890", cache_service=csB)
 
         user = {"id": 1, "email": "u@x.com", "account_id": "acc", "role": "admin", "is_active": True}
         acct = {"id": "acc", "is_active": True, "is_locked": False, "plan": "trial", "trial_ends_at": None}

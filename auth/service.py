@@ -19,6 +19,21 @@ from auth.manager import AuthManager
 logger = logging.getLogger(__name__)
 
 
+def _is_strong_password(password: str) -> bool:
+    """Basic password policy that blocks clearly weak credentials."""
+    if not isinstance(password, str):
+        return False
+    password = password.strip()
+    if len(password) < 8:
+        return False
+    if password.lower() in {"password", "password123", "pass1234", "admin", "welcome", "letmein"}:
+        return False
+    has_upper = any(ch.isupper() for ch in password)
+    has_lower = any(ch.islower() for ch in password)
+    has_digit = any(ch.isdigit() for ch in password)
+    return has_upper and has_lower and has_digit
+
+
 def _send_welcome_email_async(email_service, to_email, name, business_name, login_url):
     """Send a welcome email in a background thread so it never blocks the signup response."""
     if not email_service or not getattr(email_service, "available", False):
@@ -71,6 +86,8 @@ class AuthService:
         name = (name or "").strip()
         if not email or not password or not name:
             return False, "Email, password, and name are required", None
+        if not _is_strong_password(password):
+            return False, "Password must be at least 8 characters, include upper/lowercase letters and a number", None
 
         if self.datastore and self.datastore.get_user_by_email(email):
             return False, "Email already registered", None
@@ -234,8 +251,8 @@ class AuthService:
         updates = {}
         changed = []
         if new_password:
-            if len(new_password) < 4:
-                return False, "New password must be at least 4 characters"
+            if not _is_strong_password(new_password):
+                return False, "New password must be at least 8 characters, include upper/lowercase letters and a number"
             updates["password_hash"] = self.manager.hash_password(new_password)
             changed.append("password")
         if not updates:

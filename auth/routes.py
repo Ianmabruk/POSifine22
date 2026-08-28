@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional, Tuple
 from flask import Blueprint, request, jsonify, g
 
 from auth.manager import AuthManager
-from auth.service import AuthService
+from auth.service import AuthService, _is_strong_password
 from auth.decorators import require_auth, require_main_admin
 
 logger = logging.getLogger(__name__)
@@ -133,12 +133,8 @@ def create_auth_blueprint(
             name = (data.get("name") or "").strip()
             if not email or not password or not name:
                 return jsonify({"error": "Email, password, and name are required"}), 400
-            if len(password) < 8:
-                return jsonify({"error": "Password must be at least 8 characters"}), 400
-            if not any(c.isdigit() for c in password):
-                return jsonify({"error": "Password must contain at least one number"}), 400
-            if not any(c.isupper() for c in password):
-                return jsonify({"error": "Password must contain at least one uppercase letter"}), 400
+            if not _is_strong_password(password):
+                return jsonify({"error": "Password must be at least 8 characters, include upper/lowercase letters and a number"}), 400
 
             success, error, result = service.signup(
                 email=email,
@@ -291,8 +287,8 @@ def create_auth_blueprint(
             return jsonify({"error": "Current password is required"}), 400
         if not new_password:
             return jsonify({"error": "New password is required"}), 400
-        if len(new_password) < 4:
-            return jsonify({"error": "New password must be at least 4 characters"}), 400
+        if not _is_strong_password(new_password):
+            return jsonify({"error": "New password must be at least 8 characters, include upper/lowercase letters and a number"}), 400
         ok, msg = service.change_password(user, current_password, new_password)
         if not ok:
             return jsonify({"error": msg}), 400
