@@ -556,6 +556,36 @@ class DataStore:
                 )
                            """, "Created table: credit_requests")
             
+            # Trade/request orders table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS requests (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    cashier_id INTEGER NOT NULL,
+                    cashier_name TEXT NOT NULL,
+                    request_type TEXT DEFAULT 'trade',
+                    product_id INTEGER,
+                    product_name TEXT NOT NULL,
+                    quantity REAL NOT NULL,
+                    unit TEXT DEFAULT 'pcs',
+                    transaction_info JSONB DEFAULT '{}',
+                    status TEXT DEFAULT 'pending',
+                    approved_by INTEGER,
+                    approved_at TEXT,
+                    rejected_by INTEGER,
+                    rejected_at TEXT,
+                    rejection_reason TEXT,
+                    admin_decision TEXT,
+                    decision_timestamp TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                           """, "Created table: requests")
+            _safe("CREATE INDEX IF NOT EXISTS idx_requests_account ON requests(account_id)", "Created index: idx_requests_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_requests_cashier ON requests(cashier_id)", "Created index: idx_requests_cashier")
+            _safe("CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)", "Created index: idx_requests_status")
+            _safe("CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at)", "Created index: idx_requests_created")
+            
             # Expenses table
             _safe("""
                 CREATE TABLE IF NOT EXISTS expenses (
@@ -974,6 +1004,16 @@ class DataStore:
                 ALTER TABLE accounts
                     ADD COLUMN IF NOT EXISTS business_type TEXT
             """, "Ensured accounts table has business_type column")
+            
+            # Migration: Add business profile fields to accounts
+            _safe("""
+                ALTER TABLE accounts
+                    ADD COLUMN IF NOT EXISTS business_phone TEXT,
+                    ADD COLUMN IF NOT EXISTS business_email TEXT,
+                    ADD COLUMN IF NOT EXISTS business_address TEXT,
+                    ADD COLUMN IF NOT EXISTS tax_info TEXT,
+                    ADD COLUMN IF NOT EXISTS invoice_footer TEXT
+            """, "Added business profile fields to accounts table")
             
             # Migration: Add payment_required flag to accounts
             _safe("""

@@ -252,6 +252,29 @@ def create_app() -> Flask:
             return cache_api_response(cache_manager, ttl)
         return lambda f: f
 
+    def normalize_payment_method(method: str) -> str:
+        """Normalize payment method to canonical values."""
+        if not method:
+            return "cash"
+        method = str(method).strip().lower()
+        aliases = {
+            "mpesa": "mpesa",
+            "m-pesa": "mpesa",
+            "m-pesa": "mpesa",
+            "mobile": "mpesa",
+            "mobile_money": "mpesa",
+            "bank": "bank_transfer",
+            "bank_transfer": "bank_transfer",
+            "transfer": "bank_transfer",
+            "card": "card",
+            "credit_card": "card",
+            "debit_card": "card",
+            "visa": "card",
+            "mastercard": "card",
+            "cash": "cash",
+        }
+        return aliases.get(method, method)
+
     # Register business management routes
     business_bp = create_business_routes(datastore, auth_manager)
     app.register_blueprint(business_bp, url_prefix="/api/business")
@@ -2525,6 +2548,10 @@ def create_app() -> Flask:
                         settings_payload["logo"] = account.get("business_logo")
                     if is_admin and account.get("screen_lock_password") and not settings_payload.get("screenLockPassword"):
                         settings_payload["screenLockPassword"] = account.get("screen_lock_password")
+                    if is_admin:
+                        for key in ["business_name", "business_phone", "business_email", "business_address", "tax_info", "invoice_footer"]:
+                            if account.get(key) and not settings_payload.get(key):
+                                settings_payload[key] = account.get(key)
                 resp = jsonify(settings_payload)
                 resp.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=120"
                 return resp, 200
@@ -2535,6 +2562,10 @@ def create_app() -> Flask:
                     fallback["logo"] = account.get("business_logo")
                 if is_admin and account.get("screen_lock_password"):
                     fallback["screenLockPassword"] = account.get("screen_lock_password")
+                if is_admin:
+                    for key in ["business_name", "business_phone", "business_email", "business_address", "tax_info", "invoice_footer"]:
+                        if account.get(key):
+                            fallback[key] = account.get(key)
             resp = jsonify(fallback)
             resp.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=120"
             return resp, 200
@@ -2555,6 +2586,9 @@ def create_app() -> Flask:
             account_updates["business_logo"] = data.get("logo")
         if "screenLockPassword" in data:
             account_updates["screen_lock_password"] = data.get("screenLockPassword")
+        for key in ["business_name", "business_phone", "business_email", "business_address", "tax_info", "invoice_footer"]:
+            if key in data:
+                account_updates[key] = data.get(key)
         if account_updates:
             account_updates["last_activity_date"] = now
             datastore.update("accounts", account_id, account_updates)
@@ -3905,7 +3939,7 @@ def create_app() -> Flask:
             cashier_id=cashier_id,
             cashier_name=cashier_name,
             items=data.get("items", []),
-            payment_method=data.get("payment_method") or data.get("paymentMethod", "cash"),
+            payment_method=normalize_payment_method(data.get("payment_method") or data.get("paymentMethod", "cash")),
             amount_paid=data.get("amount_paid") if "amount_paid" in data else data.get("amountPaid", 0),
             tax_rate=data.get("tax_rate") if "tax_rate" in data else data.get("taxRate", 0),
             discount_amount=data.get("discount_amount") if "discount_amount" in data else data.get("discount", 0),
@@ -3970,7 +4004,7 @@ def create_app() -> Flask:
         tax_type = (data.get("taxType") or "exclusive").strip().lower()
         tax_rate = (tax_amount / subtotal) * 100 if subtotal > 0 and tax_amount > 0 else 0.0
 
-        payment_method = data.get("paymentMethod") or data.get("payment_method") or "cash"
+        payment_method = normalize_payment_method(data.get("paymentMethod") or data.get("payment_method") or "cash")
 
         # === PHASE 2: Execute sale (stock deduction + sale record) ===
         success, error, sale = stock_engine.execute_sale(
@@ -4774,6 +4808,166 @@ def create_app() -> Flask:
             return jsonify({"success": True}), 200
         else:
             return jsonify({"error": "Credit request not found"}), 404
+    
+    # ============================================================
+    # TRADE / REQUEST ORDERS SYSTEM
+    # ============================================================
+    
+    @app.get("/api/requests")
+    @require_auth(auth_manager, datastore)
+    def get_requests():
+        account_id = request.user.get("account_id")
+        user_role = request.user.get("role")
+        user_id = request.user.get("id")
+        
+        try:
+            page = int(request.args.get("page", 1))
+            limit = min(int(request.args.get("limit", 20)), 100)
+            status_filter = request.args.get("status")
+            sort = request.args.get("sort") or "-created_at"
+            
+            if user_role in ["admin", "main_admin", "owner"]:
+                requests_list = datastore.get_all("requests", account_id)
+            else:
+                requests_list = datastore.find("requests", {"cashier_id": user_id, "account_id": account_id}, account_id)
+            
+            # Filter by status
+            if status_filter and status_filter.lower() != "all":
+                requests_list = [r for r in requests_list if r.get("status", "").lower() == status_filter.lower()]
+            
+            # Sort
+            reverse = sort.startswith("-")
+            sort_field = sort[1:] if sort.startswith("-") else sort
+            requests_list.sort(key=lambda r: str(r.get(sort_field) or ''), reverse=reverse)
+            
+            # Paginate
+            total = len(requests_list)
+            start = (page - 1) * limit
+            end = start + limit
+            items = requests_list[start:end]
+            
+            return jsonify({
+                "items": items,
+                "total": total,
+                "page": page,
+                "limit": limit,
+                "total_pages": max(1, (total + limit - 1) // limit)
+            }), 200
+        except Exception as exc:
+            logger.error("Failed to load requests: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
+    
+    @app.post("/api/requests")
+    @require_auth(auth_manager, datastore)
+    def create_request():
+        data = request.get_json() or {}
+        account_id = request.user.get("account_id")
+        cashier_id = request.user.get("id")
+        cashier_name = request.user.get("name") or request.user.get("email")
+        
+        try:
+            now = datetime.utcnow().isoformat()
+            request_data = {
+                "account_id": account_id,
+                "cashier_id": cashier_id,
+                "cashier_name": cashier_name,
+                "request_type": data.get("requestType", "trade"),
+                "product_id": data.get("productId"),
+                "product_name": data.get("productName", "Unknown Product"),
+                "quantity": float(data.get("quantity", 1)),
+                "unit": data.get("unit", "pcs"),
+                "transaction_info": data.get("transactionInfo", {}),
+                "status": "pending",
+                "created_at": now,
+                "updated_at": now
+            }
+            
+            created = datastore.create("requests", request_data)
+            
+            # Broadcast to admins
+            sync_manager.broadcast_notification(account_id, {
+                "type": "new_request",
+                "request_id": created.get("id"),
+                "cashier_name": cashier_name,
+                "product_name": request_data["product_name"],
+                "quantity": request_data["quantity"]
+            })
+            
+            return jsonify(created), 201
+        except Exception as exc:
+            logger.error("Failed to create request: %s", exc, exc_info=True)
+            return jsonify({"error": "Failed to create request"}), 500
+    
+    @app.put("/api/requests/<int:request_id>/approve")
+    @require_auth(auth_manager, datastore)
+    def approve_request(request_id: int):
+        account_id = request.user.get("account_id")
+        admin_id = request.user.get("id")
+        
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
+            return jsonify({"error": "Only admins can approve requests"}), 403
+        
+        try:
+            existing = datastore.get_by_id("requests", request_id, account_id)
+            if not existing:
+                return jsonify({"error": "Request not found"}), 404
+            if existing.get("status") != "pending":
+                return jsonify({"error": "Request has already been processed"}), 400
+            
+            now = datetime.utcnow().isoformat()
+            updated = datastore.update("requests", request_id, {
+                "status": "approved",
+                "approved_by": admin_id,
+                "approved_at": now,
+                "admin_decision": "approved",
+                "decision_timestamp": now,
+                "updated_at": now
+            }, account_id)
+            
+            if not updated:
+                return jsonify({"error": "Failed to approve request"}), 400
+            
+            return jsonify(updated), 200
+        except Exception as exc:
+            logger.error("Failed to approve request: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
+    
+    @app.put("/api/requests/<int:request_id>/reject")
+    @require_auth(auth_manager, datastore)
+    def reject_request(request_id: int):
+        account_id = request.user.get("account_id")
+        admin_id = request.user.get("id")
+        data = request.get_json() or {}
+        rejection_reason = data.get("rejectionReason", "")
+        
+        if request.user.get("role") not in ["admin", "main_admin", "owner"]:
+            return jsonify({"error": "Only admins can reject requests"}), 403
+        
+        try:
+            existing = datastore.get_by_id("requests", request_id, account_id)
+            if not existing:
+                return jsonify({"error": "Request not found"}), 404
+            if existing.get("status") != "pending":
+                return jsonify({"error": "Request has already been processed"}), 400
+            
+            now = datetime.utcnow().isoformat()
+            updated = datastore.update("requests", request_id, {
+                "status": "rejected",
+                "rejected_by": admin_id,
+                "rejected_at": now,
+                "rejection_reason": rejection_reason,
+                "admin_decision": "rejected",
+                "decision_timestamp": now,
+                "updated_at": now
+            }, account_id)
+            
+            if not updated:
+                return jsonify({"error": "Failed to reject request"}), 400
+            
+            return jsonify(updated), 200
+        except Exception as exc:
+            logger.error("Failed to reject request: %s", exc, exc_info=True)
+            return jsonify({"error": "Server error - please try again"}), 500
     
     # ============================================================
     # DISCOUNTS SYSTEM

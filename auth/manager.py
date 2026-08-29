@@ -349,6 +349,8 @@ class AuthManager:
                     sanitized["business_logo"] = account.get("business_logo")
                 if account.get("business_type") and not sanitized.get("business_type"):
                     sanitized["business_type"] = account.get("business_type")
+                if account.get("business_name") and not sanitized.get("business_name"):
+                    sanitized["business_name"] = account.get("business_name")
 
             if "active" not in sanitized:
                 sanitized["active"] = bool(sanitized.get("is_active", True))
