@@ -102,7 +102,7 @@ export const AuthService = {
                 accountId: true,
                 businessType: true,
                 businessRole: true,
-                isActive: true,
+                status: true,
                 permissions: true,
             }
         });

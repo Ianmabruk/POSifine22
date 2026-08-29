@@ -5,7 +5,7 @@ export const UsersRepo = {
         return prisma.user.findUnique({ where: { email } });
     },
     async create(user) {
-        return prisma.user.create({ data: { email: user.email, passwordHash: user.passwordHash, role: user.role, deviceMode: user.deviceMode } });
+        return prisma.user.create({ data: { email: user.email, passwordHash: user.passwordHash, role: user.role, deviceMode: user.deviceMode, name: user.email, accountId: "pending" } });
     },
     async updateLogin(id) {
         return prisma.user.update({ where: { id }, data: { lastLoginAt: new Date(), version: { increment: 1 } } });
