@@ -692,10 +692,10 @@ def create_app() -> Flask:
         try:
             data = request.get_json() or {}
             
-            # Validate required fields first
             email = (data.get("email") or "").strip()
             password = (data.get("password") or "").strip()
             name = (data.get("name") or "").strip()
+            business_name = (data.get("businessName") or "").strip()
             
             if not email or not password or not name:
                 return jsonify({"error": "Email, password, and name are required"}), 400
@@ -706,6 +706,7 @@ def create_app() -> Flask:
                 email=email,
                 password=password,
                 name=name,
+                business_name=business_name or name,
                 plan=data.get("plan", "free"),
                 business_type=data.get("business_type"),
                 device_mode=data.get("device_mode"),

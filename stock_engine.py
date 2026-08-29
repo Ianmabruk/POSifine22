@@ -370,7 +370,9 @@ class StockEngine:
                 # Tax is added on top of subtotal
                 tax_amount = round_decimal((subtotal - discount_amount) * (tax_rate / 100))
                 total = round_decimal(subtotal - discount_amount + tax_amount + service_fee)
-            change = round_decimal(amount_paid - total)
+            change = round_decimal(amount_paid - total) if payment_method == 'cash' else 0.0
+            if payment_method != 'cash' and amount_paid > 0:
+                change = round_decimal(amount_paid - total)
             gross_profit = round_decimal(total - total_cost)
             
             # Step 3: Batch update stock (FAST - single transaction)

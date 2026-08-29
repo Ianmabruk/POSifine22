@@ -78,12 +78,14 @@ class AuthService:
         email: str,
         password: str,
         name: str,
+        business_name: Optional[str] = None,
         plan: str = "trial",
         business_type: Optional[str] = None,
         device_mode: Optional[str] = None,
     ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         email = (email or "").strip().lower()
         name = (name or "").strip()
+        business_name = (business_name or name or "").strip()
         if not email or not password or not name:
             return False, "Email, password, and name are required", None
         if not _is_strong_password(password):
@@ -107,7 +109,7 @@ class AuthService:
         account = {
             "id": account_id,
             "owner_email": email,
-            "business_name": name,
+            "business_name": business_name,
             "plan": "custom" if is_custom else normalized_plan,
             "is_active": True if not is_custom else True,
             "is_locked": False,
@@ -155,7 +157,7 @@ class AuthService:
 
         try:
             _send_welcome_email_async(
-                self.email_service, email, name, name,
+                self.email_service, email, name, business_name,
                 os.environ.get("APP_LOGIN_URL", "https://posify.co.ke/auth/login"),
             )
         except Exception as e:
