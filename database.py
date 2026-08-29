@@ -192,838 +192,838 @@ class DataStore:
                 logger.warning(f"Migration warning for advisory lock: {e}")
                 return
 
-                # Accounts table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS accounts (
-                        id TEXT PRIMARY KEY,
-                        owner_email TEXT UNIQUE NOT NULL,
-                        business_name TEXT NOT NULL,
-                        plan TEXT DEFAULT 'free',
-                        is_active BOOLEAN DEFAULT TRUE,
-                        is_locked BOOLEAN DEFAULT FALSE,
-                        trial_ends_at TEXT,
-                        subscription_ends_at TEXT,
-                        created_at TEXT NOT NULL,
-                        business_logo TEXT,
-                        currency TEXT DEFAULT 'KES',
-                        tax_rate REAL DEFAULT 0.0,
-                        screen_lock_password TEXT DEFAULT '2005',
-                        days_used INTEGER DEFAULT 0,
-                        last_activity_date TEXT,
-                        requested_trial BOOLEAN DEFAULT FALSE,
-                        business_type TEXT
-                    )
-                               """, "Created table: accounts")
-                
-                # Users table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS users (
-                         id SERIAL PRIMARY KEY,
-                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                         email TEXT UNIQUE NOT NULL,
-                         password_hash TEXT NOT NULL,
-                         name TEXT NOT NULL,
-                         role TEXT DEFAULT 'cashier',
-                         is_active BOOLEAN DEFAULT TRUE,
-                         is_locked BOOLEAN DEFAULT FALSE,
-                         screen_locked BOOLEAN DEFAULT FALSE,
-                         created_at TEXT NOT NULL,
-                         created_by INTEGER,
-                         last_login TEXT,
-                         hourly_rate REAL DEFAULT 0.0,
-                         business_type TEXT,
-                         business_role TEXT,
-                         profile_picture TEXT,
-                         device_mode TEXT,
-                         permissions JSONB DEFAULT '{}'::jsonb,
-                         UNIQUE(account_id, email)
-                     )
-                                """, "Created table: users")
+            # Accounts table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS accounts (
+                    id TEXT PRIMARY KEY,
+                    owner_email TEXT UNIQUE NOT NULL,
+                    business_name TEXT NOT NULL,
+                    plan TEXT DEFAULT 'free',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    is_locked BOOLEAN DEFAULT FALSE,
+                    trial_ends_at TEXT,
+                    subscription_ends_at TEXT,
+                    created_at TEXT NOT NULL,
+                    business_logo TEXT,
+                    currency TEXT DEFAULT 'KES',
+                    tax_rate REAL DEFAULT 0.0,
+                    screen_lock_password TEXT DEFAULT '2005',
+                    days_used INTEGER DEFAULT 0,
+                    last_activity_date TEXT,
+                    requested_trial BOOLEAN DEFAULT FALSE,
+                    business_type TEXT
+                )
+                           """, "Created table: accounts")
+            
+            # Users table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS users (
+                     id SERIAL PRIMARY KEY,
+                     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                     email TEXT UNIQUE NOT NULL,
+                     password_hash TEXT NOT NULL,
+                     name TEXT NOT NULL,
+                     role TEXT DEFAULT 'cashier',
+                     is_active BOOLEAN DEFAULT TRUE,
+                     is_locked BOOLEAN DEFAULT FALSE,
+                     screen_locked BOOLEAN DEFAULT FALSE,
+                     created_at TEXT NOT NULL,
+                     created_by INTEGER,
+                     last_login TEXT,
+                     hourly_rate REAL DEFAULT 0.0,
+                     business_type TEXT,
+                     business_role TEXT,
+                     profile_picture TEXT,
+                     device_mode TEXT,
+                     permissions JSONB DEFAULT '{}'::jsonb,
+                     UNIQUE(account_id, email)
+                 )
+                            """, "Created table: users")
 
-                # Roles table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS roles (
-                        id SERIAL PRIMARY KEY,
-                        name TEXT UNIQUE NOT NULL,
-                        description TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: roles")
+            # Roles table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS roles (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: roles")
 
-                # Sessions table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS sessions (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                        refresh_token_hash TEXT NOT NULL,
-                        user_agent TEXT,
-                        ip_address TEXT,
-                        created_at TEXT NOT NULL,
-                        expires_at TEXT NOT NULL,
-                        revoked_at TEXT
-                    )
-                               """, "Created table: sessions")
+            # Sessions table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    refresh_token_hash TEXT NOT NULL,
+                    user_agent TEXT,
+                    ip_address TEXT,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    revoked_at TEXT
+                )
+                           """, "Created table: sessions")
 
-                # Activity logs
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS activity_logs (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT,
-                        user_id INTEGER,
-                        action TEXT NOT NULL,
-                        resource TEXT,
-                        metadata JSONB DEFAULT '{}'::jsonb,
-                        ip_address TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: activity_logs")
+            # Activity logs
+            _safe("""
+                CREATE TABLE IF NOT EXISTS activity_logs (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT,
+                    user_id INTEGER,
+                    action TEXT NOT NULL,
+                    resource TEXT,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    ip_address TEXT,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: activity_logs")
 
-                # Audit logs
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS audit_logs (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT,
-                        actor_id INTEGER,
-                        actor_role TEXT,
-                        action TEXT NOT NULL,
-                        target TEXT,
-                        metadata JSONB DEFAULT '{}'::jsonb,
-                        ip_address TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: audit_logs")
+            # Audit logs
+            _safe("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT,
+                    actor_id INTEGER,
+                    actor_role TEXT,
+                    action TEXT NOT NULL,
+                    target TEXT,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    ip_address TEXT,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: audit_logs")
 
-                # Admin support messages
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS admin_support_messages (
-                        id TEXT PRIMARY KEY,
-                        account_id TEXT,
-                        admin_user_id INTEGER,
-                        admin_email TEXT,
-                        admin_name TEXT,
-                        subject TEXT,
-                        message TEXT,
-                        category TEXT,
-                        priority TEXT,
-                        status TEXT,
-                        response TEXT,
-                        responded_at TEXT,
-                        created_at TEXT,
-                        updated_at TEXT
-                    )
-                               """, "Created table: admin_support_messages")
+            # Admin support messages
+            _safe("""
+                CREATE TABLE IF NOT EXISTS admin_support_messages (
+                    id TEXT PRIMARY KEY,
+                    account_id TEXT,
+                    admin_user_id INTEGER,
+                    admin_email TEXT,
+                    admin_name TEXT,
+                    subject TEXT,
+                    message TEXT,
+                    category TEXT,
+                    priority TEXT,
+                    status TEXT,
+                    response TEXT,
+                    responded_at TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                           """, "Created table: admin_support_messages")
 
-                # Email templates (main admin)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS email_templates (
-                        id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        subject TEXT,
-                        text TEXT,
-                        html TEXT,
-                        created_by TEXT,
-                        created_at TEXT,
-                        updated_at TEXT
-                    )
-                               """, "Created table: email_templates")
-                
-                # Products table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS products (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        name TEXT NOT NULL,
-                        price REAL NOT NULL,
-                        cost REAL DEFAULT 0.0,
-                        quantity REAL DEFAULT 0.0,
-                        product_type TEXT DEFAULT 'regular',
-                        category TEXT DEFAULT 'general',
-                        unit TEXT DEFAULT 'pcs',
-                        image TEXT,
-                        barcode TEXT,
-                        sku TEXT,
-                        is_composite BOOLEAN DEFAULT FALSE,
-                        recipe JSONB DEFAULT '[]',
-                        reorder_level REAL DEFAULT 0.0,
-                        max_stock_level REAL DEFAULT 0.0,
-                        cost_per_unit REAL DEFAULT 0.0,
-                        visible_to_cashier BOOLEAN DEFAULT TRUE,
-                        enable_weight_pricing BOOLEAN DEFAULT FALSE,
-                        created_at TEXT NOT NULL,
-                        created_by INTEGER,
-                        updated_at TEXT
-                    )
-                               """, "Created table: products")
+            # Email templates (main admin)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS email_templates (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    subject TEXT,
+                    text TEXT,
+                    html TEXT,
+                    created_by TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                           """, "Created table: email_templates")
+            
+            # Products table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS products (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    cost REAL DEFAULT 0.0,
+                    quantity REAL DEFAULT 0.0,
+                    product_type TEXT DEFAULT 'regular',
+                    category TEXT DEFAULT 'general',
+                    unit TEXT DEFAULT 'pcs',
+                    image TEXT,
+                    barcode TEXT,
+                    sku TEXT,
+                    is_composite BOOLEAN DEFAULT FALSE,
+                    recipe JSONB DEFAULT '[]',
+                    reorder_level REAL DEFAULT 0.0,
+                    max_stock_level REAL DEFAULT 0.0,
+                    cost_per_unit REAL DEFAULT 0.0,
+                    visible_to_cashier BOOLEAN DEFAULT TRUE,
+                    enable_weight_pricing BOOLEAN DEFAULT FALSE,
+                    created_at TEXT NOT NULL,
+                    created_by INTEGER,
+                    updated_at TEXT
+                )
+                           """, "Created table: products")
 
-                # Raw materials table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS raw_materials (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        name TEXT NOT NULL,
-                        quantity REAL DEFAULT 0.0,
-                        unit TEXT DEFAULT 'unit',
-                        cost_per_unit REAL DEFAULT 0.0,
-                        reorder_level REAL DEFAULT 0.0,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT
-                    )
-                               """, "Created table: raw_materials")
-                
-                # Sales table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS sales (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        items JSONB NOT NULL,
-                        total REAL NOT NULL,
-                        total_cost REAL DEFAULT 0.0,
-                        gross_profit REAL DEFAULT 0.0,
-                        payment_method TEXT DEFAULT 'cash',
-                        amount_paid REAL DEFAULT 0.0,
-                        change REAL DEFAULT 0.0,
-                        tax_amount REAL DEFAULT 0.0,
-                        discount_amount REAL DEFAULT 0.0,
-                        service_fee REAL DEFAULT 0.0,
-                        cashier_id INTEGER,
-                        cashier_name TEXT,
-                         created_at TEXT NOT NULL,
-                         receipt_number TEXT,
-                         notes TEXT,
-                         payment_status TEXT DEFAULT 'paid'
-                     )
-                                 """, "Created table: sales")
+            # Raw materials table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS raw_materials (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    quantity REAL DEFAULT 0.0,
+                    unit TEXT DEFAULT 'unit',
+                    cost_per_unit REAL DEFAULT 0.0,
+                    reorder_level REAL DEFAULT 0.0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
+                )
+                           """, "Created table: raw_materials")
+            
+            # Sales table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS sales (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    items JSONB NOT NULL,
+                    total REAL NOT NULL,
+                    total_cost REAL DEFAULT 0.0,
+                    gross_profit REAL DEFAULT 0.0,
+                    payment_method TEXT DEFAULT 'cash',
+                    amount_paid REAL DEFAULT 0.0,
+                    change REAL DEFAULT 0.0,
+                    tax_amount REAL DEFAULT 0.0,
+                    discount_amount REAL DEFAULT 0.0,
+                    service_fee REAL DEFAULT 0.0,
+                    cashier_id INTEGER,
+                    cashier_name TEXT,
+                     created_at TEXT NOT NULL,
+                     receipt_number TEXT,
+                     notes TEXT,
+                     payment_status TEXT DEFAULT 'paid'
+                 )
+                             """, "Created table: sales")
 
-                 # Payments table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS payments (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
-                        cashier_id INTEGER NOT NULL,
-                        amount REAL NOT NULL,
-                        currency TEXT DEFAULT 'KES',
-                        customer_phone TEXT,
-                        provider TEXT DEFAULT 'manual',
-                        provider_reference TEXT,
-                        account_ref TEXT,
-                        status TEXT DEFAULT 'pending',
-                        failure_reason TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                               """, "Created table: payments")
-                _safe("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)", "Created index: idx_payments_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)", "Created index: idx_payments_sale")
-                _safe("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)", "Created index: idx_payments_provider_ref")
-                _safe("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)", "Created index: idx_payments_status")
+             # Payments table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS payments (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+                    cashier_id INTEGER NOT NULL,
+                    amount REAL NOT NULL,
+                    currency TEXT DEFAULT 'KES',
+                    customer_phone TEXT,
+                    provider TEXT DEFAULT 'manual',
+                    provider_reference TEXT,
+                    account_ref TEXT,
+                    status TEXT DEFAULT 'pending',
+                    failure_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                           """, "Created table: payments")
+            _safe("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)", "Created index: idx_payments_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)", "Created index: idx_payments_sale")
+            _safe("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)", "Created index: idx_payments_provider_ref")
+            _safe("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)", "Created index: idx_payments_status")
 
-                 # Stock deductions table (audit trail for inventory reductions)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS stock_deductions (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-                        product_name TEXT NOT NULL,
-                        quantity_before REAL NOT NULL,
-                        quantity_deducted REAL NOT NULL,
-                        quantity_after REAL NOT NULL,
-                        unit TEXT DEFAULT 'pcs',
-                        payment_method TEXT DEFAULT 'cash',
-                        cashier_id INTEGER,
-                        cashier_name TEXT,
-                        deduction_reason TEXT,
-                        sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: stock_deductions")
+             # Stock deductions table (audit trail for inventory reductions)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS stock_deductions (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                    product_name TEXT NOT NULL,
+                    quantity_before REAL NOT NULL,
+                    quantity_deducted REAL NOT NULL,
+                    quantity_after REAL NOT NULL,
+                    unit TEXT DEFAULT 'pcs',
+                    payment_method TEXT DEFAULT 'cash',
+                    cashier_id INTEGER,
+                    cashier_name TEXT,
+                    deduction_reason TEXT,
+                    sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: stock_deductions")
 
-                # Petroleum tanks
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS petroleum_tanks (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        fuel_type TEXT NOT NULL,
-                        capacity REAL NOT NULL,
-                        current_volume REAL NOT NULL,
-                        price_per_liter REAL NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT
-                    )
-                               """, "Created table: petroleum_tanks")
+            # Petroleum tanks
+            _safe("""
+                CREATE TABLE IF NOT EXISTS petroleum_tanks (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    fuel_type TEXT NOT NULL,
+                    capacity REAL NOT NULL,
+                    current_volume REAL NOT NULL,
+                    price_per_liter REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
+                )
+                           """, "Created table: petroleum_tanks")
 
-                # Petroleum staff
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS petroleum_staff (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        name TEXT NOT NULL,
-                        email TEXT NOT NULL,
-                        password_hash TEXT NOT NULL,
-                        role TEXT DEFAULT 'pump_attendant',
-                        is_active BOOLEAN DEFAULT TRUE,
-                        created_at TEXT NOT NULL,
-                        UNIQUE(account_id, email)
-                    )
-                               """, "Created table: petroleum_staff")
+            # Petroleum staff
+            _safe("""
+                CREATE TABLE IF NOT EXISTS petroleum_staff (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT DEFAULT 'pump_attendant',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(account_id, email)
+                )
+                           """, "Created table: petroleum_staff")
 
-                # Petroleum sales
+            # Petroleum sales
+            _safe("""
+                CREATE TABLE IF NOT EXISTS petroleum_sales (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    staff_id INTEGER,
+                    staff_name TEXT,
+                    fuel_type TEXT NOT NULL,
+                    liters REAL NOT NULL,
+                    amount REAL NOT NULL,
+                    pump_number TEXT,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: petroleum_sales")
+            
+            # Time entries table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS time_entries (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL,
+                    user_name TEXT NOT NULL,
+                    clock_in_time TEXT NOT NULL,
+                    clock_out_time TEXT,
+                    duration_minutes INTEGER DEFAULT 0,
+                    date TEXT NOT NULL,
+                    notes TEXT
+                )
+                           """, "Created table: time_entries")
+            
+            # Reminders table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    priority TEXT DEFAULT 'normal',
+                    status TEXT DEFAULT 'pending',
+                    created_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    target_users JSONB DEFAULT '[]',
+                    admin_note TEXT,
+                    cashier_note TEXT,
+                    admin_signature TEXT,
+                    cashier_signature TEXT,
+                    admin_signed_at TEXT,
+                    cashier_signed_at TEXT,
+                    seen_by JSONB DEFAULT '[]'
+                )
+                           """, "Created table: reminders")
+            
+            # Vendors table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS vendors (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    product_or_service TEXT NOT NULL,
+                    email TEXT,
+                    phone TEXT,
+                    address TEXT,
+                    city TEXT,
+                    country TEXT,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: vendors")
+            
+            # Credit requests table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS credit_requests (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    cashier_id INTEGER NOT NULL,
+                    cashier_name TEXT NOT NULL,
+                    customer_name TEXT,
+                    amount REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    notes TEXT,
+                    status TEXT DEFAULT 'pending',
+                    reviewed_by INTEGER,
+                    reviewed_at TEXT,
+                    admin_notes TEXT,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: credit_requests")
+            
+            # Expenses table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS expenses (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    quantity REAL DEFAULT 1.0,
+                    unit TEXT DEFAULT 'unit',
+                    category TEXT DEFAULT 'general',
+                    description TEXT,
+                    source TEXT DEFAULT 'manual',
+                    linked_product_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    created_by INTEGER
+                )
+                           """, "Created table: expenses")
+            
+            # Discounts table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS discounts (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    product_id INTEGER NOT NULL,
+                    discount_type TEXT DEFAULT 'percentage',
+                    discount_value REAL DEFAULT 0.0,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: discounts")
+            
+            # Service fees table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS service_fees (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    fee_type TEXT DEFAULT 'fixed',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: service_fees")
+            
+            # Stock movements table (audit trail)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS stock_movements (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    product_id INTEGER NOT NULL,
+                    quantity REAL NOT NULL,
+                    movement_type TEXT NOT NULL,
+                    reference_id INTEGER,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    created_by INTEGER
+                )
+                           """, "Created table: stock_movements")
+            
+            # Batches table (for stock batch management)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS batches (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    productId INTEGER NOT NULL,
+                    quantity REAL NOT NULL,
+                    expiryDate TEXT,
+                    batchNumber TEXT NOT NULL,
+                    cost REAL DEFAULT 0.0,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: batches")
+            
+            # Safe migration: rename legacy product_id to productId in batches if needed
+            try:
                 _safe("""
-                    CREATE TABLE IF NOT EXISTS petroleum_sales (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        staff_id INTEGER,
-                        staff_name TEXT,
-                        fuel_type TEXT NOT NULL,
-                        liters REAL NOT NULL,
-                        amount REAL NOT NULL,
-                        pump_number TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: petroleum_sales")
-                
-                # Time entries table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS time_entries (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        user_id INTEGER NOT NULL,
-                        user_name TEXT NOT NULL,
-                        clock_in_time TEXT NOT NULL,
-                        clock_out_time TEXT,
-                        duration_minutes INTEGER DEFAULT 0,
-                        date TEXT NOT NULL,
-                        notes TEXT
-                    )
-                               """, "Created table: time_entries")
-                
-                # Reminders table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS reminders (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        title TEXT NOT NULL,
-                        message TEXT NOT NULL,
-                        priority TEXT DEFAULT 'normal',
-                        status TEXT DEFAULT 'pending',
-                        created_by INTEGER NOT NULL,
-                        created_at TEXT NOT NULL,
-                        expires_at TEXT,
-                        target_users JSONB DEFAULT '[]',
-                        admin_note TEXT,
-                        cashier_note TEXT,
-                        admin_signature TEXT,
-                        cashier_signature TEXT,
-                        admin_signed_at TEXT,
-                        cashier_signed_at TEXT,
-                        seen_by JSONB DEFAULT '[]'
-                    )
-                               """, "Created table: reminders")
-                
-                # Vendors table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS vendors (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        name TEXT NOT NULL,
-                        product_or_service TEXT NOT NULL,
-                        email TEXT,
-                        phone TEXT,
-                        address TEXT,
-                        city TEXT,
-                        country TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: vendors")
-                
-                # Credit requests table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS credit_requests (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        cashier_id INTEGER NOT NULL,
-                        cashier_name TEXT NOT NULL,
-                        customer_name TEXT,
-                        amount REAL NOT NULL,
-                        reason TEXT NOT NULL,
-                        notes TEXT,
-                        status TEXT DEFAULT 'pending',
-                        reviewed_by INTEGER,
-                        reviewed_at TEXT,
-                        admin_notes TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: credit_requests")
-                
-                # Expenses table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS expenses (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        name TEXT NOT NULL,
-                        amount REAL NOT NULL,
-                        quantity REAL DEFAULT 1.0,
-                        unit TEXT DEFAULT 'unit',
-                        category TEXT DEFAULT 'general',
-                        description TEXT,
-                        source TEXT DEFAULT 'manual',
-                        linked_product_id INTEGER,
-                        created_at TEXT NOT NULL,
-                        created_by INTEGER
-                    )
-                               """, "Created table: expenses")
-                
-                # Discounts table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS discounts (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        product_id INTEGER NOT NULL,
-                        discount_type TEXT DEFAULT 'percentage',
-                        discount_value REAL DEFAULT 0.0,
-                        is_active BOOLEAN DEFAULT TRUE,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: discounts")
-                
-                # Service fees table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS service_fees (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        name TEXT NOT NULL,
-                        amount REAL NOT NULL,
-                        fee_type TEXT DEFAULT 'fixed',
-                        is_active BOOLEAN DEFAULT TRUE,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: service_fees")
-                
-                # Stock movements table (audit trail)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS stock_movements (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        product_id INTEGER NOT NULL,
-                        quantity REAL NOT NULL,
-                        movement_type TEXT NOT NULL,
-                        reference_id INTEGER,
-                        notes TEXT,
-                        created_at TEXT NOT NULL,
-                        created_by INTEGER
-                    )
-                               """, "Created table: stock_movements")
-                
-                # Batches table (for stock batch management)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS batches (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        productId INTEGER NOT NULL,
-                        quantity REAL NOT NULL,
-                        expiryDate TEXT,
-                        batchNumber TEXT NOT NULL,
-                        cost REAL DEFAULT 0.0,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: batches")
-                
-                # Safe migration: rename legacy product_id to productId in batches if needed
-                try:
-                    _safe("""
-                        DO $$
-                        BEGIN
-                            IF EXISTS (
-                                SELECT 1 FROM information_schema.columns 
-                                WHERE table_name = 'batches' AND column_name = 'product_id'
-                            ) AND NOT EXISTS (
-                                SELECT 1 FROM information_schema.columns 
-                                WHERE table_name = 'batches' AND column_name = 'productId'
-                            ) THEN
-                                ALTER TABLE batches RENAME COLUMN product_id TO productId;
-                            END IF;
-                        END $$;
-                                       """, "Ensured batches table uses productId column")
-                    logger.info("✅ Migration: Ensured batches table uses productId column")
-                except Exception as e:
-                    logger.warning(f"Migration warning for batches.productId: {e}")
-                
-                # Business profiles table (Pro Plan)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS business_profiles (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE UNIQUE,
-                        business_type TEXT NOT NULL,
-                        plan TEXT DEFAULT 'starter',
-                        created_at TEXT NOT NULL,
-                        settings JSONB DEFAULT '{}'
-                    )
-                               """, "Created table: business_profiles")
-                
-                # Role assignments table (Pro Plan - business-specific roles)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS role_assignments (
-                        id SERIAL PRIMARY KEY,
-                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                        business_type TEXT NOT NULL,
-                        business_role TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        UNIQUE(user_id, business_type)
-                    )
-                               """, "Created table: role_assignments")
-                
-                # Appointments table (Clinic/Hospital)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS appointments (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        patient_name TEXT NOT NULL,
-                        patient_phone TEXT,
-                        patient_email TEXT,
-                        doctor_id INTEGER,
-                        appointment_date TEXT NOT NULL,
-                        appointment_time TEXT NOT NULL,
-                        status TEXT DEFAULT 'scheduled',
-                        notes TEXT,
-                        created_at TEXT NOT NULL,
-                        created_by INTEGER
-                    )
-                               """, "Created table: appointments")
-                
-                # Prescriptions table (Clinic/Hospital)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS prescriptions (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        appointment_id INTEGER REFERENCES appointments(id),
-                        patient_name TEXT NOT NULL,
-                        doctor_id INTEGER NOT NULL,
-                        medications JSONB NOT NULL,
-                        instructions TEXT,
-                        status TEXT DEFAULT 'pending',
-                        dispensed_by INTEGER,
-                        dispensed_at TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: prescriptions")
-                
-                # Tables/Orders table (Bar/Restaurant)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS table_orders (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        table_number TEXT NOT NULL,
-                        items JSONB NOT NULL,
-                        total REAL DEFAULT 0.0,
-                        status TEXT DEFAULT 'open',
-                        server_id INTEGER,
-                        created_at TEXT NOT NULL,
-                        closed_at TEXT
-                    )
-                               """, "Created table: table_orders")
-                
-                # Room bookings table (Hotel)
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS room_bookings (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        room_number TEXT NOT NULL,
-                        guest_name TEXT NOT NULL,
-                        guest_phone TEXT,
-                        guest_email TEXT,
-                        check_in_date TEXT NOT NULL,
-                        check_out_date TEXT NOT NULL,
-                        status TEXT DEFAULT 'reserved',
-                        total_amount REAL DEFAULT 0.0,
-                        notes TEXT,
-                        created_at TEXT NOT NULL,
-                        created_by INTEGER
-                    )
-                               """, "Created table: room_bookings")
-                
-                # Recipes table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS recipes (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-                        name TEXT NOT NULL,
-                        active BOOLEAN DEFAULT TRUE,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT
-                    )
-                               """, "Created table: recipes")
-                
-                # Recipe ingredients table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS recipe_ingredients (
-                        id SERIAL PRIMARY KEY,
-                        recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
-                        inventory_item_id INTEGER NOT NULL,
-                        quantity REAL NOT NULL,
-                        unit TEXT DEFAULT 'pcs',
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: recipe_ingredients")
-                
-                # Inventory transactions table
-                _safe("""
-                     CREATE TABLE IF NOT EXISTS inventory_transactions (
-                         id SERIAL PRIMARY KEY,
-                         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                         inventory_item_id INTEGER NOT NULL,
-                         transaction_type TEXT NOT NULL,
-                         quantity REAL NOT NULL,
-                         unit TEXT DEFAULT 'pcs',
-                         before_quantity REAL NOT NULL,
-                         after_quantity REAL NOT NULL,
-                         reference_type TEXT,
-                         reference_id INTEGER,
-                         reason TEXT,
-                         created_by INTEGER,
-                         created_at TEXT NOT NULL
-                     )
-                               """, "Created table: inventory_transactions")
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.columns 
+                            WHERE table_name = 'batches' AND column_name = 'product_id'
+                        ) AND NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns 
+                            WHERE table_name = 'batches' AND column_name = 'productId'
+                        ) THEN
+                            ALTER TABLE batches RENAME COLUMN product_id TO productId;
+                        END IF;
+                    END $$;
+                                   """, "Ensured batches table uses productId column")
+                logger.info("✅ Migration: Ensured batches table uses productId column")
+            except Exception as e:
+                logger.warning(f"Migration warning for batches.productId: {e}")
+            
+            # Business profiles table (Pro Plan)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS business_profiles (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE UNIQUE,
+                    business_type TEXT NOT NULL,
+                    plan TEXT DEFAULT 'starter',
+                    created_at TEXT NOT NULL,
+                    settings JSONB DEFAULT '{}'
+                )
+                           """, "Created table: business_profiles")
+            
+            # Role assignments table (Pro Plan - business-specific roles)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS role_assignments (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    business_type TEXT NOT NULL,
+                    business_role TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(user_id, business_type)
+                )
+                           """, "Created table: role_assignments")
+            
+            # Appointments table (Clinic/Hospital)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS appointments (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    patient_name TEXT NOT NULL,
+                    patient_phone TEXT,
+                    patient_email TEXT,
+                    doctor_id INTEGER,
+                    appointment_date TEXT NOT NULL,
+                    appointment_time TEXT NOT NULL,
+                    status TEXT DEFAULT 'scheduled',
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    created_by INTEGER
+                )
+                           """, "Created table: appointments")
+            
+            # Prescriptions table (Clinic/Hospital)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS prescriptions (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    appointment_id INTEGER REFERENCES appointments(id),
+                    patient_name TEXT NOT NULL,
+                    doctor_id INTEGER NOT NULL,
+                    medications JSONB NOT NULL,
+                    instructions TEXT,
+                    status TEXT DEFAULT 'pending',
+                    dispensed_by INTEGER,
+                    dispensed_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: prescriptions")
+            
+            # Tables/Orders table (Bar/Restaurant)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS table_orders (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    table_number TEXT NOT NULL,
+                    items JSONB NOT NULL,
+                    total REAL DEFAULT 0.0,
+                    status TEXT DEFAULT 'open',
+                    server_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT
+                )
+                           """, "Created table: table_orders")
+            
+            # Room bookings table (Hotel)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS room_bookings (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    room_number TEXT NOT NULL,
+                    guest_name TEXT NOT NULL,
+                    guest_phone TEXT,
+                    guest_email TEXT,
+                    check_in_date TEXT NOT NULL,
+                    check_out_date TEXT NOT NULL,
+                    status TEXT DEFAULT 'reserved',
+                    total_amount REAL DEFAULT 0.0,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    created_by INTEGER
+                )
+                           """, "Created table: room_bookings")
+            
+            # Recipes table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS recipes (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    active BOOLEAN DEFAULT TRUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
+                )
+                           """, "Created table: recipes")
+            
+            # Recipe ingredients table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS recipe_ingredients (
+                    id SERIAL PRIMARY KEY,
+                    recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+                    inventory_item_id INTEGER NOT NULL,
+                    quantity REAL NOT NULL,
+                    unit TEXT DEFAULT 'pcs',
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: recipe_ingredients")
+            
+            # Inventory transactions table
+            _safe("""
+                 CREATE TABLE IF NOT EXISTS inventory_transactions (
+                     id SERIAL PRIMARY KEY,
+                     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                     inventory_item_id INTEGER NOT NULL,
+                     transaction_type TEXT NOT NULL,
+                     quantity REAL NOT NULL,
+                     unit TEXT DEFAULT 'pcs',
+                     before_quantity REAL NOT NULL,
+                     after_quantity REAL NOT NULL,
+                     reference_type TEXT,
+                     reference_id INTEGER,
+                     reason TEXT,
+                     created_by INTEGER,
+                     created_at TEXT NOT NULL
+                 )
+                           """, "Created table: inventory_transactions")
 
-                # Custom plan requests table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS custom_plan_requests (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        business_name TEXT NOT NULL,
-                        contact_name TEXT NOT NULL,
-                        email TEXT NOT NULL,
-                        phone TEXT,
-                        industry TEXT,
-                        expected_users INTEGER,
-                        expected_branches INTEGER,
-                        features_needed TEXT,
-                        additional_notes TEXT,
-                        status TEXT DEFAULT 'pending',
-                        admin_notes TEXT,
-                        reviewed_by INTEGER,
-                        reviewed_at TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                               """, "Created table: custom_plan_requests")
+            # Custom plan requests table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS custom_plan_requests (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    business_name TEXT NOT NULL,
+                    contact_name TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    phone TEXT,
+                    industry TEXT,
+                    expected_users INTEGER,
+                    expected_branches INTEGER,
+                    features_needed TEXT,
+                    additional_notes TEXT,
+                    status TEXT DEFAULT 'pending',
+                    admin_notes TEXT,
+                    reviewed_by INTEGER,
+                    reviewed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                           """, "Created table: custom_plan_requests")
 
-                # Email logs table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS email_logs (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        recipient TEXT NOT NULL,
-                        subject TEXT NOT NULL,
-                        template_type TEXT,
-                        status TEXT DEFAULT 'pending',
-                        failure_reason TEXT,
-                        sent_at TEXT,
-                        created_by INTEGER,
-                        created_at TEXT NOT NULL
-                    )
-                                """, "Created table: email_logs")
+            # Email logs table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS email_logs (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    recipient TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    template_type TEXT,
+                    status TEXT DEFAULT 'pending',
+                    failure_reason TEXT,
+                    sent_at TEXT,
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL
+                )
+                            """, "Created table: email_logs")
 
-                 # Push notification devices table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS notification_devices (
-                        id SERIAL PRIMARY KEY,
-                        user_id INTEGER NOT NULL,
-                        account_id TEXT NOT NULL,
-                        device_name TEXT DEFAULT 'Unknown Device',
-                        platform TEXT DEFAULT 'unknown',
-                        browser TEXT DEFAULT 'unknown',
-                        push_subscription JSONB NOT NULL,
-                        permission_status TEXT DEFAULT 'granted',
-                        enabled BOOLEAN DEFAULT TRUE,
-                        last_seen_at TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                               """, "Created table: notification_devices")
+             # Push notification devices table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS notification_devices (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    account_id TEXT NOT NULL,
+                    device_name TEXT DEFAULT 'Unknown Device',
+                    platform TEXT DEFAULT 'unknown',
+                    browser TEXT DEFAULT 'unknown',
+                    push_subscription JSONB NOT NULL,
+                    permission_status TEXT DEFAULT 'granted',
+                    enabled BOOLEAN DEFAULT TRUE,
+                    last_seen_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                           """, "Created table: notification_devices")
 
-                # Notifications history table
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS notifications (
-                        id SERIAL PRIMARY KEY,
-                        user_id INTEGER NOT NULL,
-                        account_id TEXT NOT NULL,
-                        type TEXT DEFAULT 'info',
-                        title TEXT NOT NULL,
-                        body TEXT NOT NULL,
-                        data JSONB DEFAULT '{}',
-                        read BOOLEAN DEFAULT FALSE,
-                        read_at TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                               """, "Created table: notifications")
+            # Notifications history table
+            _safe("""
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    account_id TEXT NOT NULL,
+                    type TEXT DEFAULT 'info',
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    data JSONB DEFAULT '{}',
+                    read BOOLEAN DEFAULT FALSE,
+                    read_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                           """, "Created table: notifications")
 
-                 # Create indexes for performance
-                _safe("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)", "Created index: idx_users_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)", "Created index: idx_users_email")
-                _safe("CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)", "Created index: idx_sessions_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)", "Created index: idx_sessions_user")
-                _safe("CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token_hash ON sessions(refresh_token_hash)", "Created index: idx_sessions_refresh_token_hash")
-                _safe("CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_logs(account_id)", "Created index: idx_activity_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_logs(account_id)", "Created index: idx_audit_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_products_account ON products(account_id)", "Created index: idx_products_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)", "Created index: idx_products_category")
-                _safe("CREATE INDEX IF NOT EXISTS idx_raw_materials_account ON raw_materials(account_id)", "Created index: idx_raw_materials_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_sales_account ON sales(account_id)", "Created index: idx_sales_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)", "Created index: idx_sales_created")
-                _safe("CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashier_id)", "Created index: idx_sales_cashier")
-                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_account ON petroleum_tanks(account_id)", "Created index: idx_petroleum_tanks_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_fuel ON petroleum_tanks(fuel_type)", "Created index: idx_petroleum_tanks_fuel")
-                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_account ON petroleum_sales(account_id)", "Created index: idx_petroleum_sales_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_fuel ON petroleum_sales(fuel_type)", "Created index: idx_petroleum_sales_fuel")
-                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_created ON petroleum_sales(created_at)", "Created index: idx_petroleum_sales_created")
-                _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_staff_account ON petroleum_staff(account_id)", "Created index: idx_petroleum_staff_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_account ON time_entries(account_id)", "Created index: idx_time_entries_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_user ON time_entries(user_id)", "Created index: idx_time_entries_user")
-                _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_date ON time_entries(date)", "Created index: idx_time_entries_date")
-                _safe("CREATE INDEX IF NOT EXISTS idx_batches_account ON batches(account_id)", "Created index: idx_batches_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_batches_product ON batches(productId)", "Created index: idx_batches_product")
-                _safe("CREATE INDEX IF NOT EXISTS idx_business_profiles_account ON business_profiles(account_id)", "Created index: idx_business_profiles_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id)", "Created index: idx_role_assignments_user")
-                _safe("CREATE INDEX IF NOT EXISTS idx_appointments_account ON appointments(account_id)", "Created index: idx_appointments_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id)", "Created index: idx_appointments_doctor")
-                _safe("CREATE INDEX IF NOT EXISTS idx_prescriptions_account ON prescriptions(account_id)", "Created index: idx_prescriptions_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_table_orders_account ON table_orders(account_id)", "Created index: idx_table_orders_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_room_bookings_account ON room_bookings(account_id)", "Created index: idx_room_bookings_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_expenses_account ON expenses(account_id)", "Created index: idx_expenses_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)", "Created index: idx_expenses_created")
-                _safe("CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id)", "Created index: idx_stock_movements_product")
-                _safe("CREATE INDEX IF NOT EXISTS idx_stock_movements_account ON stock_movements(account_id)", "Created index: idx_stock_movements_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_account ON stock_deductions(account_id)", "Created index: idx_stock_deductions_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_product ON stock_deductions(product_id)", "Created index: idx_stock_deductions_product")
-                _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_created ON stock_deductions(created_at)", "Created index: idx_stock_deductions_created")
-                _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_cashier ON stock_deductions(cashier_id)", "Created index: idx_stock_deductions_cashier")
-                _safe("CREATE INDEX IF NOT EXISTS idx_recipes_account ON recipes(account_id)", "Created index: idx_recipes_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_recipes_product ON recipes(product_id)", "Created index: idx_recipes_product")
-                _safe("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_recipe ON recipe_ingredients(recipe_id)", "Created index: idx_recipe_ingredients_recipe")
-                _safe("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_item ON recipe_ingredients(inventory_item_id)", "Created index: idx_recipe_ingredients_item")
-                _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_account ON inventory_transactions(account_id)", "Created index: idx_inventory_transactions_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_item ON inventory_transactions(inventory_item_id)", "Created index: idx_inventory_transactions_item")
-                _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_type ON inventory_transactions(transaction_type)", "Created index: idx_inventory_transactions_type")
-                _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_created ON inventory_transactions(created_at)", "Created index: idx_inventory_transactions_created")
-                _safe("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_account ON custom_plan_requests(account_id)", "Created index: idx_custom_plan_requests_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_status ON custom_plan_requests(status)", "Created index: idx_custom_plan_requests_status")
-                _safe("CREATE INDEX IF NOT EXISTS idx_email_logs_account ON email_logs(account_id)", "Created index: idx_email_logs_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_email_logs_status ON email_logs(status)", "Created index: idx_email_logs_status")
-                
-                # ============================================================
-                # MIGRATIONS: Add new columns to existing tables
-                # ============================================================
-                
-                # Add business_type and business_role columns to users table if they don't exist
-                _safe("""
-                    ALTER TABLE users 
-                    ADD COLUMN IF NOT EXISTS business_type TEXT,
-                    ADD COLUMN IF NOT EXISTS business_role TEXT,
-                    ADD COLUMN IF NOT EXISTS profile_picture TEXT,
-                    ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb,
-                    ADD COLUMN IF NOT EXISTS updated_at TEXT
-                """, "Added business_type and business_role columns to users table")
+             # Create indexes for performance
+            _safe("CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)", "Created index: idx_users_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)", "Created index: idx_users_email")
+            _safe("CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id)", "Created index: idx_sessions_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)", "Created index: idx_sessions_user")
+            _safe("CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token_hash ON sessions(refresh_token_hash)", "Created index: idx_sessions_refresh_token_hash")
+            _safe("CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_logs(account_id)", "Created index: idx_activity_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_logs(account_id)", "Created index: idx_audit_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_products_account ON products(account_id)", "Created index: idx_products_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)", "Created index: idx_products_category")
+            _safe("CREATE INDEX IF NOT EXISTS idx_raw_materials_account ON raw_materials(account_id)", "Created index: idx_raw_materials_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_sales_account ON sales(account_id)", "Created index: idx_sales_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)", "Created index: idx_sales_created")
+            _safe("CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashier_id)", "Created index: idx_sales_cashier")
+            _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_account ON petroleum_tanks(account_id)", "Created index: idx_petroleum_tanks_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_tanks_fuel ON petroleum_tanks(fuel_type)", "Created index: idx_petroleum_tanks_fuel")
+            _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_account ON petroleum_sales(account_id)", "Created index: idx_petroleum_sales_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_fuel ON petroleum_sales(fuel_type)", "Created index: idx_petroleum_sales_fuel")
+            _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_sales_created ON petroleum_sales(created_at)", "Created index: idx_petroleum_sales_created")
+            _safe("CREATE INDEX IF NOT EXISTS idx_petroleum_staff_account ON petroleum_staff(account_id)", "Created index: idx_petroleum_staff_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_account ON time_entries(account_id)", "Created index: idx_time_entries_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_user ON time_entries(user_id)", "Created index: idx_time_entries_user")
+            _safe("CREATE INDEX IF NOT EXISTS idx_time_entries_date ON time_entries(date)", "Created index: idx_time_entries_date")
+            _safe("CREATE INDEX IF NOT EXISTS idx_batches_account ON batches(account_id)", "Created index: idx_batches_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_batches_product ON batches(productId)", "Created index: idx_batches_product")
+            _safe("CREATE INDEX IF NOT EXISTS idx_business_profiles_account ON business_profiles(account_id)", "Created index: idx_business_profiles_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id)", "Created index: idx_role_assignments_user")
+            _safe("CREATE INDEX IF NOT EXISTS idx_appointments_account ON appointments(account_id)", "Created index: idx_appointments_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id)", "Created index: idx_appointments_doctor")
+            _safe("CREATE INDEX IF NOT EXISTS idx_prescriptions_account ON prescriptions(account_id)", "Created index: idx_prescriptions_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_table_orders_account ON table_orders(account_id)", "Created index: idx_table_orders_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_room_bookings_account ON room_bookings(account_id)", "Created index: idx_room_bookings_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_expenses_account ON expenses(account_id)", "Created index: idx_expenses_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at)", "Created index: idx_expenses_created")
+            _safe("CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id)", "Created index: idx_stock_movements_product")
+            _safe("CREATE INDEX IF NOT EXISTS idx_stock_movements_account ON stock_movements(account_id)", "Created index: idx_stock_movements_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_account ON stock_deductions(account_id)", "Created index: idx_stock_deductions_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_product ON stock_deductions(product_id)", "Created index: idx_stock_deductions_product")
+            _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_created ON stock_deductions(created_at)", "Created index: idx_stock_deductions_created")
+            _safe("CREATE INDEX IF NOT EXISTS idx_stock_deductions_cashier ON stock_deductions(cashier_id)", "Created index: idx_stock_deductions_cashier")
+            _safe("CREATE INDEX IF NOT EXISTS idx_recipes_account ON recipes(account_id)", "Created index: idx_recipes_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_recipes_product ON recipes(product_id)", "Created index: idx_recipes_product")
+            _safe("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_recipe ON recipe_ingredients(recipe_id)", "Created index: idx_recipe_ingredients_recipe")
+            _safe("CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_item ON recipe_ingredients(inventory_item_id)", "Created index: idx_recipe_ingredients_item")
+            _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_account ON inventory_transactions(account_id)", "Created index: idx_inventory_transactions_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_item ON inventory_transactions(inventory_item_id)", "Created index: idx_inventory_transactions_item")
+            _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_type ON inventory_transactions(transaction_type)", "Created index: idx_inventory_transactions_type")
+            _safe("CREATE INDEX IF NOT EXISTS idx_inventory_transactions_created ON inventory_transactions(created_at)", "Created index: idx_inventory_transactions_created")
+            _safe("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_account ON custom_plan_requests(account_id)", "Created index: idx_custom_plan_requests_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_custom_plan_requests_status ON custom_plan_requests(status)", "Created index: idx_custom_plan_requests_status")
+            _safe("CREATE INDEX IF NOT EXISTS idx_email_logs_account ON email_logs(account_id)", "Created index: idx_email_logs_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_email_logs_status ON email_logs(status)", "Created index: idx_email_logs_status")
+            
+            # ============================================================
+            # MIGRATIONS: Add new columns to existing tables
+            # ============================================================
+            
+            # Add business_type and business_role columns to users table if they don't exist
+            _safe("""
+                ALTER TABLE users 
+                ADD COLUMN IF NOT EXISTS business_type TEXT,
+                ADD COLUMN IF NOT EXISTS business_role TEXT,
+                ADD COLUMN IF NOT EXISTS profile_picture TEXT,
+                ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS updated_at TEXT
+            """, "Added business_type and business_role columns to users table")
 
-                 # Ensure products table has newer fields used by API/controllers.
-                _safe("""
-                    ALTER TABLE products
-                    ADD COLUMN IF NOT EXISTS image TEXT,
-                    ADD COLUMN IF NOT EXISTS barcode TEXT,
-                    ADD COLUMN IF NOT EXISTS sku TEXT,
-                    ADD COLUMN IF NOT EXISTS reorder_level REAL DEFAULT 0.0,
-                    ADD COLUMN IF NOT EXISTS max_stock_level REAL DEFAULT 0.0,
-                    ADD COLUMN IF NOT EXISTS cost_per_unit REAL DEFAULT 0.0,
-                    ADD COLUMN IF NOT EXISTS enable_weight_pricing BOOLEAN DEFAULT FALSE,
-                    ADD COLUMN IF NOT EXISTS visible_to_cashier BOOLEAN DEFAULT TRUE,
-                    ADD COLUMN IF NOT EXISTS updated_at TEXT,
-                    ADD COLUMN IF NOT EXISTS package_size REAL DEFAULT 1.0
-                """, "Ensured extended products columns exist")
+             # Ensure products table has newer fields used by API/controllers.
+            _safe("""
+                ALTER TABLE products
+                ADD COLUMN IF NOT EXISTS image TEXT,
+                ADD COLUMN IF NOT EXISTS barcode TEXT,
+                ADD COLUMN IF NOT EXISTS sku TEXT,
+                ADD COLUMN IF NOT EXISTS reorder_level REAL DEFAULT 0.0,
+                ADD COLUMN IF NOT EXISTS max_stock_level REAL DEFAULT 0.0,
+                ADD COLUMN IF NOT EXISTS cost_per_unit REAL DEFAULT 0.0,
+                ADD COLUMN IF NOT EXISTS enable_weight_pricing BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS visible_to_cashier BOOLEAN DEFAULT TRUE,
+                ADD COLUMN IF NOT EXISTS updated_at TEXT,
+                ADD COLUMN IF NOT EXISTS package_size REAL DEFAULT 1.0
+            """, "Ensured extended products columns exist")
 
-                # Fix products sequence if it is out of sync.
-                try:
-                    with self._pg_connection() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT setval(pg_get_serial_sequence('products', 'id'), COALESCE((SELECT MAX(id) FROM products) + 1, 1), false)")
-                            conn.commit()
-                            logger.info("✅ Products sequence fixed")
-                except Exception as exc:
-                    logger.warning(f"Failed to fix products sequence: {exc}")
-
-                # Ensure expenses table has linking/source fields used by auto-COGS code.
-                _safe("""
-                    ALTER TABLE expenses
-                    ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual',
-                    ADD COLUMN IF NOT EXISTS linked_product_id INTEGER,
-                    ADD COLUMN IF NOT EXISTS linked_raw_material_id INTEGER,
-                    ADD COLUMN IF NOT EXISTS linked_sale_id INTEGER,
-                    ADD COLUMN IF NOT EXISTS description TEXT,
-                    ADD COLUMN IF NOT EXISTS created_by INTEGER
-                """, "Ensured extended expenses columns exist")
-                
-                # Migration: Add missing columns to credit_requests
-                _safe("""
-                ALTER TABLE credit_requests
-                    ADD COLUMN IF NOT EXISTS customer_name TEXT,
-                    ADD COLUMN IF NOT EXISTS notes TEXT
-                """, "Added customer_name and notes columns to credit_requests")
-
-                # Migration: Add missing business_type column to accounts
-                _safe("""
-                    ALTER TABLE accounts
-                        ADD COLUMN IF NOT EXISTS business_type TEXT
-                """, "Ensured accounts table has business_type column")
-                
-                # Migration: Add payment_required flag to accounts
-                _safe("""
-                    ALTER TABLE accounts
-                        ADD COLUMN IF NOT EXISTS payment_required BOOLEAN DEFAULT FALSE
-                """, "Ensured accounts table has payment_required column")
-                
-                # Migration: Add payment_status to sales
-                _safe("""
-                    ALTER TABLE sales
-                        ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'paid'
-                """, "Ensured sales table has payment_status column")
-
-                # Migration: Create payments table if it does not exist
-                _safe("""
-                    CREATE TABLE IF NOT EXISTS payments (
-                        id SERIAL PRIMARY KEY,
-                        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                        sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
-                        cashier_id INTEGER NOT NULL,
-                        amount REAL NOT NULL,
-                        currency TEXT DEFAULT 'KES',
-                        customer_phone TEXT,
-                        provider TEXT DEFAULT 'manual',
-                        provider_reference TEXT,
-                        account_ref TEXT,
-                        status TEXT DEFAULT 'pending',
-                        failure_reason TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                """, "Created table: payments")
-                _safe("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)", "Created index: idx_payments_account")
-                _safe("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)", "Created index: idx_payments_sale")
-                _safe("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)", "Created index: idx_payments_provider_ref")
-                _safe("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)", "Created index: idx_payments_status")
-
-                logger.info("✅ All migrations completed successfully")
-
-                # Release advisory lock after migrations complete
-                try:
+            # Fix products sequence if it is out of sync.
+            try:
+                with self._pg_connection() as conn:
                     with conn.cursor() as cur:
-                        cur.execute("SELECT pg_advisory_unlock(20240814)")
-                except Exception as unlock_err:
-                    logger.warning(f"Failed to release advisory lock: {unlock_err}")
-    
-    # ============================================================
-    # JSON FILE OPERATIONS
-    # ============================================================
-    
+                        cur.execute("SELECT setval(pg_get_serial_sequence('products', 'id'), COALESCE((SELECT MAX(id) FROM products) + 1, 1), false)")
+                        conn.commit()
+                        logger.info("✅ Products sequence fixed")
+            except Exception as exc:
+                logger.warning(f"Failed to fix products sequence: {exc}")
+
+            # Ensure expenses table has linking/source fields used by auto-COGS code.
+            _safe("""
+                ALTER TABLE expenses
+                ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual',
+                ADD COLUMN IF NOT EXISTS linked_product_id INTEGER,
+                ADD COLUMN IF NOT EXISTS linked_raw_material_id INTEGER,
+                ADD COLUMN IF NOT EXISTS linked_sale_id INTEGER,
+                ADD COLUMN IF NOT EXISTS description TEXT,
+                ADD COLUMN IF NOT EXISTS created_by INTEGER
+            """, "Ensured extended expenses columns exist")
+            
+            # Migration: Add missing columns to credit_requests
+            _safe("""
+            ALTER TABLE credit_requests
+                ADD COLUMN IF NOT EXISTS customer_name TEXT,
+                ADD COLUMN IF NOT EXISTS notes TEXT
+            """, "Added customer_name and notes columns to credit_requests")
+
+            # Migration: Add missing business_type column to accounts
+            _safe("""
+                ALTER TABLE accounts
+                    ADD COLUMN IF NOT EXISTS business_type TEXT
+            """, "Ensured accounts table has business_type column")
+            
+            # Migration: Add payment_required flag to accounts
+            _safe("""
+                ALTER TABLE accounts
+                    ADD COLUMN IF NOT EXISTS payment_required BOOLEAN DEFAULT FALSE
+            """, "Ensured accounts table has payment_required column")
+            
+            # Migration: Add payment_status to sales
+            _safe("""
+                ALTER TABLE sales
+                    ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'paid'
+            """, "Ensured sales table has payment_status column")
+
+            # Migration: Create payments table if it does not exist
+            _safe("""
+                CREATE TABLE IF NOT EXISTS payments (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+                    cashier_id INTEGER NOT NULL,
+                    amount REAL NOT NULL,
+                    currency TEXT DEFAULT 'KES',
+                    customer_phone TEXT,
+                    provider TEXT DEFAULT 'manual',
+                    provider_reference TEXT,
+                    account_ref TEXT,
+                    status TEXT DEFAULT 'pending',
+                    failure_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """, "Created table: payments")
+            _safe("CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id)", "Created index: idx_payments_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id)", "Created index: idx_payments_sale")
+            _safe("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)", "Created index: idx_payments_provider_ref")
+            _safe("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)", "Created index: idx_payments_status")
+
+            logger.info("✅ All migrations completed successfully")
+
+            # Release advisory lock after migrations complete
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(20240814)")
+            except Exception as unlock_err:
+                logger.warning(f"Failed to release advisory lock: {unlock_err}")
+
+# ============================================================
+# JSON FILE OPERATIONS
+# ============================================================
+
     def _init_json_files(self):
         """Initialize JSON file storage"""
         self.files = {
@@ -1094,6 +1094,9 @@ class DataStore:
         """Thread-safe JSON file write"""
         lock = get_file_lock(filepath)
         with lock:
+            directory = os.path.dirname(filepath)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
             temp_filepath = f"{filepath}.tmp"
             with open(temp_filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, separators=(',', ':'), ensure_ascii=True)
@@ -1117,15 +1120,16 @@ class DataStore:
         else:
             return self._json_get_by_id(table, id, account_id)
     
-    def get_by_field(self, table: str, field: str, value: Any) -> List[Dict]:
+    def get_by_field(self, table: str, field: str, value: Any, account_id: Optional[str] = None) -> List[Dict]:
         """
-        Get all records where field matches value
-        
+        Get all records where field matches value, while enforcing tenant scope when provided.
+
         Args:
             table: Table name
             field: Field name to filter by
             value: Value to match
-            
+            account_id: Optional tenant override for cross-account isolation
+
         Returns:
             List of matching records
         """
@@ -1135,18 +1139,33 @@ class DataStore:
         if field not in self.ALLOWED_FILTER_FIELDS:
             logger.warning(f"Blocked query on disallowed field: {field}")
             return []
+
+        effective_account_id = account_id
+        if field == 'account_id' and value is not None and account_id is not None and value != account_id:
+            return []
+        if field != 'account_id' and effective_account_id and table != 'accounts':
+            effective_account_id = account_id
+
         if self.use_postgres:
             with self._pg_connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
-                    query = f"SELECT * FROM {table} WHERE {field} = %s"
-                    cur.execute(query, (value,))
+                    conditions = [f"{field} = %s"]
+                    params = [value]
+                    if effective_account_id and table != 'accounts':
+                        conditions.append("account_id = %s")
+                        params.append(effective_account_id)
+                    query = f"SELECT * FROM {table} WHERE {' AND '.join(conditions)}"
+                    cur.execute(query, params)
                     return cur.fetchall()
         else:
-                filepath = self.files.get(table)
-                if not filepath:
-                    return []
-                all_items = self._read_json(filepath)
-                return [item for item in all_items if item.get(field) == value]
+            filepath = self.files.get(table)
+            if not filepath:
+                return []
+            all_items = self._read_json(filepath)
+            items = [item for item in all_items if item.get(field) == value]
+            if effective_account_id and table != 'accounts':
+                items = [item for item in items if item.get('account_id') == effective_account_id]
+            return items
     
     def get_paginated(self, table: str, account_id: Optional[str] = None, page: int = 1, limit: int = 20, search: Optional[str] = None, sort: Optional[str] = None, search_fields: Optional[list] = None) -> Dict[str, Any]:
         """Get paginated records from a table with optional search and sort.
@@ -1298,6 +1317,9 @@ class DataStore:
                     for field, value in filters.items():
                         conditions.append(f"{field} = %s")
                         values.append(value)
+                    if effective_account_id and table != 'accounts':
+                        conditions.append("account_id = %s")
+                        values.append(effective_account_id)
                     if not conditions:
                         return []
                     query = f"SELECT * FROM {table} WHERE " + " AND ".join(conditions)
@@ -1311,6 +1333,8 @@ class DataStore:
             results = []
             for item in all_items:
                 if all(item.get(k) == v for k, v in filters.items()):
+                    if effective_account_id and table != 'accounts' and item.get('account_id') != effective_account_id:
+                        continue
                     results.append(item)
             return results
 
