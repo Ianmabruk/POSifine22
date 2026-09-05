@@ -192,11 +192,95 @@ class require_main_admin:
         @wraps(f)
         def decorated(*args, **kwargs):
             result = self._auth(f)(*args, **kwargs)
-            if isinstance(result, tuple) and result[1] >= 400:
+            if isinstance(result, tuple) and len(result) == 2 and result[1] >= 400:
                 return result
             if request.user.get("role") not in {"main_admin", "owner"}:
                 return jsonify({"error": "Access denied"}), 403
             return result
+        return decorated
+
+
+class require_rider:
+    """Decorator to require the ``rider`` role.
+
+    Riders are independent operators on their own (non-POS) account. Unlike the
+    regular business auth flow we intentionally skip the subscription/trial
+    enforcement so riders are never locked out by a business subscription state.
+    The rider profile is resolved and attached to ``request.rider`` *before* the
+    view runs so route handlers can depend on it.
+    """
+
+    def __init__(self, manager: AuthManager, datastore=None):
+        self.manager = manager
+        self.datastore = datastore
+
+    def __call__(self, f: Callable) -> Callable:
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if request.method == "OPTIONS":
+                return ("", 200)
+            token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+            if not token:
+                return jsonify({"error": "Authorization token required"}), 401
+            try:
+                payload = self.manager.verify_token(token)
+            except Exception as exc:
+                logger.error("Token verification failed: %s", exc)
+                return jsonify({"error": "Invalid or expired token"}), 401
+            if not payload:
+                return jsonify({"error": "Invalid or expired token"}), 401
+
+            user_id = payload.get("user_id")
+            account_id = payload.get("account_id")
+            cache_key = f"auth:{user_id}:{account_id}"
+            try:
+                cached = self.manager._cache_get(cache_key)
+                if cached:
+                    user, account = cached
+                else:
+                    if not self.datastore:
+                        return jsonify({"error": "Database not available"}), 500
+                    user = self.datastore.get_by_id("users", user_id, account_id)
+                    if not user:
+                        return jsonify({"error": "User not found"}), 401
+                    account = self.datastore.get_by_id("accounts", account_id)
+                    if not account:
+                        return jsonify({"error": "Account not found"}), 401
+                    self.manager._cache_set(cache_key, (user, account))
+            except Exception as exc:
+                logger.error("Auth middleware error: %s", exc, exc_info=True)
+                return jsonify({"error": "Authentication error"}), 500
+
+            from datetime import datetime as _dt
+            if account.get("is_locked"):
+                return jsonify({"error": "Account locked"}), 403
+            if account.get("is_active") is False:
+                return jsonify({"error": "Account inactive"}), 403
+            # Riders skip subscription enforcement (non-POS accounts).
+
+            request.user = {
+                "id": user["id"],
+                "email": user["email"],
+                "name": user.get("name"),
+                "role": user.get("role"),
+                "account_id": user.get("account_id"),
+                "business_type": user.get("business_type"),
+                "business_role": user.get("business_role"),
+                "permissions": user.get("permissions") or self.manager._default_permissions(user.get("role")),
+            }
+            g.user = user
+            g.account = account
+
+            if request.user.get("role") != "rider":
+                return jsonify({"error": "Rider access required"}), 403
+
+            if not self.datastore:
+                return jsonify({"error": "Database not available"}), 500
+            rider = self.datastore.find("riders", {"user_id": user_id})
+            if not rider:
+                return jsonify({"error": "Rider profile not found"}), 404
+            request.rider = rider[0]
+            return f(*args, **kwargs)
         return decorated
 
 

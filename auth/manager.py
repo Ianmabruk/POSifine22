@@ -455,6 +455,14 @@ class AuthManager:
                 "manageReports": True,
                 "manageBusiness": True,
             }
+        if normalized_role == "rider":
+            return {
+                "viewSales": False,
+                "viewInventory": False,
+                "viewExpenses": False,
+                "manageProducts": False,
+                "manageDeliveries": True,
+            }
         return {
             "viewSales": True,
             "viewInventory": True,

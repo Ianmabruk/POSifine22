@@ -63,7 +63,11 @@ class DataStore:
         'students', 'exam_results', 'assignments', 'school_notices',
         'admin_support_messages', 'messages', 'stock_deductions',
         'role_assignments', 'settings', 'email_templates', 'payments',
-        'custom_plan_requests', 'email_logs', 'notification_devices', 'notifications'
+        'custom_plan_requests', 'email_logs', 'notification_devices', 'notifications',
+        # POSIFY Business Network
+        'wholesalers', 'wholesale_products', 'wholesale_orders', 'wholesale_order_items',
+        'riders', 'rider_locations', 'deliveries', 'delivery_events',
+        'payment_transactions', 'settlements', 'complaints', 'ratings',
     }
     
     ALLOWED_FILTER_FIELDS = {
@@ -75,8 +79,13 @@ class DataStore:
         'inventory_item_id', 'transaction_type', 'reference_type', 'reference_id',
         'reason', 'created_by', 'recipe_id', 'product_type', 'active',
         'device_name', 'platform', 'browser', 'enabled', 'permission_status',
-        'type', 'read', 'read_at'
-    }
+            'type', 'read', 'read_at',
+            # POSIFY Business Network fields
+            'wholesaler_id', 'order_id', 'rider_id', 'delivery_id', 'rating',
+            'order_status', 'delivery_status', 'provider', 'is_online',
+            'is_available', 'is_verified', 'verification_status',
+            'latitude', 'longitude', 'wholesale_order_id',
+        }
     
     ALLOWED_SORT_FIELDS = {
         'id', 'account_id', 'user_id', 'product_id', 'sale_id', 'expense_id',
@@ -87,7 +96,12 @@ class DataStore:
         'product_type', 'active', 'price', 'cost', 'quantity', 'total', 'amount',
         'inventory_item_id', 'transaction_type', 'reference_type', 'reference_id',
         'reason', 'hourly_rate', 'last_login', 'reorder_level', 'max_stock_level',
-        'cost_per_unit', 'visible_to_cashier', 'enable_weight_pricing', 'barcode', 'sku'
+        'cost_per_unit', 'visible_to_cashier',         'enable_weight_pricing', 'barcode', 'sku',
+        # POSIFY Business Network fields
+        'wholesaler_id', 'order_id', 'rider_id', 'delivery_id', 'rating',
+        'order_status', 'delivery_status', 'payment_status', 'price', 'cost',
+        'quantity', 'total', 'amount', 'distance', 'eta_minutes', 'is_online',
+        'is_verified', 'created_at',
     }
     
     def __init__(self, data_dir: str = None, use_postgres: bool = False):
@@ -1051,14 +1065,327 @@ class DataStore:
             _safe("CREATE INDEX IF NOT EXISTS idx_payments_provider_ref ON payments(provider_reference)", "Created index: idx_payments_provider_ref")
             _safe("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)", "Created index: idx_payments_status")
 
+             # ============================================================
+            # POSIFY Business Network: Marketplace, Rider Network & Logistics
+            # ============================================================
+            
+            # Extend accounts with marketplace/wholesaler flags
+            _safe("""
+                ALTER TABLE accounts
+                    ADD COLUMN IF NOT EXISTS is_wholesaler BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS business_phone TEXT,
+                    ADD COLUMN IF NOT EXISTS business_address TEXT,
+                    ADD COLUMN IF NOT EXISTS business_city TEXT,
+                    ADD COLUMN IF NOT EXISTS business_country TEXT,
+                    ADD COLUMN IF NOT EXISTS lat REAL,
+                    ADD COLUMN IF NOT EXISTS lng REAL,
+                    ADD COLUMN IF NOT EXISTS logo_url TEXT
+            """, "Ensured accounts has marketplace columns")
+
+            # Wholesaler public marketplace profiles
+            _safe("""
+                CREATE TABLE IF NOT EXISTS wholesalers (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    business_name TEXT NOT NULL,
+                    description TEXT,
+                    phone TEXT,
+                    email TEXT,
+                    address TEXT,
+                    city TEXT,
+                    country TEXT,
+                    lat REAL,
+                    lng REAL,
+                    categories JSONB DEFAULT '[]',
+                    min_order_amount REAL DEFAULT 0.0,
+                    delivery_available BOOLEAN DEFAULT FALSE,
+                    is_verified BOOLEAN DEFAULT FALSE,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    rating REAL DEFAULT 0.0,
+                    order_count INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """, "Created table: wholesalers")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wholesalers_account ON wholesalers(account_id)", "Created index: idx_wholesalers_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wholesalers_active ON wholesalers(is_active, is_verified)", "Created index: idx_wholesalers_active")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wholesalers_location ON wholesalers(lat, lng)", "Created index: idx_wholesalers_location")
+
+            # Wholesale products listed by each wholesaler
+            _safe("""
+                CREATE TABLE IF NOT EXISTS wholesale_products (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    wholesaler_id INTEGER REFERENCES wholesalers(id) ON DELETE SET NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    sku TEXT,
+                    category TEXT,
+                    unit TEXT DEFAULT 'pcs',
+                    price REAL NOT NULL,
+                    cost REAL DEFAULT 0.0,
+                    available_quantity REAL DEFAULT 0.0,
+                    min_order_quantity REAL DEFAULT 1.0,
+                    image TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """, "Created table: wholesale_products")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wp_account ON wholesale_products(account_id)", "Created index: idx_wp_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wp_category ON wholesale_products(category)", "Created index: idx_wp_category")
+
+            # Wholesale orders placed by retailer businesses
+            _safe("""
+                CREATE TABLE IF NOT EXISTS wholesale_orders (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    wholesaler_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    wholesaler_id INTEGER REFERENCES wholesalers(id) ON DELETE SET NULL,
+                    status TEXT DEFAULT 'created',
+                    order_status TEXT DEFAULT 'created',
+                    total_amount REAL DEFAULT 0.0,
+                    sub_total REAL DEFAULT 0.0,
+                    tax_amount REAL DEFAULT 0.0,
+                    discount_amount REAL DEFAULT 0.0,
+                    deposit_amount REAL DEFAULT 0.0,
+                    currency TEXT DEFAULT 'KES',
+                    payment_status TEXT DEFAULT 'pending',
+                    delivery_id INTEGER,
+                    delivery_location JSONB,
+                    pickup_location JSONB,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """, "Created table: wholesale_orders")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wo_account ON wholesale_orders(account_id)", "Created index: idx_wo_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wo_wholesaler_account ON wholesale_orders(wholesaler_account_id)", "Created index: idx_wo_wholesaler_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wo_status ON wholesale_orders(status)", "Created index: idx_wo_status")
+            _safe("CREATE INDEX IF NOT EXISTS idx_wo_delivery ON wholesale_orders(delivery_id)", "Created index: idx_wo_delivery")
+
+            # Wholesale order line items
+            _safe("""
+                CREATE TABLE IF NOT EXISTS wholesale_order_items (
+                    id SERIAL PRIMARY KEY,
+                    order_id INTEGER NOT NULL REFERENCES wholesale_orders(id) ON DELETE CASCADE,
+                    product_id INTEGER REFERENCES wholesale_products(id) ON DELETE SET NULL,
+                    name TEXT NOT NULL,
+                    sku TEXT,
+                    unit TEXT DEFAULT 'pcs',
+                    quantity REAL NOT NULL,
+                    unit_price REAL NOT NULL,
+                    total REAL NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """, "Created table: wholesale_order_items")
+            _safe("CREATE INDEX IF NOT EXISTS idx_woi_order ON wholesale_order_items(order_id)", "Created index: idx_woi_order")
+            _safe("CREATE INDEX IF NOT EXISTS idx_woi_product ON wholesale_order_items(product_id)", "Created index: idx_woi_product")
+
+            # Rider profiles (rider is also a user with role='rider')
+            _safe("""
+                CREATE TABLE IF NOT EXISTS riders (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    name TEXT NOT NULL,
+                    phone TEXT,
+                    email TEXT,
+                    vehicle_type TEXT DEFAULT 'motorcycle',
+                    license_plate TEXT,
+                    license_number TEXT,
+                    license_image TEXT,
+                    is_verified BOOLEAN DEFAULT FALSE,
+                    verification_status TEXT DEFAULT 'pending',
+                    verification_notes TEXT,
+                    is_online BOOLEAN DEFAULT FALSE,
+                    is_available BOOLEAN DEFAULT FALSE,
+                    current_status TEXT DEFAULT 'offline',
+                    rating REAL DEFAULT 0.0,
+                    completed_deliveries INTEGER DEFAULT 0,
+                    cancellation_rate REAL DEFAULT 0.0,
+                    earnings REAL DEFAULT 0.0,
+                    lat REAL,
+                    lng REAL,
+                    last_location_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """, "Created table: riders")
+            _safe("CREATE INDEX IF NOT EXISTS idx_riders_account ON riders(account_id)", "Created index: idx_riders_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_riders_user ON riders(user_id)", "Created index: idx_riders_user")
+            _safe("CREATE INDEX IF NOT EXISTS idx_riders_status ON riders(is_online, is_available, is_verified)", "Created index: idx_riders_status")
+            _safe("CREATE INDEX IF NOT EXISTS idx_riders_location ON riders(lat, lng)", "Created index: idx_riders_location")
+
+            # Latest rider locations (single latest row per rider via overwrite semantics)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS rider_locations (
+                    id SERIAL PRIMARY KEY,
+                    rider_id INTEGER NOT NULL REFERENCES riders(id) ON DELETE CASCADE,
+                    user_id INTEGER,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    accuracy REAL,
+                    speed REAL,
+                    heading REAL,
+                    timestamp TEXT NOT NULL,
+                    status TEXT DEFAULT 'available',
+                    current_delivery_id INTEGER,
+                    is_fresh BOOLEAN DEFAULT TRUE,
+                    created_at TEXT NOT NULL
+                )
+            """, "Created table: rider_locations")
+            _safe("CREATE INDEX IF NOT EXISTS idx_rl_rider ON rider_locations(rider_id)", "Created index: idx_rl_rider")
+            _safe("CREATE INDEX IF NOT EXISTS idx_rl_delivery ON rider_locations(current_delivery_id)", "Created index: idx_rl_delivery")
+
+            # Deliveries (logistics state machine)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS deliveries (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    wholesale_order_id INTEGER REFERENCES wholesale_orders(id) ON DELETE SET NULL,
+                    rider_id INTEGER REFERENCES riders(id) ON DELETE SET NULL,
+                    rider_account_id TEXT,
+                    status TEXT DEFAULT 'created',
+                    pickup_location JSONB,
+                    dropoff_location JSONB,
+                    route JSONB,
+                    distance REAL,
+                    eta_minutes REAL,
+                    fare REAL DEFAULT 0.0,
+                    commission REAL DEFAULT 0.0,
+                    rider_earnings REAL DEFAULT 0.0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """, "Created table: deliveries")
+            _safe("CREATE INDEX IF NOT EXISTS idx_deliveries_account ON deliveries(account_id)", "Created index: idx_deliveries_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_deliveries_rider ON deliveries(rider_id)", "Created index: idx_deliveries_rider")
+            _safe("CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status)", "Created index: idx_deliveries_status")
+            _safe("CREATE INDEX IF NOT EXISTS idx_deliveries_order ON deliveries(wholesale_order_id)", "Created index: idx_deliveries_order")
+
+            # Delivery event audit trail + tracking points
+            _safe("""
+                CREATE TABLE IF NOT EXISTS delivery_events (
+                    id SERIAL PRIMARY KEY,
+                    delivery_id INTEGER NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+                    status_from TEXT,
+                    status_to TEXT,
+                    actor TEXT,
+                    actor_id INTEGER,
+                    latitude REAL,
+                    longitude REAL,
+                    accuracy REAL,
+                    speed REAL,
+                    heading REAL,
+                    notes TEXT,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TEXT NOT NULL
+                )
+            """, "Created table: delivery_events")
+            _safe("CREATE INDEX IF NOT EXISTS idx_de_delivery ON delivery_events(delivery_id)", "Created index: idx_de_delivery")
+            _safe("CREATE INDEX IF NOT EXISTS idx_de_status_to ON delivery_events(status_to)", "Created index: idx_de_status_to")
+
+            # Payment transactions (modular provider, state machine)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS payment_transactions (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    order_id INTEGER REFERENCES wholesale_orders(id) ON DELETE SET NULL,
+                    delivery_id INTEGER REFERENCES deliveries(id) ON DELETE SET NULL,
+                    amount REAL NOT NULL,
+                    deposit_amount REAL DEFAULT 0.0,
+                    currency TEXT DEFAULT 'KES',
+                    provider TEXT DEFAULT 'manual',
+                    provider_reference TEXT,
+                    provider_payload JSONB DEFAULT '{}'::jsonb,
+                    status TEXT DEFAULT 'pending',
+                    payment_status TEXT DEFAULT 'pending',
+                    verified BOOLEAN DEFAULT FALSE,
+                    verified_at TEXT,
+                    callback_payload JSONB,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """, "Created table: payment_transactions")
+            _safe("CREATE INDEX IF NOT EXISTS idx_pt_account ON payment_transactions(account_id)", "Created index: idx_pt_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_pt_order ON payment_transactions(order_id)", "Created index: idx_pt_order")
+            _safe("CREATE INDEX IF NOT EXISTS idx_pt_status ON payment_transactions(status)", "Created index: idx_pt_status")
+            _safe("CREATE INDEX IF NOT EXISTS idx_pt_provider_ref ON payment_transactions(provider_reference)", "Created index: idx_pt_provider_ref")
+
+            # Settlements (rider earnings / wholesaler payouts)
+            _safe("""
+                CREATE TABLE IF NOT EXISTS settlements (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    rider_id INTEGER REFERENCES riders(id) ON DELETE SET NULL,
+                    delivery_id INTEGER REFERENCES deliveries(id) ON DELETE SET NULL,
+                    transaction_id INTEGER REFERENCES payment_transactions(id) ON DELETE SET NULL,
+                    amount REAL NOT NULL,
+                    currency TEXT DEFAULT 'KES',
+                    provider TEXT DEFAULT 'manual',
+                    provider_reference TEXT,
+                    status TEXT DEFAULT 'pending',
+                    settled_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """, "Created table: settlements")
+            _safe("CREATE INDEX IF NOT EXISTS idx_settlements_account ON settlements(account_id)", "Created index: idx_settlements_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_settlements_status ON settlements(status)", "Created index: idx_settlements_status")
+
+            # Complaints / disputes linked to a transaction
+            _safe("""
+                CREATE TABLE IF NOT EXISTS complaints (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    order_id INTEGER REFERENCES wholesale_orders(id) ON DELETE SET NULL,
+                    delivery_id INTEGER REFERENCES deliveries(id) ON DELETE SET NULL,
+                    rider_id INTEGER REFERENCES riders(id) ON DELETE SET NULL,
+                    wholesaler_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+                    category TEXT NOT NULL,
+                    subject TEXT,
+                    description TEXT,
+                    evidence JSONB DEFAULT '[]',
+                    status TEXT DEFAULT 'open',
+                    resolution_notes TEXT,
+                    resolved_by INTEGER,
+                    resolved_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """, "Created table: complaints")
+            _safe("CREATE INDEX IF NOT EXISTS idx_complaints_account ON complaints(account_id)", "Created index: idx_complaints_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_complaints_order ON complaints(order_id)", "Created index: idx_complaints_order")
+            _safe("CREATE INDEX IF NOT EXISTS idx_complaints_delivery ON complaints(delivery_id)", "Created index: idx_complaints_delivery")
+            _safe("CREATE INDEX IF NOT EXISTS idx_complaints_status ON complaints(status)", "Created index: idx_complaints_status")
+
+            # Ratings / reputation (business & rider), aggregated on read
+            _safe("""
+                CREATE TABLE IF NOT EXISTS ratings (
+                    id SERIAL PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    type TEXT NOT NULL,
+                    subject_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+                    rider_id INTEGER REFERENCES riders(id) ON DELETE SET NULL,
+                    order_id INTEGER REFERENCES wholesale_orders(id) ON DELETE SET NULL,
+                    delivery_id INTEGER REFERENCES deliveries(id) ON DELETE SET NULL,
+                    rating INTEGER NOT NULL,
+                    review TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """, "Created table: ratings")
+            _safe("CREATE INDEX IF NOT EXISTS idx_ratings_account ON ratings(account_id)", "Created index: idx_ratings_account")
+            _safe("CREATE INDEX IF NOT EXISTS idx_ratings_subject ON ratings(subject_account_id, type)", "Created index: idx_ratings_subject")
+            _safe("CREATE INDEX IF NOT EXISTS idx_ratings_rider ON ratings(rider_id)", "Created index: idx_ratings_rider")
+
             logger.info("✅ All migrations completed successfully")
 
             # Release advisory lock after migrations complete
             try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT pg_advisory_unlock(20240814)")
+               with conn.cursor() as cur:
+                   cur.execute("SELECT pg_advisory_unlock(20240814)")
             except Exception as unlock_err:
-                logger.warning(f"Failed to release advisory lock: {unlock_err}")
+               logger.warning(f"Failed to release advisory lock: {unlock_err}")
 
 # ============================================================
 # JSON FILE OPERATIONS
@@ -1108,27 +1435,40 @@ class DataStore:
             'inventory_transactions': os.path.join(self.data_dir, 'inventory_transactions.json'),
             'customers': os.path.join(self.data_dir, 'customers.json'),
             'custom_plan_requests': os.path.join(self.data_dir, 'custom_plan_requests.json'),
-             'email_logs': os.path.join(self.data_dir, 'email_logs.json'),
-             'notification_devices': os.path.join(self.data_dir, 'notification_devices.json'),
-             'notifications': os.path.join(self.data_dir, 'notifications.json'),
-             'messages': os.path.join(self.data_dir, 'messages.json'),
-             'stock_deductions': os.path.join(self.data_dir, 'stock_deductions.json')
-        }
+            'email_logs': os.path.join(self.data_dir, 'email_logs.json'),
+            'notification_devices': os.path.join(self.data_dir, 'notification_devices.json'),
+            'notifications': os.path.join(self.data_dir, 'notifications.json'),
+            'messages': os.path.join(self.data_dir, 'messages.json'),
+            'stock_deductions': os.path.join(self.data_dir, 'stock_deductions.json'),
+            # POSIFY Business Network
+            'wholesalers': os.path.join(self.data_dir, 'wholesalers.json'),
+            'wholesale_products': os.path.join(self.data_dir, 'wholesale_products.json'),
+            'wholesale_orders': os.path.join(self.data_dir, 'wholesale_orders.json'),
+            'wholesale_order_items': os.path.join(self.data_dir, 'wholesale_order_items.json'),
+            'riders': os.path.join(self.data_dir, 'riders.json'),
+            'rider_locations': os.path.join(self.data_dir, 'rider_locations.json'),
+            'deliveries': os.path.join(self.data_dir, 'deliveries.json'),
+            'delivery_events': os.path.join(self.data_dir, 'delivery_events.json'),
+            'payment_transactions': os.path.join(self.data_dir, 'payment_transactions.json'),
+            'settlements': os.path.join(self.data_dir, 'settlements.json'),
+            'complaints': os.path.join(self.data_dir, 'complaints.json'),
+            'ratings': os.path.join(self.data_dir, 'ratings.json'),
+         }
         
         # Initialize empty files
         for filepath in self.files.values():
             if not os.path.exists(filepath):
-                self._write_json(filepath, [])
+               self._write_json(filepath, [])
     
     def _read_json(self, filepath: str) -> List[Dict]:
         """Thread-safe JSON file read"""
         lock = get_file_lock(filepath)
         with lock:
             try:
-                with open(filepath, 'r') as f:
-                    return json.load(f)
+               with open(filepath, 'r') as f:
+                   return json.load(f)
             except (FileNotFoundError, json.JSONDecodeError):
-                return []
+               return []
     
     def _write_json(self, filepath: str, data: List[Dict]):
         """Thread-safe JSON file write"""
@@ -1136,10 +1476,10 @@ class DataStore:
         with lock:
             directory = os.path.dirname(filepath)
             if directory:
-                os.makedirs(directory, exist_ok=True)
+               os.makedirs(directory, exist_ok=True)
             temp_filepath = f"{filepath}.tmp"
             with open(temp_filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, separators=(',', ':'), ensure_ascii=True)
+               json.dump(data, f, separators=(',', ':'), ensure_ascii=True)
             os.replace(temp_filepath, filepath)
     
     # ============================================================
@@ -1188,23 +1528,23 @@ class DataStore:
 
         if self.use_postgres:
             with self._pg_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    conditions = [f"{field} = %s"]
-                    params = [value]
-                    if effective_account_id and table != 'accounts':
-                        conditions.append("account_id = %s")
-                        params.append(effective_account_id)
-                    query = f"SELECT * FROM {table} WHERE {' AND '.join(conditions)}"
-                    cur.execute(query, params)
-                    return cur.fetchall()
+               with conn.cursor(row_factory=dict_row) as cur:
+                   conditions = [f"{field} = %s"]
+                   params = [value]
+                   if effective_account_id and table != 'accounts':
+                       conditions.append("account_id = %s")
+                       params.append(effective_account_id)
+                   query = f"SELECT * FROM {table} WHERE {' AND '.join(conditions)}"
+                   cur.execute(query, params)
+                   return cur.fetchall()
         else:
             filepath = self.files.get(table)
             if not filepath:
-                return []
+               return []
             all_items = self._read_json(filepath)
             items = [item for item in all_items if item.get(field) == value]
             if effective_account_id and table != 'accounts':
-                items = [item for item in items if item.get('account_id') == effective_account_id]
+               items = [item for item in items if item.get('account_id') == effective_account_id]
             return items
     
     def get_paginated(self, table: str, account_id: Optional[str] = None, page: int = 1, limit: int = 20, search: Optional[str] = None, sort: Optional[str] = None, search_fields: Optional[list] = None) -> Dict[str, Any]:
@@ -1235,54 +1575,54 @@ class DataStore:
         """PostgreSQL paginated query"""
         with self._pg_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                # Build WHERE clause
-                where_clauses = []
-                params = []
-                
-                if account_id and table != 'accounts':
-                    where_clauses.append("account_id = %s")
-                    params.append(account_id)
-                
-                if search and search_fields:
-                    search_conditions = []
-                    for field in search_fields:
-                        search_conditions.append(f"{field} ILIKE %s")
-                        params.append(f"%{search}%")
-                    where_clauses.append(f"({' OR '.join(search_conditions)})")
-                
-                where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-                
-                # Count total
-                count_query = f"SELECT COUNT(*) as total FROM {table} {where_sql}"
-                cur.execute(count_query, params)
-                total = cur.fetchone()['total']
-                
-                # Build ORDER BY
-                order_sql = ""
-                if sort:
-                    reverse = sort.startswith("-")
-                    sort_field = sort[1:] if reverse else sort
-                    if sort_field not in self.ALLOWED_SORT_FIELDS:
-                        sort_field = "id"
-                    order_sql = f"ORDER BY {sort_field} {'DESC' if reverse else 'ASC'}"
-                else:
-                    order_sql = "ORDER BY id DESC"
-                
-                # Paginated query
-                offset = (page - 1) * limit
-                query = f"SELECT * FROM {table} {where_sql} {order_sql} LIMIT %s OFFSET %s"
-                params.extend([limit, offset])
-                cur.execute(query, params)
-                items = cur.fetchall()
-                
-                total_pages = max(1, (total + limit - 1) // limit)
-                return {
-                    "items": items,
-                    "total": total,
-                    "page": page,
-                    "limit": limit,
-                    "total_pages": total_pages,
-                }
+               # Build WHERE clause
+               where_clauses = []
+               params = []
+               
+               if account_id and table != 'accounts':
+                   where_clauses.append("account_id = %s")
+                   params.append(account_id)
+               
+               if search and search_fields:
+                   search_conditions = []
+                   for field in search_fields:
+                       search_conditions.append(f"{field} ILIKE %s")
+                       params.append(f"%{search}%")
+                   where_clauses.append(f"({' OR '.join(search_conditions)})")
+               
+               where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+               
+               # Count total
+               count_query = f"SELECT COUNT(*) as total FROM {table} {where_sql}"
+               cur.execute(count_query, params)
+               total = cur.fetchone()['total']
+               
+               # Build ORDER BY
+               order_sql = ""
+               if sort:
+                   reverse = sort.startswith("-")
+                   sort_field = sort[1:] if reverse else sort
+                   if sort_field not in self.ALLOWED_SORT_FIELDS:
+                       sort_field = "id"
+                   order_sql = f"ORDER BY {sort_field} {'DESC' if reverse else 'ASC'}"
+               else:
+                   order_sql = "ORDER BY id DESC"
+               
+               # Paginated query
+               offset = (page - 1) * limit
+               query = f"SELECT * FROM {table} {where_sql} {order_sql} LIMIT %s OFFSET %s"
+               params.extend([limit, offset])
+               cur.execute(query, params)
+               items = cur.fetchall()
+               
+               total_pages = max(1, (total + limit - 1) // limit)
+               return {
+                   "items": items,
+                   "total": total,
+                   "page": page,
+                   "limit": limit,
+                   "total_pages": total_pages,
+               }
     
     def _json_get_paginated(self, table: str, account_id: Optional[str], page: int, limit: int, search: Optional[str], sort: Optional[str], search_fields: Optional[list]) -> Dict[str, Any]:
         """JSON file paginated query (fallback)"""
@@ -1301,10 +1641,10 @@ class DataStore:
             search_lower = search.lower()
             filtered = []
             for item in all_items:
-                for field in search_fields:
-                    if str(item.get(field, '')).lower().find(search_lower) != -1:
-                        filtered.append(item)
-                        break
+               for field in search_fields:
+                   if str(item.get(field, '')).lower().find(search_lower) != -1:
+                       filtered.append(item)
+                       break
             all_items = filtered
         
         total = len(all_items)
@@ -1344,38 +1684,38 @@ class DataStore:
             return []
         for field in filters.keys():
             if field not in self.ALLOWED_FILTER_FIELDS:
-                logger.warning(f"Blocked query on disallowed field: {field}")
-                return []
+               logger.warning(f"Blocked query on disallowed field: {field}")
+               return []
         # Ensure account_id is always part of filtering for tenant isolation
         effective_account_id = account_id or filters.get('account_id') or filters.get('accountId')
 
         if self.use_postgres:
             with self._pg_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    conditions = []
-                    values = []
-                    for field, value in filters.items():
-                        conditions.append(f"{field} = %s")
-                        values.append(value)
-                    if effective_account_id and table != 'accounts':
-                        conditions.append("account_id = %s")
-                        values.append(effective_account_id)
-                    if not conditions:
-                        return []
-                    query = f"SELECT * FROM {table} WHERE " + " AND ".join(conditions)
-                    cur.execute(query, values)
-                    return cur.fetchall()
+               with conn.cursor(row_factory=dict_row) as cur:
+                   conditions = []
+                   values = []
+                   for field, value in filters.items():
+                       conditions.append(f"{field} = %s")
+                       values.append(value)
+                   if effective_account_id and table != 'accounts':
+                       conditions.append("account_id = %s")
+                       values.append(effective_account_id)
+                   if not conditions:
+                       return []
+                   query = f"SELECT * FROM {table} WHERE " + " AND ".join(conditions)
+                   cur.execute(query, values)
+                   return cur.fetchall()
         else:
             filepath = self.files.get(table)
             if not filepath:
-                return []
+               return []
             all_items = self._read_json(filepath)
             results = []
             for item in all_items:
-                if all(item.get(k) == v for k, v in filters.items()):
-                    if effective_account_id and table != 'accounts' and item.get('account_id') != effective_account_id:
-                        continue
-                    results.append(item)
+               if all(item.get(k) == v for k, v in filters.items()):
+                   if effective_account_id and table != 'accounts' and item.get('account_id') != effective_account_id:
+                       continue
+                   results.append(item)
             return results
 
     def create(self, table: str, data: Dict) -> Dict:
@@ -1407,10 +1747,10 @@ class DataStore:
         else:
             filepath = self.files.get(table)
             if not filepath:
-                return 1
+               return 1
             data = self._read_json(filepath)
             if not data:
-                return 1
+               return 1
             return max(item.get('id', 0) for item in data) + 1
     
     # ============================================================
@@ -1426,22 +1766,22 @@ class DataStore:
             self._pg_local.conn = conn
         else:
             try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
+               with conn.cursor() as cur:
+                   cur.execute("SELECT 1")
             except Exception:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                conn = psycopg.connect(self.pg_url)
-                self._pg_local.conn = conn
+               try:
+                   conn.close()
+               except Exception:
+                   pass
+               conn = psycopg.connect(self.pg_url)
+               self._pg_local.conn = conn
         try:
             yield conn
         except Exception:
             try:
-                conn.close()
+               conn.close()
             except Exception:
-                pass
+               pass
             self._pg_local.conn = None
             raise
     
@@ -1449,74 +1789,74 @@ class DataStore:
         """PostgreSQL: Get all records"""
         with self._pg_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                if account_id and table != 'accounts':
-                    cur.execute(f"SELECT * FROM {table} WHERE account_id = %s ORDER BY id", (account_id,))
-                else:
-                    cur.execute(f"SELECT * FROM {table} ORDER BY id")
-                return cur.fetchall()
+               if account_id and table != 'accounts':
+                   cur.execute(f"SELECT * FROM {table} WHERE account_id = %s ORDER BY id", (account_id,))
+               else:
+                   cur.execute(f"SELECT * FROM {table} ORDER BY id")
+               return cur.fetchall()
     
     def _pg_get_by_id(self, table: str, id: int, account_id: Optional[str] = None) -> Optional[Dict]:
         """PostgreSQL: Get record by ID"""
         with self._pg_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                if account_id and table != 'accounts':
-                    cur.execute(f"SELECT * FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
-                else:
-                    cur.execute(f"SELECT * FROM {table} WHERE id = %s", (id,))
-                return cur.fetchone()
+               if account_id and table != 'accounts':
+                   cur.execute(f"SELECT * FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
+               else:
+                   cur.execute(f"SELECT * FROM {table} WHERE id = %s", (id,))
+               return cur.fetchone()
     
     def _pg_create(self, table: str, data: Dict) -> Dict:
         """PostgreSQL: Create record"""
         with self._pg_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                columns = ', '.join(data.keys())
-                placeholders = ', '.join(['%s'] * len(data))
-                values = []
-                for k, v in data.items():
-                    if isinstance(v, (dict, list)):
-                        logger.debug("Serializing dict/list for %s.%s: %s", table, k, type(v).__name__)
-                        values.append(json.dumps(v))
-                    else:
-                        values.append(v)
-                query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING *"
-                cur.execute(query, values)
-                conn.commit()
-                return cur.fetchone()
+               columns = ', '.join(data.keys())
+               placeholders = ', '.join(['%s'] * len(data))
+               values = []
+               for k, v in data.items():
+                   if isinstance(v, (dict, list)):
+                       logger.debug("Serializing dict/list for %s.%s: %s", table, k, type(v).__name__)
+                       values.append(json.dumps(v))
+                   else:
+                       values.append(v)
+               query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING *"
+               cur.execute(query, values)
+               conn.commit()
+               return cur.fetchone()
     
     def _pg_update(self, table: str, id: int, data: Dict, account_id: Optional[str] = None) -> bool:
         """PostgreSQL: Update record"""
         with self._pg_connection() as conn:
             with conn.cursor() as cur:
-                set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
-                values = []
-                for k, v in data.items():
-                    if isinstance(v, (dict, list)):
-                        logger.debug("Serializing dict/list for UPDATE %s.%s: %s", table, k, type(v).__name__)
-                        values.append(json.dumps(v))
-                    else:
-                        values.append(v)
-                values.append(id)
-                
-                if account_id and table != 'accounts':
-                    query = f"UPDATE {table} SET {set_clause} WHERE id = %s AND account_id = %s"
-                    values.append(account_id)
-                else:
-                    query = f"UPDATE {table} SET {set_clause} WHERE id = %s"
-                
-                cur.execute(query, values)
-                conn.commit()
-                return cur.rowcount > 0
+               set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
+               values = []
+               for k, v in data.items():
+                   if isinstance(v, (dict, list)):
+                       logger.debug("Serializing dict/list for UPDATE %s.%s: %s", table, k, type(v).__name__)
+                       values.append(json.dumps(v))
+                   else:
+                       values.append(v)
+               values.append(id)
+               
+               if account_id and table != 'accounts':
+                   query = f"UPDATE {table} SET {set_clause} WHERE id = %s AND account_id = %s"
+                   values.append(account_id)
+               else:
+                   query = f"UPDATE {table} SET {set_clause} WHERE id = %s"
+               
+               cur.execute(query, values)
+               conn.commit()
+               return cur.rowcount > 0
     
     def _pg_delete(self, table: str, id: int, account_id: Optional[str] = None) -> bool:
         """PostgreSQL: Delete record"""
         with self._pg_connection() as conn:
             with conn.cursor() as cur:
-                if account_id and table != 'accounts':
-                    cur.execute(f"DELETE FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
-                else:
-                    cur.execute(f"DELETE FROM {table} WHERE id = %s", (id,))
-                conn.commit()
-                return cur.rowcount > 0
+               if account_id and table != 'accounts':
+                   cur.execute(f"DELETE FROM {table} WHERE id = %s AND account_id = %s", (id, account_id))
+               else:
+                   cur.execute(f"DELETE FROM {table} WHERE id = %s", (id,))
+               conn.commit()
+               return cur.rowcount > 0
     
     # ============================================================
     # JSON FILE IMPLEMENTATIONS
@@ -1539,7 +1879,7 @@ class DataStore:
         data = self._json_get_all(table, account_id)
         for item in data:
             if item.get('id') == id:
-                return item
+               return item
         return None
     
     def _json_create(self, table: str, data: Dict) -> Dict:
@@ -1570,11 +1910,11 @@ class DataStore:
         
         for i, item in enumerate(all_data):
             if item.get('id') == id:
-                if account_id and item.get('account_id') != account_id:
-                    continue
-                all_data[i].update(data)
-                updated = True
-                break
+               if account_id and item.get('account_id') != account_id:
+                   continue
+               all_data[i].update(data)
+               updated = True
+               break
         
         if updated:
             self._write_json(filepath, all_data)
@@ -1609,47 +1949,47 @@ class DataStore:
         """Get user by email"""
         if self.use_postgres:
             with self._pg_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-                    return cur.fetchone()
+               with conn.cursor(row_factory=dict_row) as cur:
+                   cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                   return cur.fetchone()
         else:
             normalized_email = (email or '').strip().lower()
             users = self._read_json(self.files['users'])
             for user in users:
-                if (user.get('email') or '').strip().lower() == normalized_email:
-                    return user
+               if (user.get('email') or '').strip().lower() == normalized_email:
+                   return user
             return None
     
     def get_account_by_email(self, owner_email: str) -> Optional[Dict]:
         """Get account by owner email"""
         if self.use_postgres:
             with self._pg_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute("SELECT * FROM accounts WHERE owner_email = %s", (owner_email,))
-                    return cur.fetchone()
+               with conn.cursor(row_factory=dict_row) as cur:
+                   cur.execute("SELECT * FROM accounts WHERE owner_email = %s", (owner_email,))
+                   return cur.fetchone()
         else:
             accounts = self._read_json(self.files['accounts'])
             for account in accounts:
-                if account.get('owner_email') == owner_email:
-                    return account
+               if account.get('owner_email') == owner_email:
+                   return account
             return None
     
     def get_sales_by_date_range(self, account_id: str, start_date: str, end_date: str) -> List[Dict]:
         """Get sales within a date range"""
         if self.use_postgres:
             with self._pg_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute("""
-                        SELECT * FROM sales 
-                        WHERE account_id = %s AND created_at >= %s AND created_at <= %s
-                        ORDER BY created_at DESC
-                    """, (account_id, start_date, end_date))
-                    return cur.fetchall()
+               with conn.cursor(row_factory=dict_row) as cur:
+                   cur.execute("""
+                       SELECT * FROM sales 
+                       WHERE account_id = %s AND created_at >= %s AND created_at <= %s
+                       ORDER BY created_at DESC
+                   """, (account_id, start_date, end_date))
+                   return cur.fetchall()
         else:
             sales = self._json_get_all('sales', account_id)
             return [
-                sale for sale in sales 
-                if start_date <= sale.get('created_at', '') <= end_date
+               sale for sale in sales 
+               if start_date <= sale.get('created_at', '') <= end_date
             ]
     
     def batch_update_stock(self, updates: List[Tuple[int, float, str]]) -> bool:
@@ -1661,13 +2001,13 @@ class DataStore:
         """
         if self.use_postgres:
             with self._pg_connection() as conn:
-                with conn.cursor() as cur:
-                    for product_id, quantity, account_id in updates:
-                        cur.execute("""
-                            UPDATE products SET quantity = %s, updated_at = %s 
-                            WHERE id = %s AND account_id = %s
-                        """, (quantity, datetime.now().isoformat(), product_id, account_id))
-                    conn.commit()
+               with conn.cursor() as cur:
+                   for product_id, quantity, account_id in updates:
+                       cur.execute("""
+                           UPDATE products SET quantity = %s, updated_at = %s 
+                           WHERE id = %s AND account_id = %s
+                       """, (quantity, datetime.now().isoformat(), product_id, account_id))
+                   conn.commit()
             return True
         else:
             filepath = self.files['products']
@@ -1676,10 +2016,10 @@ class DataStore:
             update_map = {(pid, aid): qty for pid, qty, aid in updates}
             
             for product in products:
-                key = (product.get('id'), product.get('account_id'))
-                if key in update_map:
-                    product['quantity'] = update_map[key]
-                    product['updated_at'] = datetime.now().isoformat()
+               key = (product.get('id'), product.get('account_id'))
+               if key in update_map:
+                   product['quantity'] = update_map[key]
+                   product['updated_at'] = datetime.now().isoformat()
             
             self._write_json(filepath, products)
             return True
@@ -1693,27 +2033,27 @@ class DataStore:
         """
         if self.use_postgres:
             with self._pg_connection() as conn:
-                with conn.cursor() as cur:
-                    for material_id, quantity, account_id in updates:
-                        cur.execute("""
-                            UPDATE raw_materials SET quantity = %s, updated_at = %s
-                            WHERE id = %s AND account_id = %s
-                        """, (quantity, datetime.now().isoformat(), material_id, account_id))
-                    conn.commit()
+               with conn.cursor() as cur:
+                   for material_id, quantity, account_id in updates:
+                       cur.execute("""
+                           UPDATE raw_materials SET quantity = %s, updated_at = %s
+                           WHERE id = %s AND account_id = %s
+                       """, (quantity, datetime.now().isoformat(), material_id, account_id))
+                   conn.commit()
             return True
         else:
             filepath = self.files.get('raw_materials')
             if not filepath:
-                return False
+               return False
 
             materials = self._read_json(filepath)
             update_map = {(mid, aid): qty for mid, qty, aid in updates}
 
             for material in materials:
-                key = (material.get('id'), material.get('account_id'))
-                if key in update_map:
-                    material['quantity'] = update_map[key]
-                    material['updated_at'] = datetime.now().isoformat()
+               key = (material.get('id'), material.get('account_id'))
+               if key in update_map:
+                   material['quantity'] = update_map[key]
+                   material['updated_at'] = datetime.now().isoformat()
 
             self._write_json(filepath, materials)
             return True
@@ -1722,18 +2062,18 @@ class DataStore:
         """Get active (not clocked out) time entry for user"""
         if self.use_postgres:
             with self._pg_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute("""
-                        SELECT * FROM time_entries 
-                        WHERE user_id = %s AND account_id = %s AND clock_out_time IS NULL
-                        ORDER BY id DESC LIMIT 1
-                    """, (user_id, account_id))
-                    return cur.fetchone()
+               with conn.cursor(row_factory=dict_row) as cur:
+                   cur.execute("""
+                       SELECT * FROM time_entries 
+                       WHERE user_id = %s AND account_id = %s AND clock_out_time IS NULL
+                       ORDER BY id DESC LIMIT 1
+                   """, (user_id, account_id))
+                   return cur.fetchone()
         else:
             entries = self._json_get_all('time_entries', account_id)
             for entry in reversed(entries):
-                if entry.get('user_id') == user_id and not entry.get('clock_out_time'):
-                    return entry
+               if entry.get('user_id') == user_id and not entry.get('clock_out_time'):
+                   return entry
             return None
     
     def execute_sql(self, sql: str) -> Optional[List[Dict]]:
@@ -1746,12 +2086,12 @@ class DataStore:
             return None
         try:
             with self._pg_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute(sql)
-                    conn.commit()
-                    if cur.description:
-                        return cur.fetchall()
-                    return None
+               with conn.cursor(row_factory=dict_row) as cur:
+                   cur.execute(sql)
+                   conn.commit()
+                   if cur.description:
+                       return cur.fetchall()
+                   return None
         except Exception as e:
             logger.error(f"execute_sql failed: {e}")
             return None

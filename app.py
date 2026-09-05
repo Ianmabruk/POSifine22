@@ -5295,6 +5295,69 @@ def create_app() -> Flask:
         datastore.delete("vendors", vendor_id, account_id)
         return jsonify({"success": True}), 200
 
+    # ============================================================
+    # POSIFY BUSINESS NETWORK: Marketplace, Rider Network & Logistics
+    # ============================================================
+    from geo_proxy import config as geo_config
+
+    _GEO_CONFIG = geo_config()
+
+    try:
+        from marketplace import register_marketplace_routes
+        register_marketplace_routes(app, datastore, auth_manager, sync_manager,
+                                    notify_service, cache)
+    except Exception as e:
+        logger.error("Failed to register marketplace routes: %s", e, exc_info=True)
+
+    try:
+        from rider_network import register_rider_routes
+        register_rider_routes(app, datastore, auth_manager, sync_manager,
+                              notify_service, cache, geo_proxy=__import__("geo_proxy"))
+    except Exception as e:
+        logger.error("Failed to register rider network routes: %s", e, exc_info=True)
+
+    try:
+        from realtime_tracking import register_tracking_routes
+        register_tracking_routes(sock, datastore, auth_manager, sync_manager,
+                                 notify_service, geo_proxy=__import__("geo_proxy"))
+    except Exception as e:
+        logger.error("Failed to register tracking websocket: %s", e, exc_info=True)
+
+    try:
+        from payments_settlement import register_payment_routes
+        register_payment_routes(app, datastore, auth_manager, sync_manager,
+                                notify_service, cache)
+    except Exception as e:
+        logger.error("Failed to register payment routes: %s", e, exc_info=True)
+
+    try:
+        from complaints import register_complaint_routes
+        register_complaint_routes(app, datastore, auth_manager, sync_manager,
+                                  notify_service, cache)
+    except Exception as e:
+        logger.error("Failed to register complaint routes: %s", e, exc_info=True)
+
+    try:
+        from ratings import register_rating_routes
+        register_rating_routes(app, datastore, auth_manager, sync_manager,
+                               notify_service, cache)
+    except Exception as e:
+        logger.error("Failed to register rating routes: %s", e, exc_info=True)
+
+    try:
+        from network_notifications import register_notification_api
+        register_notification_api(app, datastore, auth_manager)
+    except Exception as e:
+        logger.error("Failed to register notification API: %s", e, exc_info=True)
+
+    try:
+        from geo_proxy import register_geo_routes
+        register_geo_routes(app, auth_manager)
+    except Exception as e:
+        logger.error("Failed to register geography routes: %s", e, exc_info=True)
+
+    logger.info("POSIFY Business Network modules loaded (geo=%s)", _GEO_CONFIG)
+
     return app
 
 
